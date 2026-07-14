@@ -3,7 +3,9 @@ name: Archive GitHub Metrics
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'
+    # 00:17 UTC (~08:17 Taipei); offset from the top of the hour to avoid the
+    # 00:00 UTC scheduling congestion that was delaying runs by 2-4 hours.
+    - cron: '17 0 * * *'
 
 permissions:
   contents: write
@@ -170,17 +172,12 @@ jobs:
             ];
             fs.writeFileSync(path.join(latestDir, 'release-assets.csv'), releaseRows.join('\n') + '\n');
 
-      - name: Commit archived metrics
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add data/metrics
-
-          if git diff --cached --quiet --exit-code; then
-            echo "No metrics changes to commit"
-            exit 0
-          fi
-
-          git commit -m "chore: archive github metrics"
-          git push
+      - name: Publish metrics to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./data/metrics
+          user_name: 'github-actions[bot]'
+          user_email: '41898282+github-actions[bot]@users.noreply.github.com'
+          commit_message: 'chore: publish github metrics'

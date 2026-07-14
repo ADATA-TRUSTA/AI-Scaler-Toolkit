@@ -1,6 +1,6 @@
 */__pycache__/*
 
-# Environment variables (敏感資訊)
+# Environment variables (sensitive data)
 .env
 
 # Python
@@ -35,3 +35,6 @@ Trusta-AST-LLM-wiki/.obsidian/
 # Logs
 *.log
 logs/
+
+# GitHub metrics archive (published to gh-pages by CI, not tracked on code branches)
+data/metrics/
