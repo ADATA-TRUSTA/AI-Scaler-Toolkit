@@ -178,6 +178,10 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
           publish_dir: ./data/metrics
+          # Preserve historical snapshots already on gh-pages. Without this,
+          # peaceiris removes any file not present in publish_dir on each run,
+          # so only the current day's snapshot would survive.
+          keep_files: true
           user_name: 'github-actions[bot]'
           user_email: '41898282+github-actions[bot]@users.noreply.github.com'
           commit_message: 'chore: publish github metrics'
