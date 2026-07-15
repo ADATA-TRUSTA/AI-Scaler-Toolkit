@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-Scaler-Toolkit · Metrics Archive</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --border: #d1d9e0;
+    --card: #f6f8fa;
+    --accent: #0969da;
+    --accent-fg: #ffffff;
+    --shadow: 0 1px 3px rgba(31,35,40,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #e6edf3;
+      --muted: #9198a1;
+      --border: #2f353d;
+      --card: #161b22;
+      --accent: #4493f8;
+      --accent-fg: #0d1117;
+      --shadow: 0 1px 3px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+  header h1 { font-size: 1.6rem; margin: 0 0 .35rem; letter-spacing: -.01em; }
+  header p { margin: 0; color: var(--muted); }
+  header .repo { font-size: .85rem; margin-top: .5rem; }
+  header .repo a { color: var(--accent); text-decoration: none; }
+  header .repo a:hover { text-decoration: underline; }
+  h2 { font-size: 1.1rem; margin: 2.4rem 0 .9rem; padding-bottom: .4rem; border-bottom: 1px solid var(--border); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .75rem; }
+  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: .9rem 1rem; box-shadow: var(--shadow); }
+  .stat .n { font-size: 1.5rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: .78rem; color: var(--muted); margin-top: .15rem; }
+  .files { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .6rem; list-style: none; padding: 0; margin: 0; }
+  .files a {
+    display: flex; align-items: center; gap: .55rem;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: .7rem .85rem; text-decoration: none; color: var(--fg); font-size: .9rem;
+    transition: border-color .12s;
+  }
+  .files a:hover { border-color: var(--accent); }
+  .files .ext { font-size: .68rem; text-transform: uppercase; letter-spacing: .04em; color: var(--accent-fg); background: var(--accent); border-radius: 4px; padding: .12rem .4rem; font-weight: 600; }
+  .snap-list { display: flex; flex-wrap: wrap; gap: .45rem; padding: 0; margin: 0; list-style: none; }
+  .snap-list a {
+    font-variant-numeric: tabular-nums; font-size: .82rem;
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    padding: .35rem .6rem; text-decoration: none; color: var(--fg);
+    transition: border-color .12s;
+  }
+  .snap-list a:hover { border-color: var(--accent); color: var(--accent); }
+  .meta { color: var(--muted); font-size: .82rem; margin: .3rem 0 0; }
+  footer { margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .8rem; }
+  code { background: var(--card); border: 1px solid var(--border); border-radius: 5px; padding: .1rem .35rem; font-size: .85em; }
+  .loading { color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>AI-Scaler-Toolkit — Metrics Archive</h1>
+    <p>GitHub traffic &amp; release download metrics, archived daily.</p>
+    <p class="repo">Repository:
+      <a href="https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit" id="repo-link">ADATA-TRUSTA/AI-Scaler-Toolkit</a>
+    </p>
+  </header>
+
+  <h2>Latest snapshot</h2>
+  <div class="stats" id="stats">
+    <p class="loading">Loading latest metrics…</p>
+  </div>
+  <p class="meta" id="generated"></p>
+
+  <h2>Latest data files</h2>
+  <ul class="files">
+    <li><a href="./latest/metrics-summary.json"><span class="ext">json</span> metrics-summary</a></li>
+    <li><a href="./latest/traffic.json"><span class="ext">json</span> traffic</a></li>
+    <li><a href="./latest/releases.json"><span class="ext">json</span> releases</a></li>
+    <li><a href="./latest/traffic-daily.csv"><span class="ext">csv</span> traffic-daily</a></li>
+    <li><a href="./latest/release-assets.csv"><span class="ext">csv</span> release-assets</a></li>
+  </ul>
+
+  <h2>Daily snapshots</h2>
+  <ul class="snap-list" id="snapshots">
+    <li class="loading">Loading snapshot list…</li>
+  </ul>
+
+  <footer>
+    Published automatically from the <code>gh-pages</code> branch by the
+    <a href="https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/blob/main/.github/workflows/metrics-backup.yml" style="color:var(--accent)">Archive GitHub Metrics</a>
+    workflow. Data files are served as raw JSON/CSV — link to them directly for downstream use.
+  </footer>
+</div>
+
+<script>
+  // First snapshot ever archived; snapshot links are generated from here up to
+  // the latest snapshot's date, so new days appear automatically with no edits.
+  const FIRST_SNAPSHOT = "2026-06-23";
+  const nf = new Intl.NumberFormat("en-US");
+
+  function fmtDate(iso) {
+    const d = new Date(iso);
+    return isNaN(d) ? iso : d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+  }
+
+  function stat(n, label) {
+    return `<div class="stat"><div class="n">${n}</div><div class="l">${label}</div></div>`;
+  }
+
+  function datesFrom(startStr, endStr) {
+    const out = [];
+    const end = new Date(endStr + "T00:00:00Z");
+    let cur = new Date(startStr + "T00:00:00Z");
+    while (cur <= end) {
+      out.push(cur.toISOString().slice(0, 10));
+      cur.setUTCDate(cur.getUTCDate() + 1);
+    }
+    return out;
+  }
+
+  fetch("./latest/metrics-summary.json", { cache: "no-store" })
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(data => {
+      const repo = data.repository || "ADATA-TRUSTA/AI-Scaler-Toolkit";
+      document.getElementById("repo-link").textContent = repo;
+      document.getElementById("repo-link").href = "https://github.com/" + repo;
+
+      const t = data.traffic || {};
+      const rel = data.releases || {};
+      const views = t.views || {}, clones = t.clones || {};
+      document.getElementById("stats").innerHTML =
+        stat(nf.format(views.count ?? 0), "Views (14d)") +
+        stat(nf.format(views.uniques ?? 0), "Unique visitors") +
+        stat(nf.format(clones.count ?? 0), "Clones (14d)") +
+        stat(nf.format(clones.uniques ?? 0), "Unique cloners") +
+        stat(nf.format(rel.release_count ?? 0), "Releases") +
+        stat(nf.format(rel.total_asset_downloads ?? 0), "Asset downloads");
+
+      const genIso = data.generated_at || "";
+      document.getElementById("generated").textContent =
+        genIso ? "Generated at " + fmtDate(genIso) : "";
+
+      // Build snapshot links from the first archive up to the latest snapshot date.
+      const latestDate = (genIso || "").slice(0, 10) || FIRST_SNAPSHOT;
+      const dates = datesFrom(FIRST_SNAPSHOT, latestDate).reverse();
+      document.getElementById("snapshots").innerHTML =
+        dates.map(d => `<li><a href="./snapshots/${d}.json">${d}</a></li>`).join("");
+    })
+    .catch(err => {
+      document.getElementById("stats").innerHTML =
+        `<p class="loading">Could not load latest metrics (${err.message}). Browse files directly under <code>latest/</code> and <code>snapshots/</code>.</p>`;
+      document.getElementById("snapshots").innerHTML =
+        `<li class="loading">Snapshot list unavailable — open <code>snapshots/YYYY-MM-DD.json</code> directly.</li>`;
+    });
+</script>
+</body>
+</html>
