@@ -434,7 +434,7 @@
             <pre><code># 串流對話 (Python)
 import httpx, json
 
-url = "http://localhost:5000/v1/chat/completions"
+url = "http://localhost:8000/v1/chat/completions"
 payload = {
     "model": "Qwen/Qwen3-4B",
     "messages": [
@@ -534,7 +534,7 @@ payload = {
                     </tr>
                     <tr>
                         <td><code>service/model_registry.py</code></td>
-                        <td><strong>模型登錄</strong>。管理可用模型清單（base/finetuned/gguf），儲存於 <code>service/configs/models_registry.json</code>。</td>
+                        <td><strong>模型登錄</strong>。管理可用模型清單（base/finetuned/llama_gguf），儲存於 <code>service/configs/models_registry.json</code>。</td>
                     </tr>
                     <tr>
                         <td><code>service/download_manager.py</code></td>
@@ -584,7 +584,7 @@ payload = {
                 <li>Client 發送 <code>POST /v1/chat/completions</code>（帶 <code>messages</code>, <code>stream=True</code>, <code>session_id</code>）。</li>
                 <li><code>app.py</code> 執行 Prompt 組裝：
                     <ul>
-                        <li>若有 <code>session_id</code>，透過 <code>session_manager</code> 取得歷史（最多 6 輪）。</li>
+                        <li>若有 <code>session_id</code>，透過 <code>session_manager</code> 取得歷史（最多 6 則訊息，約 3 輪對話）。</li>
                         <li>解析 <code>enable_thinking</code> 並套用 Model-aware 生成參數（如 Qwen3.5 自動調整 temperature/top_p/repetition_penalty）。</li>
                     </ul>
                 </li>
@@ -630,7 +630,7 @@ payload = {
 
             <h3>InferenceConfig — vLLM 引擎載入範例</h3>
             <pre><code>{
-  "model_name": "Qwen/Qwen3-8B-Instruct",
+  "model_name": "Qwen/Qwen3-8B",
   "engine": "vllm",
   "vllm_gpu_memory_utilization": 0.85,
   "vllm_max_model_len": 8192,
@@ -766,7 +766,7 @@ payload = {
                 <p><strong>解決方案:</strong></p>
                 <ul>
                     <li>服務啟動時會自動執行 <code>sweep_stale_vllm_processes()</code> 清理殘留進程。</li>
-                    <li>手動確認端口占用：<code>lsof -i :8000</code>，必要時 <code>kill -9 {PID}</code>。</li>
+                    <li>手動確認端口占用：<code>lsof -i :5000</code>（vLLM 預設埠 <code>VLLM_PORT</code>），必要時 <code>kill -9 {PID}</code>。</li>
                     <li>重啟 FastAPI 服務後再嘗試載入。</li>
                 </ul>
             </div>

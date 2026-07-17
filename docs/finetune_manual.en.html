@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fine-tune Service User Manual - Trusta AST Backend</title>
+    <style>
+        :root {
+            --primary-color: #7c3aed;
+            --secondary-color: #5b21b6;
+            --bg-color: #f8fafc;
+            --text-color: #334155;
+            --code-bg: #1e293b;
+            --code-text: #e2e8f0;
+            --border-color: #e2e8f0;
+            --warning-color: #d97706;
+            --success-color: #16a34a;
+            --danger-color: #dc2626;
+            --note-bg: #f5f3ff;
+            --note-border: #7c3aed;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: white;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            min-height: 100vh;
+        }
+
+        header {
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        h1 {
+            color: var(--primary-color);
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        h2 {
+            color: var(--secondary-color);
+            border-left: 5px solid var(--primary-color);
+            padding-left: 1rem;
+            margin-top: 3rem;
+        }
+
+        h3 {
+            color: #475569;
+            margin-top: 2rem;
+        }
+
+        code {
+            font-family: 'Consolas', 'Monaco', monospace;
+            background-color: #f3e8ff;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            color: #6d28d9;
+        }
+
+        pre {
+            background-color: var(--code-bg);
+            color: var(--code-text);
+            padding: 1.5rem;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+
+        pre code {
+            background-color: transparent;
+            color: inherit;
+            padding: 0;
+        }
+
+        .note {
+            background-color: var(--note-bg);
+            border-left: 4px solid var(--note-border);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .warning {
+            background-color: #fffbeb;
+            border-left: 4px solid var(--warning-color);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .success {
+            background-color: #f0fdf4;
+            border-left: 4px solid var(--success-color);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .danger {
+            background-color: #fef2f2;
+            border-left: 4px solid var(--danger-color);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-left: 0.5rem;
+        }
+
+        .badge-lora      { background: #ede9fe; color: #5b21b6; }
+        .badge-qlora     { background: #fce7f3; color: #9d174d; }
+        .badge-full      { background: #fef3c7; color: #92400e; }
+        .badge-sft       { background: #dcfce7; color: #166534; }
+        .badge-deepspeed { background: #e0f2fe; color: #075985; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+        }
+
+        th, td {
+            border: 1px solid var(--border-color);
+            padding: 0.75rem;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f5f3ff;
+            color: var(--primary-color);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .card {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            transition: transform 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgb(0 0 0 / 0.1);
+        }
+
+        .mermaid {
+            background: white;
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .nav-toc {
+            background: #f5f3ff;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+        }
+
+        .nav-toc ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .nav-toc a {
+            text-decoration: none;
+            color: var(--primary-color);
+            display: block;
+            padding: 0.5rem 0;
+        }
+
+        .nav-toc a:hover {
+            color: var(--secondary-color);
+            text-decoration: underline;
+        }
+
+        .method-comparison {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+
+        .method-card {
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .method-lora  { background: #ede9fe; border: 2px solid #7c3aed; }
+        .method-qlora { background: #fce7f3; border: 2px solid #db2777; }
+        .method-full  { background: #fef3c7; border: 2px solid #d97706; }
+
+        .step-number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 32px;
+            height: 32px;
+            background: var(--primary-color);
+            color: white;
+            border-radius: 50%;
+            font-weight: bold;
+            margin-right: 0.5rem;
+        }
+
+        .flow-step {
+            display: flex;
+            align-items: flex-start;
+            margin: 1rem 0;
+            padding: 1rem;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+        }
+    </style>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Trusta AST Fine-tune Service User Manual</h1>
+            <p>This document explains in detail the architecture, API workflow, dataset format, and complete operating guide of the fine-tuning service. It is intended for team training and onboarding.</p>
+            <p style="color:#64748b; font-size:0.9em;">Supported methods: LoRA / QLoRA / Full Parameter Fine-tuning. The model is automatically converted to GGUF Q4_K_M format after training completes.</p>
+            <p style="color:#64748b; font-size:0.9em;">A Traditional Chinese version of this manual is available: <a href="finetune_manual.html">finetune_manual.html</a>.</p>
+        </header>
+
+        <div class="nav-toc">
+            <h3>Table of Contents</h3>
+            <ul>
+                <li><a href="#architecture">1. Architecture Overview</a></li>
+                <li><a href="#methods">2. Training Methods Comparison</a></li>
+                <li><a href="#api-flow">3. Key APIs and Workflow</a></li>
+                <li><a href="#code-structure">4. Code Structure Explained</a></li>
+                <li><a href="#training-flow">5. Training Process Details</a></li>
+                <li><a href="#dataset-format">6. Dataset Format</a></li>
+                <li><a href="#config-guide">7. Configuration and Parameters</a></li>
+                <li><a href="#deepspeed">8. DeepSpeed Offload Configuration</a></li>
+                <li><a href="#after-training">9. Post-Training Workflow</a></li>
+                <li><a href="#troubleshooting">10. Troubleshooting</a></li>
+            </ul>
+        </div>
+
+        <!-- ================================================================ -->
+        <section id="architecture">
+            <h2>1. Architecture Overview</h2>
+            <p>The Fine-tune Service uses the same <strong>multi-process isolation architecture</strong> as the Inference Service. Training jobs run in a dedicated Worker Process, ensuring that an OOM or a crash does not affect the main FastAPI service.</p>
+
+            <div class="mermaid">
+            graph TD
+                Client[Client / Frontend] -- HTTP API --> API[FastAPI Server (service/app.py)]
+
+                subgraph MainProcess [Main Process]
+                    API -- calls --> TM[TrainingManager (Singleton)]
+                    TM -- delegates --> TPM[TrainingProcessManager]
+                    TPM -- stores --> Redis[(Redis / Memory)]
+                    MR[ModelRegistry] -- registers finetuned model --> Registry[(models_registry.json)]
+                end
+
+                subgraph WorkerProcess [Isolated Training Worker Process]
+                    TPM -- Queue IPC --> Worker[_training_worker_process]
+                    Worker -- 1. Strategy --> Strategy[StrategyFactory]
+                    Worker -- 2. Load --> Tokenizer[AutoTokenizer]
+                    Worker -- 2. Load --> Dataset[Dataset JSONL]
+                    Worker -- 3. Load --> Model[AutoModelForCausalLM + PEFT]
+                    Worker -- 4. Train --> Trainer[SFTTrainer / CustomTrainer]
+                    Trainer -- 5. Save --> OutputDir[output_dir/]
+                    OutputDir -- 6. Convert --> GGUF[GGUF Q4_K_M file]
+                    OutputDir -- 7. Register --> MR
+                end
+
+                Worker -- progress / status --> TPM
+            </div>
+
+            <div class="note">
+                <strong>Important:</strong> In every case (completion / stop / error), the training process exits the Worker Process, ensuring that VRAM is fully released. A clean Worker is started again for the next training run.
+            </div>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="methods">
+            <h2>2. Training Methods Comparison</h2>
+
+            <div class="method-comparison">
+                <div class="method-card method-lora">
+                    <h3><span class="badge badge-lora">LoRA</span></h3>
+                    <p><strong>Low-Rank Adaptation</strong></p>
+                    <ul style="text-align:left">
+                        <li>Trains only low-rank matrices; very few parameters</li>
+                        <li>Low GPU requirements</li>
+                        <li>Fast training speed</li>
+                        <li>Output: adapter weight file</li>
+                    </ul>
+                </div>
+                <div class="method-card method-qlora">
+                    <h3><span class="badge badge-qlora">QLoRA</span></h3>
+                    <p><strong>Quantized LoRA (4-bit)</strong></p>
+                    <ul style="text-align:left">
+                        <li>Base model is loaded with 4-bit quantization</li>
+                        <li>Even lower GPU requirements (suitable for consumer-grade GPUs)</li>
+                        <li>Slight accuracy loss</li>
+                        <li>Output: adapter weight file</li>
+                    </ul>
+                </div>
+                <div class="method-card method-full">
+                    <h3><span class="badge badge-full">Full Parameter</span></h3>
+                    <p><strong>Full Parameter Fine-tuning</strong></p>
+                    <ul style="text-align:left">
+                        <li>Trains all parameters</li>
+                        <li>Requires large amounts of GPU VRAM</li>
+                        <li>Best results</li>
+                        <li>Usually paired with DeepSpeed ZeRO</li>
+                    </ul>
+                </div>
+            </div>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Characteristic</th>
+                        <th>LoRA</th>
+                        <th>QLoRA</th>
+                        <th>Full</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>method</code> value</td>
+                        <td><code>lora</code></td>
+                        <td><code>qlora</code></td>
+                        <td><code>full</code></td>
+                    </tr>
+                    <tr>
+                        <td>Recommended GPU VRAM (7B model)</td>
+                        <td>&ge; 16 GB</td>
+                        <td>&ge; 8 GB</td>
+                        <td>&ge; 80 GB or DeepSpeed</td>
+                    </tr>
+                    <tr>
+                        <td>Base model quantization</td>
+                        <td>FP16/BF16</td>
+                        <td>4-bit NF4</td>
+                        <td>BF16</td>
+                    </tr>
+                    <tr>
+                        <td>Trainable parameters</td>
+                        <td>~0.1–1%</td>
+                        <td>~0.1–1%</td>
+                        <td>100%</td>
+                    </tr>
+                    <tr>
+                        <td>Output format</td>
+                        <td>LoRA adapter</td>
+                        <td>LoRA adapter</td>
+                        <td>Full model weights</td>
+                    </tr>
+                    <tr>
+                        <td>DeepSpeed support</td>
+                        <td>Optional</td>
+                        <td>Optional</td>
+                        <td>Strongly recommended</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="api-flow">
+            <h2>3. Key APIs and Workflow</h2>
+            <p>All training-related APIs are prefixed with <code>/training/</code> and defined in <code>service/app.py</code>.</p>
+
+            <div class="grid">
+                <div class="card">
+                    <h3>1. Start Training</h3>
+                    <code>POST /training/start</code>
+                    <p><strong>Behavior:</strong> Synchronous validation + asynchronous training.</p>
+                    <p>Pass a complete <code>TrainingConfig</code>. Once validation passes, a <code>session_id</code> is returned immediately. The actual training runs in the background in the Worker Process.</p>
+                    <p><strong>Note:</strong> If <code>output_dir</code> already contains files, the API returns an error (it must be cleared manually).</p>
+                </div>
+
+                <div class="card">
+                    <h3>2. Query Training Status</h3>
+                    <code>GET /training/status</code>
+                    <p><strong>Behavior:</strong> Synchronous, used for polling.</p>
+                    <p>Returns a <code>TrainingStatus</code> containing <code>is_training</code>, <code>progress</code> (0–1), <code>current_step</code>, <code>total_steps</code>, <code>loss</code>, <code>current_epoch</code>, <code>status</code>, and <code>error</code>.</p>
+                </div>
+
+                <div class="card">
+                    <h3>3. Stop Training</h3>
+                    <code>POST /training/stop</code>
+                    <p><strong>Behavior:</strong> Forcibly terminates the Worker Process (terminate + kill).</p>
+                    <p>Does not wait for the Worker to exit gracefully; it terminates the process directly and resets the state. Checkpoints that have already been saved are not affected.</p>
+                </div>
+
+                <div class="card">
+                    <h3>4. Training History</h3>
+                    <code>GET /training/status/{session_id}/history</code>
+                    <p>Returns the detailed loss / learning_rate / epoch records for that training session.</p>
+                    <p>The data is stored in Redis (if available) or in memory, indexed by <code>session_id</code>.</p>
+                </div>
+
+                <div class="card">
+                    <h3>5. System Resource History</h3>
+                    <code>GET /system/resource/{session_id}/history</code>
+                    <p>Returns the CPU / GPU / Disk usage history during training, sampled once per <code>logging_steps</code>.</p>
+                </div>
+
+                <div class="card">
+                    <h3>6. Error Details</h3>
+                    <code>GET /training/error_details</code>
+                    <p>Retrieves the complete training error traceback, including the <code>is_oom</code> flag. The format is consistent with <code>/inference/error_details</code>.</p>
+                </div>
+
+                <div class="card">
+                    <h3>7. Force GPU Cleanup</h3>
+                    <code>POST /training/force_cleanup_gpu</code>
+                    <p>Forcibly terminates the Training Worker Process and resets the state. Used when VRAM has not been released after an OOM (does not affect the Inference Worker).</p>
+                </div>
+            </div>
+
+            <h3>Complete Training Workflow Example (Python)</h3>
+            <pre><code>import requests, time
+
+BASE = "http://localhost:8000"
+
+# Step 1: Start training
+config = {
+    "model_name": "Qwen/Qwen3-4B",
+    "method": "lora",
+    "dataset_path": "dataset/mydataset.jsonl",
+    "output_dir": "./output/qwen3_lora_v1",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "num_train_epochs": 3,
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "learning_rate": 2e-4,
+    "max_seq_length": 2048,
+    "prompt_field": "prompt",
+    "completion_field": "completion",
+    "use_sft_trainer": True
+}
+
+resp = requests.post(f"{BASE}/training/start", json=config)
+session_id = resp.json()["result"]["session_id"]
+print(f"Training started: session_id={session_id}")
+
+# Step 2: Poll progress
+while True:
+    status = requests.get(f"{BASE}/training/status").json()
+    if status["is_training"]:
+        print(f"  Step {status['current_step']}/{status['total_steps']} "
+              f"| Progress: {status['progress']:.1%} "
+              f"| Loss: {status.get('loss', 'N/A'):.4f}"
+              f"| Epoch: {status.get('current_epoch', 0):.2f}")
+        time.sleep(10)
+    else:
+        print(f"Training ended: status={status['status']}")
+        if status.get("error"):
+            print(f"Error: {status['error']}")
+        break
+
+# Step 3: Retrieve the detailed loss curve
+history = requests.get(f"{BASE}/training/status/{session_id}/history").json()
+for log in history["logs"]:
+    print(f"Step {log['step']}: loss={log['loss']:.4f}, lr={log.get('learning_rate')}")</code></pre>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="code-structure">
+            <h2>4. Code Structure Explained</h2>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>File Path</th>
+                        <th>Role and Function</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>service/app.py</code></td>
+                        <td><strong>API entry point</strong>. Defines the <code>/training/*</code> routes and calls <code>training_manager</code>.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/training_manager.py</code></td>
+                        <td><strong>Singleton Facade</strong>. Exposes methods such as <code>start_training</code>, <code>get_status</code>, <code>stop_training</code>, and <code>get_history</code> to the API layer, and provides concurrency protection (<code>Lock</code>).</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/training/training_process.py</code></td>
+                        <td><strong>Process control core</strong>. Includes:
+                            <ul>
+                                <li><code>TrainingProcessManager</code>: Manages the Worker Process lifecycle, IPC Queue, status parsing, and reading history from Redis.</li>
+                                <li><code>_training_worker_process()</code>: The main loop that actually runs in the child process, receiving <code>start</code>/<code>stop</code> commands.</li>
+                            </ul>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><code>service/training/core/strategies.py</code></td>
+                        <td><strong>Strategy Pattern</strong>.
+                            <ul>
+                                <li><code>StrategyFactory</code>: Selects a strategy based on <code>use_sft_trainer</code>.</li>
+                                <li><code>SFTStrategy</code>: Uses the TRL SFTTrainer (recommended; supports completion-only loss).</li>
+                                <li><code>CausalLMStrategy</code>: Uses the native HF Trainer (manual tokenization).</li>
+                            </ul>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><code>service/training/sft_runner.py</code></td>
+                        <td><strong>SFTTrainer initialization</strong>. Creates <code>CustomSFTTrainer</code> (overriding <code>save_model</code> for compatibility with DeepSpeed + LoRA) and <code>SFTConfig</code>.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/training/core/model_loader.py</code></td>
+                        <td><strong>Model and tokenizer loading</strong>. Applies the appropriate <code>BitsAndBytesConfig</code> and <code>LoraConfig</code> depending on the method (LoRA/QLoRA/Full).</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/training/core/dataset_loader.py</code></td>
+                        <td><strong>Dataset loading</strong>. Reads data in JSON or JSONL format and converts it into a HuggingFace <code>Dataset</code> object.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/training/core/model_saver.py</code></td>
+                        <td><strong>Result saving</strong>. Saves the model weights and tokenizer, and calls <code>model_registry</code> to register the fine-tuned model as a <code>finetuned</code> type.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/utils/conversion_manager.py</code></td>
+                        <td><strong>GGUF conversion</strong>. After training completes, automatically calls the llama.cpp conversion script to generate a Q4_K_M quantized GGUF file.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/configs/deepspeed/</code></td>
+                        <td><strong>DeepSpeed configuration templates</strong>. Provides four preset ZeRO-3 Offload combinations:
+                            <ul>
+                                <li><code>zero3_offload_cpu_cpu.json</code>: Both Optimizer &amp; Param offloaded to CPU</li>
+                                <li><code>zero3_offload_cpu_disk.json</code>: Optimizer&rarr;CPU, Param&rarr;Disk</li>
+                                <li><code>zero3_offload_disk_cpu.json</code>: Optimizer&rarr;Disk, Param&rarr;CPU</li>
+                                <li><code>zero3_offload_disk_disk.json</code>: Both offloaded to Disk (NVMe)</li>
+                            </ul>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="training-flow">
+            <h2>5. Training Process Details (Deep Dive)</h2>
+
+            <h3>Worker Process Main Flow</h3>
+
+            <div class="flow-step">
+                <span class="step-number">1</span>
+                <div>
+                    <strong>Receive the Start command</strong><br>
+                    The Worker takes <code>{"command": "start", "config": {...}, "session_id": "..."}</code> from the Request Queue.
+                    It checks whether <code>output_dir</code> already contains files (if so, it reports an error to prevent overwriting).
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <span class="step-number">2</span>
+                <div>
+                    <strong>Strategy selection</strong><br>
+                    <code>StrategyFactory.get_strategy(config)</code>:
+                    <ul>
+                        <li><code>use_sft_trainer=True</code> (default) &rarr; <code>SFTStrategy</code> (uses the TRL SFTTrainer)</li>
+                        <li><code>use_sft_trainer=False</code> &rarr; <code>CausalLMStrategy</code> (uses the native HF Trainer + manual tokenization)</li>
+                    </ul>
+                    At the same time, it initializes <code>TrainingArguments</code> (including the DeepSpeed configuration, BF16, and Gradient Checkpointing).
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <span class="step-number">3</span>
+                <div>
+                    <strong>Load resources</strong> (executed in sequence to save memory)<br>
+                    <ol>
+                        <li>Load the <strong>Tokenizer</strong> (<code>AutoTokenizer.from_pretrained</code>).</li>
+                        <li>Load the <strong>Dataset</strong> (JSONL &rarr; HuggingFace Dataset).</li>
+                        <li>If <code>CausalLMStrategy</code> is used, the dataset is pre-tokenized at this point (to avoid CPU waits during training).</li>
+                        <li>Load the <strong>Model</strong> (applying the quantization settings and PEFT LoraConfig based on the method).</li>
+                    </ol>
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <span class="step-number">4</span>
+                <div>
+                    <strong>Prepare the Trainer</strong><br>
+                    <code>strategy.prepare_trainer(model, tokenizer, dataset, training_args)</code>.
+                    <ul>
+                        <li>SFTStrategy: Creates <code>CustomSFTTrainer</code>, automatically handling prompt+completion loss masking (<code>completion_only_loss=True</code>).</li>
+                        <li>CausalLMStrategy: Creates <code>CustomTrainer</code>, using <code>DataCollatorForLanguageModeling</code>.</li>
+                    </ul>
+                    A <code>_ProgressCallback</code> is added, which reports progress to the Status Queue and stores it in Redis every <code>logging_steps</code>.
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <span class="step-number">5</span>
+                <div>
+                    <strong>Run training</strong><br>
+                    <code>trainer.train()</code>. During training, every <code>logging_steps</code>:
+                    <ul>
+                        <li>Pushes <code>{"status": "progress", "step": N, "loss": ..., "epoch": ...}</code> to the Status Queue.</li>
+                        <li>Samples CPU/GPU/Disk resource usage and stores it in Redis.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <span class="step-number">6</span>
+                <div>
+                    <strong>Save results</strong><br>
+                    <code>save_training_results(trainer, tokenizer, training_config)</code> saves the adapter or the full model into <code>output_dir</code>, and automatically calls <code>model_registry</code> to register it as a <code>finetuned</code> model.
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <span class="step-number">7</span>
+                <div>
+                    <strong>Clean up resources + GGUF conversion</strong><br>
+                    It first runs <code>_cleanup_training_resources()</code> (deleting the Trainer/Model/Tokenizer objects, running GC, and clearing the CUDA cache) to ensure VRAM is released, and then calls <code>_convert_training_output_to_q4_k_m()</code> to perform the GGUF conversion.
+                </div>
+            </div>
+
+            <div class="flow-step">
+                <span class="step-number">8</span>
+                <div>
+                    <strong>Report completion and exit</strong><br>
+                    Pushes <code>{"status": "completed", "gguf_path": "...", "gguf_quantization": "Q4_K_M"}</code> to the Status Queue. The Worker Process then exits, ensuring all resources are released.
+                </div>
+            </div>
+
+            <h3>Progress State Machine</h3>
+            <div class="mermaid">
+            stateDiagram-v2
+                [*] --> idle
+                idle --> starting: start_training()
+                starting --> initializing: Worker receives command
+                initializing --> running: trainer.train() begins
+                running --> completed: Training completes successfully + GGUF conversion
+                running --> stopped: stop command received
+                running --> error: OOM or Exception occurs
+                completed --> idle: next training run
+                stopped --> idle: next training run
+                error --> idle: after force_cleanup_gpu
+            </div>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="dataset-format">
+            <h2>6. Dataset Format</h2>
+            <p>Training data must be in <strong>JSON or JSONL format</strong> (in JSONL, each line is one JSON object). Two training modes are supported, selected via <code>text_field</code> or <code>prompt_field</code>/<code>completion_field</code>.</p>
+
+            <h3>Mode 1: Single-field text mode (full-sequence loss)</h3>
+            <p>Suitable for: language model pre-training or scenarios that require full-sequence training. Set <code>text_field: "text"</code> (or the corresponding field name).</p>
+            <pre><code>// dataset.jsonl (one record per line)
+{"text": "### Question:\nHow do I set the time zone on a Linux system?\n\n### Answer:\nUse the timedatectl command: sudo timedatectl set-timezone Asia/Taipei"}
+{"text": "### Question:\nWhat is a Docker volume?\n\n### Answer:\nA Docker volume is a mechanism for persisting container data..."}
+{"text": "This is a piece of text content that the model needs to learn..."}</code></pre>
+
+            <h3>Mode 2: Dual-field prompt + completion mode (completion-only loss)</h3>
+            <p>Suitable for: instruction fine-tuning. The SFTTrainer automatically masks the loss of the prompt and computes the loss only for the completion part.</p>
+            <p>Set <code>prompt_field: "prompt"</code>, <code>completion_field: "completion"</code>.</p>
+            <pre><code>// mydataset.jsonl (one record per line)
+{"prompt": "You are a Linux system administrator.\nHow do I check system memory usage?", "completion": "You can check memory usage with the free -h command:\n```\nfree -h\n```\nHere, -h displays the output in a human-readable format..."}
+{"prompt": "Explain what the GIL is in Python", "completion": "The GIL (Global Interpreter Lock) is a mechanism in CPython..."}
+{"prompt": "How do I undo the last commit in Git?", "completion": "There are several ways:\n1. Keep changes: git reset --soft HEAD~1\n2. Discard changes: git reset --hard HEAD~1"}</code></pre>
+
+            <div class="note">
+                <strong>Recommended choice:</strong> For instruction fine-tuning, we recommend using the <strong>dual-field mode</strong> + <code>use_sft_trainer: true</code>. The system will automatically enable <code>completion_only_loss=True</code>, so the model learns only the answer portion, making training more efficient.
+            </div>
+
+            <h3>Dataset Quality Recommendations</h3>
+            <table>
+                <thead>
+                    <tr><th>Recommendation</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Minimum data volume</td>
+                        <td>At least 500–1000 records is recommended; data quality matters more than quantity</td>
+                    </tr>
+                    <tr>
+                        <td>Sequence length</td>
+                        <td>Keep it within <code>max_seq_length</code>; anything longer will be truncated. It is recommended that 95% of the data not exceed the configured length</td>
+                    </tr>
+                    <tr>
+                        <td>Data cleaning</td>
+                        <td>Remove duplicate data, ensure correct UTF-8 encoding, and avoid empty prompt/completion fields</td>
+                    </tr>
+                    <tr>
+                        <td>Format consistency</td>
+                        <td>The prompt format must be consistent within the same dataset (e.g., whether a system prompt is added)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="config-guide">
+            <h2>7. Configuration and Parameters</h2>
+
+            <h3>Complete TrainingConfig Reference</h3>
+            <pre><code>{
+  // === Required ===
+  "model_name": "Qwen/Qwen3-4B",        // Label in the Model Registry or an HF model ID
+  "method": "lora",                       // Training method: lora / qlora / full
+  "dataset_path": "dataset/train.jsonl",  // Dataset path (relative or absolute)
+  "output_dir": "./output/my_model_v1",   // Output directory (must be an empty directory)
+
+  // === LoRA/QLoRA only ===
+  "lora_r": 16,                           // LoRA rank (larger -> more parameters, better results but slower)
+  "lora_alpha": 32,                       // LoRA scaling (usually = lora_r * 2)
+  "lora_dropout": 0.05,                   // Dropout (prevents overfitting)
+  "lora_target_modules": [               // Modules to train (empty/null = auto-detect linear layers; only falls back to this list if detection fails)
+    "q_proj", "k_proj", "v_proj", "o_proj",
+    "gate_proj", "up_proj", "down_proj"
+  ],
+
+  // === Training hyperparameters ===
+  "num_train_epochs": 3,                 // Number of training epochs
+  "per_device_train_batch_size": 1,      // Batch size per step (reduce to 1 if memory is insufficient)
+  "gradient_accumulation_steps": 8,      // Gradient accumulation steps (effective batch = batch * accum)
+  "learning_rate": 2e-4,                 // Learning rate (1e-4 ~ 3e-4 is common for LoRA/QLoRA)
+  "warmup_steps": 100,                   // Learning rate warmup steps
+  "max_seq_length": 2048,               // Maximum sequence length (longer is truncated)
+
+  // === Dataset field configuration (choose one) ===
+  // Mode 1 (full-sequence loss):
+  "text_field": "text",
+  // Mode 2 (completion-only loss, recommended for instruction fine-tuning):
+  "prompt_field": "prompt",
+  "completion_field": "completion",
+
+  // === Save settings ===
+  "logging_steps": 10,                   // Report loss every N steps
+  "save_steps": 500,                     // Save a checkpoint every N steps
+  "save_total_limit": 2,                 // Maximum number of checkpoints to keep
+  "save_tokenizer": true,                // Whether to save the tokenizer
+
+  // === Trainer selection ===
+  "use_sft_trainer": true,               // Use the TRL SFTTrainer (recommended)
+  "packing": false,                      // Whether to enable sequence packing
+  "gradient_checkpointing": true,        // Gradient checkpointing (saves VRAM)
+
+  // === DeepSpeed (optional) ===
+  "use_deepspeed": false,
+  "deepspeed_profile": "zero3_offload_cpu_cpu",  // Use a built-in profile
+  // or
+  "deepspeed_config": "./my_deepspeed.json",       // Use a custom path
+  "offload_folder": "./deepspeed_offload"          // ZeRO offload directory
+}</code></pre>
+
+            <h3>Recommended Parameter Combinations</h3>
+            <table>
+                <thead>
+                    <tr><th>Scenario</th><th>method</th><th>lora_r</th><th>batch_size</th><th>accumulation</th><th>learning_rate</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Quick validation (< 1hr)</td>
+                        <td>lora</td>
+                        <td>8</td>
+                        <td>1</td>
+                        <td>4</td>
+                        <td>2e-4</td>
+                    </tr>
+                    <tr>
+                        <td>Standard LoRA fine-tuning</td>
+                        <td>lora</td>
+                        <td>16</td>
+                        <td>2</td>
+                        <td>8</td>
+                        <td>2e-4</td>
+                    </tr>
+                    <tr>
+                        <td>Low-VRAM QLoRA</td>
+                        <td>qlora</td>
+                        <td>16</td>
+                        <td>1</td>
+                        <td>16</td>
+                        <td>1e-4</td>
+                    </tr>
+                    <tr>
+                        <td>Large-model Full (+ DeepSpeed)</td>
+                        <td>full</td>
+                        <td>N/A</td>
+                        <td>1</td>
+                        <td>16</td>
+                        <td>5e-5</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="deepspeed">
+            <h2>8. DeepSpeed Offload Configuration</h2>
+            <p>When GPU VRAM is insufficient to hold the full model (typically for Full parameter training or LoRA on large models), you can enable DeepSpeed ZeRO-3 Offload to offload part of the data to CPU RAM or NVMe Disk.</p>
+
+            <div class="warning">
+                <strong>Note:</strong> DeepSpeed significantly lengthens training time (CPU offload is 3-5x slower, Disk offload is 5-20x slower). We recommend trying QLoRA + a smaller batch size first, and only enabling DeepSpeed when necessary.
+            </div>
+
+            <h3>Four Built-in Profiles</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Profile Name</th>
+                        <th>Optimizer Offload</th>
+                        <th>Param Offload</th>
+                        <th>Use Case</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>zero3_offload_cpu_cpu</code></td>
+                        <td>CPU RAM</td>
+                        <td>CPU RAM</td>
+                        <td>Plenty of CPU RAM (>64GB); most commonly used</td>
+                    </tr>
+                    <tr>
+                        <td><code>zero3_offload_cpu_disk</code></td>
+                        <td>CPU RAM</td>
+                        <td>NVMe Disk</td>
+                        <td>Insufficient CPU RAM, but fast NVMe available</td>
+                    </tr>
+                    <tr>
+                        <td><code>zero3_offload_disk_cpu</code></td>
+                        <td>NVMe Disk</td>
+                        <td>CPU RAM</td>
+                        <td>Special scenarios</td>
+                    </tr>
+                    <tr>
+                        <td><code>zero3_offload_disk_disk</code></td>
+                        <td>NVMe Disk</td>
+                        <td>NVMe Disk</td>
+                        <td>Extremely low-memory environments; requires high-speed NVMe</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>Configuration Example with DeepSpeed Enabled</h3>
+            <pre><code>{
+  "model_name": "Qwen/Qwen3-14B",
+  "method": "lora",
+  "dataset_path": "dataset/train.jsonl",
+  "output_dir": "./output/qwen3_14b_lora",
+  "use_deepspeed": true,
+  "deepspeed_profile": "zero3_offload_cpu_cpu",  // Use a built-in profile
+  "offload_folder": "./deepspeed_offload",         // If the profile uses nvme, this path overrides it
+  "gradient_checkpointing": true,
+  "lora_r": 16,
+  "lora_alpha": 32,
+  "num_train_epochs": 3
+}</code></pre>
+
+            <div class="note">
+                <strong>Special handling for DeepSpeed + LoRA:</strong> The default <code>save_model</code> behavior of ZeRO-3 is incompatible with LoRA adapters (it may cause OOM or a FileExists error). The system already overrides <code>save_model</code> via <code>CustomSFTTrainer</code> and <code>CustomTrainer</code>, using <code>GatheredParameters</code> to safely gather the adapter parameters before saving, so this issue is handled automatically.
+            </div>
+
+            <h3>DeepSpeed-related Environment Settings</h3>
+            <p>The following environment variables are set automatically when the Worker Process starts:</p>
+            <pre><code>WORLD_SIZE=1
+RANK=0
+LOCAL_RANK=0
+MASTER_ADDR=127.0.0.1
+MASTER_PORT=29500
+DS_SKIP_CUDA_CHECK=1          # Skip the CUDA version check
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmentation
+CUDA_VISIBLE_DEVICES=0        # Force the use of GPU 0 (prevents multi-GPU PEFT issues)</code></pre>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="after-training">
+            <h2>9. Post-Training Workflow</h2>
+
+            <div class="success">
+                <strong>Automated post-processing:</strong> After training completes successfully, the system automatically performs the following steps, with no manual action required:
+            </div>
+
+            <h3>Automatic GGUF Conversion</h3>
+            <ol>
+                <li>Training completes + the model is saved to <code>output_dir</code>.</li>
+                <li>Training resources are cleaned up (VRAM released).</li>
+                <li><code>conversion_manager.convert_and_quantize()</code> is called:
+                    <ul>
+                        <li>First, the HF-format model is converted to GGUF F16.</li>
+                        <li>Then it is quantized to <strong>Q4_K_M</strong> format (smaller size, faster inference).</li>
+                    </ul>
+                </li>
+                <li>The GGUF file is stored inside <code>output_dir</code>.</li>
+                <li><code>/training/status</code> returns <code>gguf_path</code> and <code>gguf_quantization</code>.</li>
+            </ol>
+
+            <h3>Automatic Registration in the Model Registry</h3>
+            <p>After training completes, the fine-tuned model is automatically registered in <code>models_registry.json</code> as a <code>finetuned</code> type. It can be queried via the following API:</p>
+            <pre><code>GET /config/models
+// The response includes:
+{
+  "finetuned_models": [
+    {
+      "label": "my_model_v1",
+      "output_dir": "./output/my_model_v1",
+      "base_model": "Qwen/Qwen3-4B",
+      "method": "lora",
+      ...
+    }
+  ]
+}</code></pre>
+
+            <h3>Running Inference with the Fine-tuned Model</h3>
+            <p>The trained model can be loaded directly via the Inference API (specify <code>model_path</code> as the <code>output_dir</code>):</p>
+            <pre><code>POST /inference/load_model
+{
+  "model_name": "my_model_v1",        // Registry label
+  "model_path": "./output/my_model_v1", // Fine-tune output directory
+  "engine": "transformers",
+  "quantization": "none"              // The adapter is already low-precision; no extra quantization needed
+}</code></pre>
+
+            <p>Or use the automatically converted GGUF model (recommended for production):</p>
+            <pre><code>POST /inference/load_model
+{
+  "model_name": "my_model_v1_gguf",
+  "model_path": "./output/my_model_v1/my_model_v1-Q4_K_M.gguf",
+  "engine": "llama_server",
+  "n_gpu_layers": -1
+}</code></pre>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="troubleshooting">
+            <h2>10. Troubleshooting</h2>
+
+            <div class="card">
+                <h3>❌ Error: Output directory already exists and contains files</h3>
+                <p><strong>Cause:</strong> <code>output_dir</code> already contains leftover files from a previous training run.</p>
+                <p><strong>Solution:</strong></p>
+                <ul>
+                    <li>Manually clear or delete <code>output_dir</code>.</li>
+                    <li>Or use a new directory name (e.g., add a version number: <code>my_model_v2</code>).</li>
+                </ul>
+                <div class="warning">The system will not automatically clear the output directory, to prevent accidentally overwriting previous training results.</div>
+            </div>
+
+            <div class="card">
+                <h3>❌ CUDA Out of Memory (OOM) during training</h3>
+                <p><strong>Symptom:</strong> Training crashes, and <code>is_oom=true</code> in <code>/training/error_details</code>.</p>
+                <p><strong>Solutions (in order of priority):</strong></p>
+                <ol>
+                    <li>Call <code>POST /training/force_cleanup_gpu</code> to ensure VRAM is released.</li>
+                    <li>Switch to <code>method: "qlora"</code> (4-bit quantized base model).</li>
+                    <li>Lower <code>per_device_train_batch_size</code> to 1 and increase <code>gradient_accumulation_steps</code>.</li>
+                    <li>Lower <code>max_seq_length</code> (2048 → 1024 → 512).</li>
+                    <li>Enable DeepSpeed CPU Offload: <code>use_deepspeed: true</code>, <code>deepspeed_profile: "zero3_offload_cpu_cpu"</code>.</li>
+                </ol>
+            </div>
+
+            <div class="card">
+                <h3>❌ Training Error: RuntimeError / CUBLAS_STATUS_ALLOC_FAILED</h3>
+                <p><strong>Cause:</strong> A PEFT device allocation issue in a multi-GPU environment.</p>
+                <p><strong>Solution:</strong> The Worker Process already sets <code>CUDA_VISIBLE_DEVICES=0</code> automatically to ensure only GPU 0 is used. If you want to use multiple GPUs, switch to DeepSpeed distributed training.</p>
+            </div>
+
+            <div class="card">
+                <h3>❌ Training completes but GGUF conversion fails</h3>
+                <p><strong>Cause:</strong> The llama.cpp conversion script is not installed, or <code>output_dir</code> has insufficient disk space (GGUF conversion requires an additional 2-3x space).</p>
+                <p><strong>Solution:</strong></p>
+                <ul>
+                    <li>Confirm that the llama.cpp dependencies are installed.</li>
+                    <li>Confirm that the disk where <code>output_dir</code> resides has enough space (3-4x the original model size).</li>
+                    <li>The HF-format model still exists in <code>output_dir</code> and can be loaded with the Transformers engine.</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>❌ Loss does not converge or stays at 0</h3>
+                <p><strong>Cause:</strong> The dataset format is incorrect, or <code>completion_only_loss</code> results in no trainable tokens.</p>
+                <p><strong>Solution:</strong></p>
+                <ul>
+                    <li>When using dual-field mode, confirm that the <code>completion</code> field has enough text content (it must not be empty).</li>
+                    <li>If the completion is very short (&lt; 10 tokens), try switching to single-field <code>text_field</code> mode.</li>
+                    <li>Confirm that <code>max_seq_length</code> is not so small that the completion gets fully truncated.</li>
+                    <li>Reduce the <code>learning_rate</code> (e.g., 2e-4 → 1e-4).</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>❌ Redis connection failed: training history unavailable</h3>
+                <p><strong>Symptom:</strong> <code>/training/status/{session_id}/history</code> returns 404, or the log shows a Redis connection warning.</p>
+                <p><strong>Explanation:</strong> Redis is an optional component. If Redis is not started, the system falls back to in-memory storage. After the service restarts, the history records in memory are lost.</p>
+                <p><strong>Solution:</strong> Start the Redis service (<code>redis-server</code>), and set <code>REDIS_URL</code> or <code>REDIS_HOST</code>/<code>REDIS_PORT</code> in <code>.env</code>.</p>
+            </div>
+
+            <div class="card">
+                <h3>❌ DeepSpeed nvme offload path not writable</h3>
+                <p><strong>Symptom:</strong> DeepSpeed training fails, and the log shows an error related to the nvme path.</p>
+                <p><strong>Solution:</strong></p>
+                <ul>
+                    <li>Confirm that the <code>offload_folder</code> directory exists and is writable (the system creates it automatically, but you must confirm the parent directory has write permission).</li>
+                    <li>Confirm that there is enough disk space (ZeRO-3 Disk offload may require tens of GB).</li>
+                    <li>Use an NVMe SSD rather than a traditional HDD (the speed difference is enormous).</li>
+                </ul>
+            </div>
+        </section>
+    </div>
+</body>
+</html>

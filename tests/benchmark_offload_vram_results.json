@@ -1,0 +1,27 @@
+{
+  "backend_url": "http://127.0.0.1:8000",
+  "max_tokens": 128,
+  "results": [
+    {
+      "label": "Qwen3-14B (transformers, bf16, device_map=auto + CPU/disk offload)",
+      "load_payload": {
+        "model_name": "Qwen3-14B-local",
+        "model_path": "./models/Qwen3-14B",
+        "engine": "transformers",
+        "quantization": "none",
+        "device_map": "auto",
+        "offload_folder": "./offload"
+      },
+      "estimated_full_gpu_gb": 27.508,
+      "gpu_used_before_gb": 1.65,
+      "ttft_sec": 10.301743400006671,
+      "total_latency_sec": 227.1693837000057,
+      "completion_tokens": 111,
+      "output_tps": 0.5118329311208007,
+      "peak_gpu_vram_gb": 13.39,
+      "vram_reduction_pct": 51.3,
+      "ok": true,
+      "error": null
+    }
+  ]
+}

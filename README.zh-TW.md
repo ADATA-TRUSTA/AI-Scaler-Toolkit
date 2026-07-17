@@ -9,7 +9,7 @@
 
 ---
 
-GitHub AST 是一個以 FastAPI 為核心的 LLM 後端服務，提供：
+AI Scaler Toolkit 是一個以 FastAPI 為核心的 LLM 後端服務，提供：
 
 - 模型載入 / 卸載
 - OpenAI 相容聊天介面
@@ -36,7 +36,7 @@ cd /home/test/project
 git clone --recursive <YOUR_GITHUB_REPOSITORY_URL> AI-Scaler-Toolkit
 cd AI-Scaler-Toolkit
 
-mkdir -p logs .cache/huggingface runtime_data/inference_offload runtime_data/finetune_output
+mkdir -p logs .cache/huggingface
 cp .env.example .env
 # 編輯 .env，優先修改 HF_HOME、LOG_DIR、SERVICE_HOST、SERVICE_PORT
 
@@ -60,7 +60,7 @@ cd C:\Users\<user>\project
 git clone --recursive <YOUR_GITHUB_REPOSITORY_URL> AI-Scaler-Toolkit
 cd AI-Scaler-Toolkit
 
-New-Item -ItemType Directory -Force logs, .cache\huggingface, runtime_data\inference_offload, runtime_data\finetune_output
+New-Item -ItemType Directory -Force logs, .cache\huggingface
 Copy-Item .env.example .env
 notepad .env
 
@@ -85,13 +85,15 @@ AI-Scaler-Toolkit/
 ├─ deploy/
 │  ├─ linux/
 │  │  ├─ run_service.sh
-│  │  └─ setup_env.sh
+│  │  ├─ setup_env.sh
+│  │  └─ stop_service.sh
 │  ├─ windows/
 │  │  ├─ run_service.bat
 │  │  └─ setup_env.ps1
 │  └─ docker/
 ├─ docs/
 ├─ dataset/
+├─ examples/
 ├─ service/
 │  ├─ app.py
 │  ├─ settings.py
@@ -101,8 +103,14 @@ AI-Scaler-Toolkit/
 ├─ Trusta-AST-Frontend/
 │  ├─ dist/
 │  └─ dist_client/
+├─ wiki/
+├─ logs/
+├─ .github/
 ├─ .env.example
-└─ README.md
+├─ pytest.ini
+├─ LICENSE
+├─ README.md
+└─ README.zh-TW.md
 ```
 
 ---
@@ -326,13 +334,13 @@ cd AI-Scaler-Toolkit
 #### Linux
 
 ```bash
-mkdir -p logs .cache/huggingface runtime_data/inference_offload runtime_data/finetune_output
+mkdir -p logs .cache/huggingface
 ```
 
 #### Windows（PowerShell）
 
 ```powershell
-New-Item -ItemType Directory -Force logs, .cache\huggingface, runtime_data\inference_offload, runtime_data\finetune_output
+New-Item -ItemType Directory -Force logs, .cache\huggingface
 ```
 
 ### 5.2 建立 `.env`
@@ -654,7 +662,7 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions `
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 
-`/v1/models` returns the completion alias `trusta-ast-default` when a model is loaded. Use the same alias in `/v1/chat/completions` requests.
+當模型已載入時，`/v1/models` 會回傳補全別名 `trusta-ast-default`；在 `/v1/chat/completions` 請求中使用相同的別名即可。
 
 ### 推論管理
 

@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inference Service User Manual - Trusta AST Backend</title>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #1e40af;
+            --bg-color: #f8fafc;
+            --text-color: #334155;
+            --code-bg: #1e293b;
+            --code-text: #e2e8f0;
+            --border-color: #e2e8f0;
+            --warning-color: #d97706;
+            --success-color: #16a34a;
+            --danger-color: #dc2626;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: white;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            min-height: 100vh;
+        }
+
+        header {
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        h1 {
+            color: var(--primary-color);
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        h2 {
+            color: var(--secondary-color);
+            border-left: 5px solid var(--primary-color);
+            padding-left: 1rem;
+            margin-top: 3rem;
+        }
+
+        h3 {
+            color: #475569;
+            margin-top: 2rem;
+        }
+
+        code {
+            font-family: 'Consolas', 'Monaco', monospace;
+            background-color: #f1f5f9;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            color: #ef4444;
+        }
+
+        pre {
+            background-color: var(--code-bg);
+            color: var(--code-text);
+            padding: 1.5rem;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+
+        pre code {
+            background-color: transparent;
+            color: inherit;
+            padding: 0;
+        }
+
+        .note {
+            background-color: #eff6ff;
+            border-left: 4px solid #3b82f6;
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .warning {
+            background-color: #fffbeb;
+            border-left: 4px solid var(--warning-color);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .deprecated {
+            background-color: #fef2f2;
+            border-left: 4px solid var(--danger-color);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-left: 0.5rem;
+        }
+
+        .badge-deprecated {
+            background-color: #fee2e2;
+            color: var(--danger-color);
+        }
+
+        .badge-new {
+            background-color: #dcfce7;
+            color: var(--success-color);
+        }
+
+        .file-path {
+            font-family: monospace;
+            color: #64748b;
+            font-size: 0.9em;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+        }
+
+        th, td {
+            border: 1px solid var(--border-color);
+            padding: 0.75rem;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f8fafc;
+            color: var(--primary-color);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .card {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            transition: transform 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgb(0 0 0 / 0.1);
+        }
+
+        .card.deprecated-card {
+            opacity: 0.7;
+            border-style: dashed;
+        }
+
+        .mermaid {
+            background: white;
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .nav-toc {
+            background: #f1f5f9;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+        }
+
+        .nav-toc ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .nav-toc a {
+            text-decoration: none;
+            color: var(--primary-color);
+            display: block;
+            padding: 0.5rem 0;
+        }
+
+        .nav-toc a:hover {
+            color: var(--secondary-color);
+            text-decoration: underline;
+        }
+
+        .engine-tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .engine-tag {
+            padding: 0.25rem 0.75rem;
+            border-radius: 16px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .tag-transformers { background: #dbeafe; color: #1d4ed8; }
+        .tag-vllm        { background: #f3e8ff; color: #7c3aed; }
+        .tag-llama       { background: #fef3c7; color: #d97706; }
+    </style>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Trusta AST Inference Service User Manual</h1>
+            <p>This document explains in detail the architecture of the inference service, the API flow, and the code structure. It is intended for team training.</p>
+            <p style="color:#64748b; font-size:0.9em;">Applicable version: supports three inference engines (Transformers / vLLM / llama-server); the primary chat endpoint has been upgraded to an OpenAI-compatible API.</p>
+            <p style="color:#64748b; font-size:0.9em;">This is the English version. For the Traditional Chinese version, see <a href="inference_manual.html">inference_manual.html</a>.</p>
+        </header>
+
+        <div class="nav-toc">
+            <h3>Table of Contents</h3>
+            <ul>
+                <li><a href="#architecture">1. Architecture Overview</a></li>
+                <li><a href="#engines">2. Inference Engines</a></li>
+                <li><a href="#api-flow">3. Key APIs and Flows</a></li>
+                <li><a href="#code-structure">4. Code Structure in Detail</a></li>
+                <li><a href="#process-details">5. Inference Process Details</a></li>
+                <li><a href="#config-guide">6. Configuration and Parameters</a></li>
+                <li><a href="#model-registry">7. Model Registry</a></li>
+                <li><a href="#troubleshooting">8. Troubleshooting</a></li>
+            </ul>
+        </div>
+
+        <!-- ================================================================ -->
+        <section id="architecture">
+            <h2>1. Architecture Overview</h2>
+            <p>This service is a high-performance LLM inference server built on <strong>FastAPI</strong>. It supports multiple inference engines and, in order to avoid the Python GIL limitation and manage GPU VRAM effectively, adopts a <strong>Multi-process Isolation</strong> architecture.</p>
+
+            <div class="card">
+                <h3>Core Design Patterns: Singleton Manager &amp; Process Isolation</h3>
+                <p>The main components are managed through the singleton pattern to ensure global state consistency, while model loading and inference work are isolated in a dedicated Worker Process.</p>
+                <ul>
+                    <li><strong>Main Process (FastAPI)</strong>: Handles HTTP requests, route dispatch, and session management.</li>
+                    <li><strong>Worker Process (Model Inference)</strong>: Dedicated to PyTorch model loading, holding the weights, and running inference computation.</li>
+                    <li><strong>Advantage</strong>: On OOM the Worker Process can be safely terminated and restarted, ensuring VRAM is fully released without affecting the main service.</li>
+                </ul>
+            </div>
+
+            <div class="mermaid">
+            graph TD
+                Client[Client / Frontend] -- HTTP/OpenAI API --> API[FastAPI Server (service/app.py)]
+
+                subgraph MainProcess [Main Process]
+                    API -- calls --> MM[ModelManager (Singleton)]
+                    SM[SessionManager] -- loads/saves --> Redis[(Redis/Memory)]
+                    MR[ModelRegistry] -- reads/writes --> Registry[(models_registry.json)]
+                end
+
+                subgraph WorkerProcess [Isolated Worker Process]
+                    MM -- Queue IPC --> MIP[ModelInferenceProcess]
+                    MIP -- uses --> Engine{Engine Selector}
+                    Engine -- Transformers --> TF[HF Transformer Model]
+                    Engine -- vLLM --> VLLM[vLLM Server subprocess]
+                    Engine -- llama_server --> LLAMA[llama-server subprocess]
+                end
+
+                API -- reads status --> MM
+            </div>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="engines">
+            <h2>2. Inference Engines</h2>
+            <p>Different inference engines can be selected through the <code>InferenceConfig.engine</code> field. Each engine is suited to a different use case.</p>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Engine</th>
+                        <th>engine value</th>
+                        <th>Use case</th>
+                        <th>Notes</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="engine-tag tag-transformers">Transformers</span></td>
+                        <td><code>transformers</code></td>
+                        <td>Default engine; supports int4/int8 quantization, CPU offload, and disk offload</td>
+                        <td>Broadest compatibility; ideal for low-resource environments</td>
+                    </tr>
+                    <tr>
+                        <td><span class="engine-tag tag-vllm">vLLM</span></td>
+                        <td><code>vllm</code></td>
+                        <td>High-throughput production environments; native concurrent multi-request handling; supports AWQ/GPTQ quantization</td>
+                        <td>Requires the vllm package; slower to start but high throughput</td>
+                    </tr>
+                    <tr>
+                        <td><span class="engine-tag tag-llama">llama-server</span></td>
+                        <td><code>llama_server</code></td>
+                        <td>GGUF-format models; ideal for deploying quantized models</td>
+                        <td>Requires a path to a .gguf file; uses a llama.cpp subprocess</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>Engine-Specific Configuration Fields</h3>
+            <div class="grid">
+                <div class="card">
+                    <h3><span class="engine-tag tag-vllm">vLLM Engine</span> Specific Parameters</h3>
+                    <ul>
+                        <li><code>vllm_gpu_memory_utilization</code>: GPU memory utilization (default 0.8)</li>
+                        <li><code>vllm_max_model_len</code>: Maximum context length</li>
+                        <li><code>vllm_dtype</code>: Data type (default auto)</li>
+                        <li><code>vllm_quantization</code>: Quantization method (awq/gptq/fp8)</li>
+                        <li><code>vllm_tensor_parallel_size</code>: Tensor parallelism degree (multi-GPU)</li>
+                        <li><code>vllm_cpu_offload_gb</code>: CPU offload size (GB)</li>
+                        <li><code>vllm_mm_image_limit</code>: Maximum multimodal image count</li>
+                    </ul>
+                </div>
+                <div class="card">
+                    <h3><span class="engine-tag tag-llama">llama-server</span> Specific Parameters</h3>
+                    <ul>
+                        <li><code>n_gpu_layers</code>: Number of GPU layers (-1 = all)</li>
+                        <li><code>n_ctx</code>: Context length (default 4096)</li>
+                        <li><code>n_batch</code>: Batch size (default 512)</li>
+                        <li><code>llama_server_np</code>: Number of parallel generation slots</li>
+                        <li><code>llama_server_port</code>: Port used by the subprocess (default 5001)</li>
+                        <li><code>llama_server_mmproj</code>: Multimodal projector path</li>
+                        <li><code>llama_server_auto_start</code>: Automatically start the subprocess (default true)</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="api-flow">
+            <h2>3. Key APIs and Flows</h2>
+            <p>All API entry points are defined in <code>service/app.py</code>. The primary chat endpoint has been upgraded to the OpenAI-compatible format.</p>
+
+            <div class="deprecated">
+                <strong>Important:</strong> The <code>POST /inference/chat</code> endpoint has been marked <strong>Deprecated</strong> and returns HTTP 410. Please switch to <code>POST /v1/chat/completions</code> across the board.
+            </div>
+
+            <h3>Inference-Related APIs</h3>
+            <div class="grid">
+                <div class="card">
+                    <h3>1. Load Model</h3>
+                    <code>POST /inference/load_model</code>
+                    <p><strong>Behavior:</strong> Asynchronous background loading.</p>
+                    <p>The API returns a <code>loading</code> status immediately; poll via <code>/inference/status</code>. If a model with the same configuration is already loaded, it returns <code>already_loaded</code>; if a different model is already loaded, it returns HTTP 409.</p>
+                    <p><strong>Key parameters:</strong> <code>model_name</code>, <code>engine</code>, <code>quantization</code>, <code>device_map</code>, <code>max_memory</code>.</p>
+                </div>
+
+                <div class="card">
+                    <h3>2. Unload Model</h3>
+                    <code>POST /inference/unload_model</code>
+                    <p><strong>Behavior:</strong> Synchronous.</p>
+                    <p>Terminates the Worker Process and releases all GPU/CPU memory.</p>
+                </div>
+
+                <div class="card">
+                    <h3>3. Check Status</h3>
+                    <code>GET /inference/status</code>
+                    <p><strong>Behavior:</strong> Synchronous.</p>
+                    <p>Returns whether loading is complete, the current engine, any OOM error message, and device map allocation statistics.</p>
+                </div>
+
+                <div class="card">
+                    <h3>4. OpenAI-Compatible Chat <span class="badge badge-new">Primary Endpoint</span></h3>
+                    <code>POST /v1/chat/completions</code>
+                    <p><strong>Behavior:</strong> Supports both streaming (SSE) and non-streaming, fully compatible with the OpenAI API format.</p>
+                    <p>Supports session memory, tool calls, and multimodal input.</p>
+                    <p><strong>Key parameters:</strong> <code>messages</code>, <code>stream</code>, <code>session_id</code>, <code>enable_thinking</code>, <code>tools</code>.</p>
+                </div>
+
+                <div class="card deprecated-card">
+                    <h3>5. Legacy Chat <span class="badge badge-deprecated">Deprecated</span></h3>
+                    <code>POST /inference/chat</code>
+                    <p>This endpoint is deprecated and returns HTTP 410 when called. Please use <code>/v1/chat/completions</code> instead.</p>
+                </div>
+
+                <div class="card">
+                    <h3>6. Estimate Memory</h3>
+                    <code>POST /inference/estimate_memory</code>
+                    <p><strong>Behavior:</strong> Pure computation; does not load the model.</p>
+                    <p>Estimates the GPU requirements under each offload strategy, helping you judge whether the hardware is sufficient.</p>
+                    <p>Also available via GET: <code>/inference/estimate_memory/{model_name}?quantization=int4</code></p>
+                </div>
+
+                <div class="card">
+                    <h3>7. Stop Generation</h3>
+                    <code>POST /inference/stop_generation</code>
+                    <p>Stops the generation task currently in progress. Pass <code>request_id</code> to stop a specific request precisely, or <code>session_id</code> to stop generation for that session.</p>
+                </div>
+
+                <div class="card">
+                    <h3>8. Force GPU Cleanup</h3>
+                    <code>POST /inference/force_cleanup_gpu</code>
+                    <p>Forcibly terminates the Worker Process and restarts a clean process, used when VRAM has not been released after an OOM.</p>
+                </div>
+
+                <div class="card">
+                    <h3>9. Error Details</h3>
+                    <code>GET /inference/error_details</code>
+                    <p>Retrieves the full error traceback, useful for diagnosing model loading failures.</p>
+                </div>
+
+                <div class="card">
+                    <h3>10. Clean Up KV Cache</h3>
+                    <code>POST /inference/cleanup_generation_memory</code>
+                    <p>Cleans up memory accumulated by the KV cache without unloading the model. Suitable after long conversations or before an OOM retry.</p>
+                </div>
+            </div>
+
+            <h3>OpenAI-Compatible API Usage Example</h3>
+            <pre><code># 串流對話 (Python)
+import httpx, json
+
+url = "http://localhost:8000/v1/chat/completions"
+payload = {
+    "model": "Qwen/Qwen3-4B",
+    "messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "請解釋量子力學的基本概念"}
+    ],
+    "stream": True,
+    "temperature": 0.7,
+    "max_tokens": 1024,
+    "session_id": "user-123",          # 啟用對話記憶
+    "enable_thinking": False           # 關閉 thinking 模式
+}
+
+with httpx.Client(timeout=300) as client:
+    with client.stream("POST", url, json=payload) as resp:
+        for line in resp.iter_lines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                chunk = json.loads(line[6:])
+                delta = chunk["choices"][0]["delta"].get("content", "")
+                print(delta, end="", flush=True)</code></pre>
+
+            <h3>Tool Call Example</h3>
+            <pre><code># Tool Call (Function Calling)
+payload = {
+    "messages": [{"role": "user", "content": "今天台北天氣如何？"}],
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "取得指定城市的天氣",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string", "description": "城市名稱"}
+                    },
+                    "required": ["city"]
+                }
+            }
+        }
+    ],
+    "tool_choice": "auto"
+}</code></pre>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="code-structure">
+            <h2>4. Code Structure in Detail</h2>
+            <p>Understanding the project structure helps you locate problems quickly.</p>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>File path</th>
+                        <th>Role and function</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>service/app.py</code></td>
+                        <td><strong>Entry point</strong>. Defines all API routes, CORS, lifecycle management, and the OpenAI-compatibility layer (session assembly, streaming handling).</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/model_manager.py</code></td>
+                        <td><strong>Mediator</strong>. A singleton that coordinates communication between the API layer and the Worker Process. Provides methods such as <code>start_loading</code>, <code>generate_stream</code>, <code>generate</code>, and <code>stop_generation</code>.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/inference/model_inference_process.py</code></td>
+                        <td><strong>Process controller</strong>. Manages the <code>multiprocessing.Process</code>, controlling the Worker lifecycle and IPC Queue communication.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/inference/engines/</code></td>
+                        <td><strong>Engine implementations</strong>.
+                            <ul>
+                                <li><code>base_engine.py</code>: Abstract base class</li>
+                                <li><code>transformers_engine.py</code>: HF Transformers engine</li>
+                                <li><code>vllm_engine.py</code>: vLLM engine (subprocess management)</li>
+                                <li><code>llama_server_engine.py</code>: llama-server engine</li>
+                            </ul>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><code>service/inference/generate/generator_worker.py</code></td>
+                        <td><strong>Generation logic</strong>. Contains <code>handle_generate_request</code> and <code>handle_generate_stream_request</code>, which call <code>model.generate()</code> and handle the Streamer output.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/inference/load_model/peft_loader.py</code></td>
+                        <td><strong>PEFT loader</strong>. Supports loading fine-tuned LoRA/QLoRA adapter models (merged into the base model or loaded as a PeftModel).</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/config_models.py</code></td>
+                        <td><strong>Data models</strong>. Defines all Pydantic request/response schemas, including <code>InferenceConfig</code>, <code>OpenAIChatCompletionRequest</code>, <code>TrainingConfig</code>, and others.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/session_manager.py</code></td>
+                        <td><strong>Session management</strong>. Manages multi-turn conversation history, supporting Redis storage (when Redis is available) or in-memory storage (fallback).</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/model_registry.py</code></td>
+                        <td><strong>Model registry</strong>. Manages the list of available models (base/finetuned/llama_gguf), stored in <code>service/configs/models_registry.json</code>.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/download_manager.py</code></td>
+                        <td><strong>Download management</strong>. Asynchronously downloads models from the HuggingFace Hub and automatically registers them in the Model Registry.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/utils/conversion_manager.py</code></td>
+                        <td><strong>Format conversion</strong>. Converts HF models to GGUF format (invokes the llama.cpp conversion script).</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/inference/memory_estimator.py</code></td>
+                        <td><strong>Memory estimation</strong>. Estimates VRAM requirements under each offload strategy based on model size and quantization settings.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/settings.py</code></td>
+                        <td><strong>Environment configuration</strong>. Reads settings from <code>.env</code> such as HF_HOME, Redis, and the service port.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="process-details">
+            <h2>5. Inference Process Details (Deep Dive)</h2>
+
+            <h3>Step 1: Model Loading Flow (Load Flow)</h3>
+            <ol>
+                <li>The client sends <code>POST /inference/load_model</code> (with <code>engine</code>, <code>model_name</code>, <code>quantization</code>, etc.).</li>
+                <li><code>app.py</code> checks whether a model with the same configuration is already running (if so, <code>already_loaded</code>), or whether a different model is running (in which case HTTP 409 requires unloading first).</li>
+                <li><code>app.py</code> calls <code>model_manager.start_loading(config)</code>.</li>
+                <li><code>ModelManager</code> pushes the <code>load</code> command onto the <strong>Request Queue</strong> (IPC).</li>
+                <li>The <strong>Worker Process</strong> selects the corresponding engine based on <code>engine</code>:
+                    <ul>
+                        <li><strong>Transformers</strong>: Loads using <code>BitsAndBytesConfig</code>, <code>AutoModelForCausalLM</code>, and a device map.</li>
+                        <li><strong>vLLM</strong>: Starts a <code>vllm serve</code> subprocess and waits for the health check to pass.</li>
+                        <li><strong>llama-server</strong>: Starts a <code>llama-server</code> subprocess and waits for /health to be ready.</li>
+                    </ul>
+                </li>
+                <li>The Worker continuously reports progress through the <strong>Status Queue</strong> (<code>loading</code> → <code>ready</code>).</li>
+            </ol>
+
+            <h3>Step 2: OpenAI-Compatible Chat Flow</h3>
+            <div class="note">
+                <strong>Note:</strong> <code>/v1/chat/completions</code> is responsible for session management and prompt assembly in the main process, while the inference itself runs in the Worker Process.
+            </div>
+            <ol>
+                <li>The client sends <code>POST /v1/chat/completions</code> (with <code>messages</code>, <code>stream=True</code>, <code>session_id</code>).</li>
+                <li><code>app.py</code> performs prompt assembly:
+                    <ul>
+                        <li>If a <code>session_id</code> is present, it retrieves the history via <code>session_manager</code> (up to 6 messages, roughly 3 turns of conversation).</li>
+                        <li>It parses <code>enable_thinking</code> and applies model-aware generation parameters (for example, Qwen3.5 automatically adjusts temperature/top_p/repetition_penalty).</li>
+                    </ul>
+                </li>
+                <li>If the request contains <code>tools</code> or <code>tool_calls</code>, it takes the tool passthrough path (bypassing session management and passing through directly).</li>
+                <li><code>app.py</code> calls <code>model_manager.generate_stream()</code> to obtain an iterator.</li>
+                <li>The <strong>Worker Process</strong> runs the generation, using <code>TextIteratorStreamer</code> to push tokens one by one onto the <strong>Data Queue</strong>.</li>
+                <li>Through SSE, <code>app.py</code> wraps the Data Queue content into the OpenAI chunk format in real time and returns it to the frontend.</li>
+                <li>After generation completes, <code>app.py</code> appends this turn's user/assistant exchange to <code>session_manager</code>.</li>
+            </ol>
+
+            <h3>Qwen3.5 Model-Aware Parameter Auto-Adjustment</h3>
+            <div class="warning">
+                <strong>Special behavior:</strong> When the loaded model is detected to be part of the Qwen3.5 series (the model name contains "qwen3.5"), the system automatically forces an override of the generation parameters:
+                <ul>
+                    <li><code>temperature</code> is forced to <code>1.0</code></li>
+                    <li><code>top_p</code> is forced to <code>0.95</code></li>
+                    <li><code>top_k</code> is forced to <code>20</code></li>
+                    <li><code>repetition_penalty</code> is forced to <code>1.0</code></li>
+                    <li><code>enable_thinking</code> is forced to <code>false</code></li>
+                </ul>
+                This is done to prevent the Qwen3.5 MoE architecture from producing multilingual garbled output under non-official parameters.
+            </div>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="config-guide">
+            <h2>6. Configuration and Parameters</h2>
+
+            <h3>InferenceConfig — Transformers Engine Loading Example</h3>
+            <pre><code>{
+  "model_name": "Qwen/Qwen3-4B",      // HF 模型 ID 或本地路徑
+  "engine": "transformers",             // 推理引擎: transformers / vllm / llama_server
+  "quantization": "int4",              // 量化: none, int8, int4, nf4, fp4
+  "device_map": "auto",               // 設備映射策略
+  "max_memory": {                      // 限制各裝置記憶體
+    "0": "22GiB",
+    "cpu": "64GiB"
+  },
+  "offload_folder": "offload_dir",    // Disk Offload 路徑
+  "torch_dtype": "auto",
+  "trust_remote_code": true
+}</code></pre>
+
+            <h3>InferenceConfig — vLLM Engine Loading Example</h3>
+            <pre><code>{
+  "model_name": "Qwen/Qwen3-8B",
+  "engine": "vllm",
+  "vllm_gpu_memory_utilization": 0.85,
+  "vllm_max_model_len": 8192,
+  "vllm_dtype": "auto",
+  "vllm_tensor_parallel_size": 1      // 多 GPU 時可設為 2 或 4
+}</code></pre>
+
+            <h3>InferenceConfig — llama-server Engine Loading Example</h3>
+            <pre><code>{
+  "model_name": "my-local-gguf",       // Model Registry 中的 label
+  "engine": "llama_server",
+  "n_gpu_layers": -1,                  // -1 = 全部層放 GPU
+  "n_ctx": 8192,
+  "llama_server_port": 5001,
+  "llama_server_np": 4                 // 平行生成槽位
+}</code></pre>
+
+            <h3>OpenAI Chat Completions — Request Parameters</h3>
+            <pre><code>{
+  "model": "Qwen/Qwen3-4B",           // 可選，相容欄位
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "請解釋量子糾纏"}
+  ],
+  "stream": true,
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "top_k": 50,
+  "max_tokens": 2048,
+  "session_id": "user-123",           // 啟用多輪對話記憶
+  "reset_history": false,             // 是否清除歷史後重新開始
+  "enable_thinking": false            // 思考模式（DeepSeek/QwQ）
+}</code></pre>
+
+            <h3>MemoryEstimateRequest — Memory Estimation</h3>
+            <pre><code>{
+  "model_name": "Qwen/Qwen3-14B",
+  "quantization": "int4",
+  "batch_size": 1,
+  "sequence_length": 2048,
+  "include_activations": true
+}</code></pre>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="model-registry">
+            <h2>7. Model Registry</h2>
+            <p>The model list is stored in <code>service/configs/models_registry.json</code> and is divided into three types: <code>base</code> (HF models), <code>finetuned</code> (after fine-tuning), and <code>llama_gguf</code> (GGUF).</p>
+
+            <div class="grid">
+                <div class="card">
+                    <h3>Query Available Models</h3>
+                    <code>GET /config/models</code>
+                    <p>Returns the list of all registered base models, fine-tuned models, and GGUF models.</p>
+                </div>
+                <div class="card">
+                    <h3>Download Model</h3>
+                    <code>POST /config/models/download</code>
+                    <p>Downloads a model from the HuggingFace Hub and automatically registers it in the registry. Runs asynchronously and returns a <code>task_id</code>; you can query progress via <code>GET /config/models/download/{task_id}</code>.</p>
+                    <pre><code>{
+  "model_id": "Qwen/Qwen3-4B",
+  "label": "qwen3_4b",
+  "force_download": false
+}</code></pre>
+                </div>
+                <div class="card">
+                    <h3>Delete Model</h3>
+                    <code>DELETE /config/models/{label}</code>
+                    <p>Removes the model from the registry. Adding <code>?delete_files=true</code> also deletes the local files (including the entire HF cache directory).</p>
+                </div>
+                <div class="card">
+                    <h3>Convert to GGUF</h3>
+                    <code>POST /config/models/convert</code>
+                    <p>Converts an HF model to GGUF format, running asynchronously. Supports <code>outtype</code>: auto/f16/bf16/q8_0/f32.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ================================================================ -->
+        <section id="troubleshooting">
+            <h2>8. Troubleshooting</h2>
+
+            <div class="card">
+                <h3>❌ Error: Out of Memory (OOM)</h3>
+                <p><strong>Symptom:</strong> The Worker Process crashes and <code>/inference/status</code> shows <code>loading_error</code>.</p>
+                <p><strong>Solutions:</strong></p>
+                <ul>
+                    <li>Call <code>POST /inference/force_cleanup_gpu</code> to forcibly clean up VRAM.</li>
+                    <li>Lower the <code>max_memory</code> GPU limit to force more layers to offload to the CPU.</li>
+                    <li>Switch to a higher quantization level (int8 → int4).</li>
+                    <li>Use <code>vllm_cpu_offload_gb</code> (vLLM engine).</li>
+                    <li>Call <code>/inference/estimate_memory</code> first to assess requirements before deciding on the configuration.</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>❌ HTTP 409: Model Already Loaded</h3>
+                <p><strong>Symptom:</strong> Receiving a 409 when trying to load a different model.</p>
+                <p><strong>Solution:</strong> Call <code>POST /inference/unload_model</code> first, then load again.</p>
+            </div>
+
+            <div class="card">
+                <h3>❌ HTTP 410: Deprecated Endpoint</h3>
+                <p><strong>Symptom:</strong> Calling <code>POST /inference/chat</code> returns a 410.</p>
+                <p><strong>Solution:</strong> Switch to <code>POST /v1/chat/completions</code>, which is compatible with the OpenAI API format.</p>
+            </div>
+
+            <div class="card">
+                <h3>❌ Inference Timeout</h3>
+                <p><strong>Symptom:</strong> Generation takes too long, causing the connection to drop.</p>
+                <p><strong>Solutions:</strong></p>
+                <ul>
+                    <li>Lower the <code>max_tokens</code> parameter (which maps to <code>max_new_tokens</code>).</li>
+                    <li>Raise <code>total_timeout</code> in the request (default 300 seconds).</li>
+                    <li>Check whether too many layers are on CPU offload (CPU inference is extremely slow).</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>❌ Tokenizer / Template Error</h3>
+                <p><strong>Symptom:</strong> The response content contains strange tags or formatting errors.</p>
+                <p><strong>Solutions:</strong></p>
+                <ul>
+                    <li>Confirm that <code>trust_remote_code: true</code> is enabled.</li>
+                    <li>Check whether the model requires a special chat template (in vLLM you can specify a custom .jinja file via <code>vllm_chat_template</code>).</li>
+                    <li>For Qwen3.5, the system already disables thinking mode automatically; if you still have issues, confirm that the API request does not forcibly set <code>enable_thinking: true</code>.</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>❌ vLLM Startup Failure / Port Conflict</h3>
+                <p><strong>Symptom:</strong> The vLLM engine fails to load and the log shows the port is in use.</p>
+                <p><strong>Solutions:</strong></p>
+                <ul>
+                    <li>On service startup, <code>sweep_stale_vllm_processes()</code> runs automatically to clean up leftover processes.</li>
+                    <li>Manually check port usage: <code>lsof -i :5000</code> (the vLLM default port <code>VLLM_PORT</code>), and if necessary <code>kill -9 {PID}</code>.</li>
+                    <li>Restart the FastAPI service and try loading again.</li>
+                </ul>
+            </div>
+        </section>
+    </div>
+</body>
+</html>

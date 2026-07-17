@@ -9,7 +9,7 @@
 
 ---
 
-GitHub AST is a FastAPI-based LLM backend service that provides:
+AI Scaler Toolkit is a FastAPI-based LLM backend service that provides:
 
 - Model loading / unloading
 - OpenAI-compatible chat interface
@@ -36,7 +36,7 @@ cd /home/test/project
 git clone --recursive <YOUR_GITHUB_REPOSITORY_URL> AI-Scaler-Toolkit
 cd AI-Scaler-Toolkit
 
-mkdir -p logs .cache/huggingface runtime_data/inference_offload runtime_data/finetune_output
+mkdir -p logs .cache/huggingface
 cp .env.example .env
 # Edit .env and update HF_HOME, LOG_DIR, SERVICE_HOST, and SERVICE_PORT first
 
@@ -60,7 +60,7 @@ cd C:\Users\<user>\project
 git clone --recursive <YOUR_GITHUB_REPOSITORY_URL> AI-Scaler-Toolkit
 cd AI-Scaler-Toolkit
 
-New-Item -ItemType Directory -Force logs, .cache\huggingface, runtime_data\inference_offload, runtime_data\finetune_output
+New-Item -ItemType Directory -Force logs, .cache\huggingface
 Copy-Item .env.example .env
 notepad .env
 
@@ -85,13 +85,15 @@ AI-Scaler-Toolkit/
 ├─ deploy/
 │  ├─ linux/
 │  │  ├─ run_service.sh
-│  │  └─ setup_env.sh
+│  │  ├─ setup_env.sh
+│  │  └─ stop_service.sh
 │  ├─ windows/
 │  │  ├─ run_service.bat
 │  │  └─ setup_env.ps1
 │  └─ docker/
 ├─ docs/
 ├─ dataset/
+├─ examples/
 ├─ service/
 │  ├─ app.py
 │  ├─ settings.py
@@ -101,25 +103,15 @@ AI-Scaler-Toolkit/
 ├─ Trusta-AST-Frontend/
 │  ├─ dist/
 │  └─ dist_client/
+├─ wiki/
+├─ logs/
+├─ .github/
 ├─ .env.example
-└─ README.md
+├─ pytest.ini
+├─ LICENSE
+├─ README.md
+└─ README.zh-TW.md
 ```
-
----
-
-## GitHub Metrics Backup
-
-This repository now includes a scheduled workflow at `.github/workflows/metrics-backup.yml` that archives GitHub traffic and release download metrics into `data/metrics/`.
-
-Tracked metrics:
-
-- Page views
-- Unique visitors
-- Clone counts
-- Unique cloners
-- Release asset download counts
-
-Setup details, token requirements, and output file formats are documented in [docs/github-metrics.md](docs/github-metrics.md).
 
 ---
 
@@ -342,13 +334,13 @@ cd AI-Scaler-Toolkit
 #### Linux
 
 ```bash
-mkdir -p logs .cache/huggingface runtime_data/inference_offload runtime_data/finetune_output
+mkdir -p logs .cache/huggingface
 ```
 
 #### Windows (PowerShell)
 
 ```powershell
-New-Item -ItemType Directory -Force logs, .cache\huggingface, runtime_data\inference_offload, runtime_data\finetune_output
+New-Item -ItemType Directory -Force logs, .cache\huggingface
 ```
 
 ### 5.2 Create `.env`
