@@ -1,7 +1,7 @@
 # AI Scaler Toolkit
 
-<img src="Trusta-AST-Frontend/dist/Trusta-16.ico" alt="Trusta Icon" width="24" height="24" style="vertical-align: middle; margin-right: 8px;">
-<img src="Trusta-AST-Frontend/dist_client/Adata.ico" alt="Adata Icon" width="24" height="24" style="vertical-align: middle; margin-left: 8px;">
+<img src="src/frontend/dist/Trusta-16.ico" alt="Trusta Icon" width="24" height="24" style="vertical-align: middle; margin-right: 8px;">
+<img src="src/frontend/dist_client/Adata.ico" alt="Adata Icon" width="24" height="24" style="vertical-align: middle; margin-left: 8px;">
 
 ## 🌐 Language / 語言
 
@@ -92,17 +92,19 @@ AI-Scaler-Toolkit/
 │  │  └─ setup_env.ps1
 │  └─ docker/
 ├─ docs/
-├─ dataset/
 ├─ examples/
-├─ service/
-│  ├─ app.py
-│  ├─ settings.py
-│  ├─ pyproject.toml
-│  └─ configs/
+│  └─ datasets/
+├─ src/
+│  ├─ service/
+│  │  ├─ app.py
+│  │  ├─ settings.py
+│  │  ├─ pyproject.toml
+│  │  └─ configs/
+│  ├─ frontend/
+│  │  ├─ dist/
+│  │  └─ dist_client/
+│  └─ console/
 ├─ tests/
-├─ Trusta-AST-Frontend/
-│  ├─ dist/
-│  └─ dist_client/
 ├─ wiki/
 ├─ logs/
 ├─ .github/
@@ -345,9 +347,9 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 
 ### 5.2 建立 `.env`
 
-專案啟動時，`service/settings.py` 會優先讀取專案根目錄的 `.env`；如果 `.env` 不存在，才會退回 `.env.example`。
+專案啟動時，`src/service/settings.py` 會優先讀取專案根目錄的 `.env`；如果 `.env` 不存在，才會退回 `.env.example`。
 
-**原則：請優先修改 `.env`，不要直接改 `service/settings.py`。**
+**原則：請優先修改 `.env`，不要直接改 `src/service/settings.py`。**
 
 #### Linux
 
@@ -412,13 +414,13 @@ REDIS_DB=0
 若已經編譯好 llama.cpp，也可在 `.env` 補上：
 
 ```dotenv
-LLAMA_SERVER_BINARY=./service/utils/llama.cpp/build/bin/llama-server
+LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/llama-server
 ```
 
 Windows 範例：
 
 ```dotenv
-LLAMA_SERVER_BINARY=./service/utils/llama.cpp/build/bin/Release/llama-server.exe
+LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/Release/llama-server.exe
 ```
 
 > 路徑可以用正斜線 `/` 或反斜線 `\`，Python 的 `pathlib` 兩者皆支援。
@@ -431,7 +433,7 @@ LLAMA_SERVER_BINARY=./service/utils/llama.cpp/build/bin/Release/llama-server.exe
 | `TIKTOKEN_RS_CACHE_DIR` | TikToken / GPT-OSS 快取 | 專案根目錄 |
 | `LOG_DIR` | 日誌輸出目錄 | `<project>/logs` |
 | `LLAMA_SERVER_BINARY` | llama-server 可執行檔路徑 | 自動尋找 build 輸出 |
-| `VLLM_SERVER_PROJECT_DIR` | vLLM 隔離環境目錄 | `service/inference/engines/vllm_server` |
+| `VLLM_SERVER_PROJECT_DIR` | vLLM 隔離環境目錄 | `src/service/inference/engines/vllm_server` |
 
 ### 5.4 dmidecode 權限設定（Linux 選配）
 
@@ -474,7 +476,7 @@ cd /home/test/project/AI-Scaler-Toolkit
 TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash deploy/linux/setup_env.sh
 ```
 
-腳本會在 `service/.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
+腳本會在 `src/service/.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
 
 > **提醒**：若要使用 fine-tune，請使用 **Linux + CUDA** 安裝流程。
 
@@ -496,12 +498,12 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 
 ### 6.1 若要使用 llama-server
 
-`llama.cpp` 來源在 submodule `service/utils/llama.cpp`，需自行編譯。
+`llama.cpp` 來源在 submodule `src/service/utils/llama.cpp`，需自行編譯。
 
 #### Linux
 
 ```bash
-cd /home/test/project/AI-Scaler-Toolkit/service/utils/llama.cpp
+cd /home/test/project/AI-Scaler-Toolkit/src/service/utils/llama.cpp
 cmake -B build
 cmake --build build -j
 ```
@@ -562,7 +564,7 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 .\deploy\windows\run_service.bat
 ```
 
-啟動腳本會直接使用 `service/.venv` 內的 Python；**不需要手動啟動虛擬環境**。
+啟動腳本會直接使用 `src/service/.venv` 內的 Python；**不需要手動啟動虛擬環境**。
 
 ### 預設服務位址
 
@@ -694,10 +696,10 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions `
 
 專案已內含前端靜態檔：
 
-- `Trusta-AST-Frontend/dist`
-- `Trusta-AST-Frontend/dist_client`
+- `src/frontend/dist`
+- `src/frontend/dist_client`
 
-目前後端會掛載 `Trusta-AST-Frontend/dist` 到 `/frontend/`，根路徑 `/` 會在 `index.html` 存在時自動轉址到 `/frontend/`。
+目前後端會掛載 `src/frontend/dist` 到 `/frontend/`，根路徑 `/` 會在 `index.html` 存在時自動轉址到 `/frontend/`。
 
 因此：
 
@@ -779,8 +781,8 @@ TIKTOKEN_RS_CACHE_DIR=<你的專案根目錄>
 
 請先確認專案內的前端資料夾已有檔案：
 
-- `Trusta-AST-Frontend/dist/index.html`
-- `Trusta-AST-Frontend/dist/assets/`
+- `src/frontend/dist/index.html`
+- `src/frontend/dist/assets/`
 
 若 `dist` 內已有檔案，直接重新開啟 `http://127.0.0.1:8000/` 即可。
 
@@ -818,10 +820,10 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 本專案內建的 DeepSpeed profile 位於：
 
-- `service/configs/deepspeed/zero3_offload_cpu_cpu.json`
-- `service/configs/deepspeed/zero3_offload_cpu_disk.json`
-- `service/configs/deepspeed/zero3_offload_disk_cpu.json`
-- `service/configs/deepspeed/zero3_offload_disk_disk.json`
+- `src/service/configs/deepspeed/zero3_offload_cpu_cpu.json`
+- `src/service/configs/deepspeed/zero3_offload_cpu_disk.json`
+- `src/service/configs/deepspeed/zero3_offload_disk_cpu.json`
+- `src/service/configs/deepspeed/zero3_offload_disk_disk.json`
 
 若錯誤訊息提到 `buffer`、`swapper`、NVMe offload、aio / offload queue 類問題，最常見的第一步是調高 `zero_optimization.offload_param.buffer_count`。
 

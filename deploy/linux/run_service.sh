@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-SERVICE_DIR="$PROJECT_ROOT/service"
+SERVICE_DIR="$PROJECT_ROOT/src/service"
 VENV_PATH="$SERVICE_DIR/.venv"
 
 if [[ ! -f "$VENV_PATH/bin/activate" ]]; then
@@ -16,7 +16,7 @@ fi
 export VIRTUAL_ENV="$VENV_PATH"
 export PATH="$VENV_PATH/bin:$PATH"
 
-cd "$PROJECT_ROOT"
+cd "$PROJECT_ROOT/src"
 
-# 啟動服務 - 由 app.py 入口統一讀取 service/settings.py 設定
+# 啟動服務 - 由 app.py 入口統一讀取 src/service/settings.py 設定
 exec "$VENV_PATH/bin/python" -m service.app

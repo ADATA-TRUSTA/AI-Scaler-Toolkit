@@ -19,7 +19,7 @@ models/
 checkpoints/
 .cache/
 finetune_output/
-service/utils/llama.cpp/
+src/service/utils/llama.cpp/
 
 # IDE
 .vscode/
@@ -29,8 +29,8 @@ service/utils/llama.cpp/
 *~
 
 # LLM wiki local metadata
-Trusta-AST-LLM-wiki/.llm-wiki/
-Trusta-AST-LLM-wiki/.obsidian/
+wiki/.llm-wiki/
+wiki/.obsidian/
 
 # Logs
 *.log

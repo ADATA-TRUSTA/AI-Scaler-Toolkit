@@ -1,7 +1,7 @@
 # AI Scaler Toolkit
 
-<img src="Trusta-AST-Frontend/dist/Trusta-16.ico" alt="Trusta Icon" width="24" height="24" style="vertical-align: middle; margin-right: 8px;">
-<img src="Trusta-AST-Frontend/dist_client/Adata.ico" alt="Adata Icon" width="24" height="24" style="vertical-align: middle; margin-left: 8px;">
+<img src="src/frontend/dist/Trusta-16.ico" alt="Trusta Icon" width="24" height="24" style="vertical-align: middle; margin-right: 8px;">
+<img src="src/frontend/dist_client/Adata.ico" alt="Adata Icon" width="24" height="24" style="vertical-align: middle; margin-left: 8px;">
 
 ## 🌐 Language / 語言
 
@@ -92,17 +92,19 @@ AI-Scaler-Toolkit/
 │  │  └─ setup_env.ps1
 │  └─ docker/
 ├─ docs/
-├─ dataset/
 ├─ examples/
-├─ service/
-│  ├─ app.py
-│  ├─ settings.py
-│  ├─ pyproject.toml
-│  └─ configs/
+│  └─ datasets/
+├─ src/
+│  ├─ service/
+│  │  ├─ app.py
+│  │  ├─ settings.py
+│  │  ├─ pyproject.toml
+│  │  └─ configs/
+│  ├─ frontend/
+│  │  ├─ dist/
+│  │  └─ dist_client/
+│  └─ console/
 ├─ tests/
-├─ Trusta-AST-Frontend/
-│  ├─ dist/
-│  └─ dist_client/
 ├─ wiki/
 ├─ logs/
 ├─ .github/
@@ -345,9 +347,9 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 
 ### 5.2 Create `.env`
 
-When the project starts, `service/settings.py` loads `.env` from the project root first. If `.env` does not exist, it falls back to `.env.example`.
+When the project starts, `src/service/settings.py` loads `.env` from the project root first. If `.env` does not exist, it falls back to `.env.example`.
 
-**Rule: update `.env` first; do not modify `service/settings.py` directly unless necessary.**
+**Rule: update `.env` first; do not modify `src/service/settings.py` directly unless necessary.**
 
 #### Linux
 
@@ -412,13 +414,13 @@ REDIS_DB=0
 If you already compiled llama.cpp, you can also add this to `.env`:
 
 ```dotenv
-LLAMA_SERVER_BINARY=./service/utils/llama.cpp/build/bin/llama-server
+LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/llama-server
 ```
 
 Windows example:
 
 ```dotenv
-LLAMA_SERVER_BINARY=./service/utils/llama.cpp/build/bin/Release/llama-server.exe
+LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/Release/llama-server.exe
 ```
 
 > Paths can use either `/` or `\`; Python `pathlib` supports both.
@@ -431,7 +433,7 @@ LLAMA_SERVER_BINARY=./service/utils/llama.cpp/build/bin/Release/llama-server.exe
 | `TIKTOKEN_RS_CACHE_DIR` | TikToken / GPT-OSS cache | Project root |
 | `LOG_DIR` | Log output directory | `<project>/logs` |
 | `LLAMA_SERVER_BINARY` | Path to the `llama-server` executable | Auto-detected from build output |
-| `VLLM_SERVER_PROJECT_DIR` | vLLM isolated environment directory | `service/inference/engines/vllm_server` |
+| `VLLM_SERVER_PROJECT_DIR` | vLLM isolated environment directory | `src/service/inference/engines/vllm_server` |
 
 ### 5.4 `dmidecode` Permission Setup (Linux, Optional)
 
@@ -474,7 +476,7 @@ cd /home/test/project/AI-Scaler-Toolkit
 TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash deploy/linux/setup_env.sh
 ```
 
-The script creates the environment in `service/.venv`; **you do not need to activate the virtual environment manually**.
+The script creates the environment in `src/service/.venv`; **you do not need to activate the virtual environment manually**.
 
 > **Reminder**: If you need fine-tuning, use the **Linux + CUDA** installation path.
 
@@ -496,12 +498,12 @@ The script creates the environment in `service\.venv`; **you do not need to acti
 
 ### 6.1 If You Want to Use `llama-server`
 
-The `llama.cpp` source is included as the `service/utils/llama.cpp` submodule and must be compiled manually.
+The `llama.cpp` source is included as the `src/service/utils/llama.cpp` submodule and must be compiled manually.
 
 #### Linux
 
 ```bash
-cd /home/test/project/AI-Scaler-Toolkit/service/utils/llama.cpp
+cd /home/test/project/AI-Scaler-Toolkit/src/service/utils/llama.cpp
 cmake -B build
 cmake --build build -j
 ```
@@ -561,7 +563,7 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 .\deploy\windows\run_service.bat
 ```
 
-The startup script directly uses Python from `service/.venv`; **you do not need to activate the virtual environment manually**.
+The startup script directly uses Python from `src/service/.venv`; **you do not need to activate the virtual environment manually**.
 
 ### Default Service URLs
 
@@ -693,10 +695,10 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions `
 
 The project already contains static frontend assets:
 
-- `Trusta-AST-Frontend/dist`
-- `Trusta-AST-Frontend/dist_client`
+- `src/frontend/dist`
+- `src/frontend/dist_client`
 
-The backend currently mounts `Trusta-AST-Frontend/dist` at `/frontend/`, and the root path `/` automatically redirects to `/frontend/` when `index.html` exists.
+The backend currently mounts `src/frontend/dist` at `/frontend/`, and the root path `/` automatically redirects to `/frontend/` when `index.html` exists.
 
 Therefore:
 
@@ -778,8 +780,8 @@ TIKTOKEN_RS_CACHE_DIR=<your project root>
 
 First verify that the frontend files exist in the project:
 
-- `Trusta-AST-Frontend/dist/index.html`
-- `Trusta-AST-Frontend/dist/assets/`
+- `src/frontend/dist/index.html`
+- `src/frontend/dist/assets/`
 
 If files already exist under `dist`, simply reopen `http://127.0.0.1:8000/`.
 
@@ -817,10 +819,10 @@ Make sure CUDA Toolkit is installed and the driver version is compatible. If you
 
 The built-in DeepSpeed profiles are located at:
 
-- `service/configs/deepspeed/zero3_offload_cpu_cpu.json`
-- `service/configs/deepspeed/zero3_offload_cpu_disk.json`
-- `service/configs/deepspeed/zero3_offload_disk_cpu.json`
-- `service/configs/deepspeed/zero3_offload_disk_disk.json`
+- `src/service/configs/deepspeed/zero3_offload_cpu_cpu.json`
+- `src/service/configs/deepspeed/zero3_offload_cpu_disk.json`
+- `src/service/configs/deepspeed/zero3_offload_disk_cpu.json`
+- `src/service/configs/deepspeed/zero3_offload_disk_disk.json`
 
 If the error mentions `buffer`, `swapper`, NVMe offload, aio, or offload queue problems, the most common first step is to increase `zero_optimization.offload_param.buffer_count`.
 

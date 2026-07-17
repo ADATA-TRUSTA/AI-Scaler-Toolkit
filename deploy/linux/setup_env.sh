@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-SERVICE_DIR="$PROJECT_ROOT/service"
+SERVICE_DIR="$PROJECT_ROOT/src/service"
 VLLM_SERVER_DIR="$SERVICE_DIR/inference/engines/vllm_server"
 
 detect_accel() {

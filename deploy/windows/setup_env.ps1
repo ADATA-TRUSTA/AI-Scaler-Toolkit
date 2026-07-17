@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path "$ScriptDir\..\..\").Path
-$ServiceDir  = Join-Path $ProjectRoot "service"
+$ServiceDir  = Join-Path $ProjectRoot "src\service"
 
 # 自動偵測：有 nvidia-smi 就 CUDA，否則預設 XPU（Intel iGPU / Arc）
 if (-not $Accel) {
