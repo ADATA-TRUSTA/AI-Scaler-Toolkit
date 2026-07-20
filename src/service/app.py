@@ -569,9 +569,20 @@ app = FastAPI(
 )
 
 # ==================== Frontend Static Files ====================
-# React build (e.g. created by `npm run build`) expected at: Trusta-AST-Frontend/dist
-# We mount it at /frontend for direct file access, and provide a SPA fallback route
-FRONTEND_DIST = Path(__file__).resolve().parent.parent / "Trusta-AST-Frontend" / "dist"
+# React build (e.g. created by `npm run build`). Located by trying known
+# candidate locations so the package stays relocatable across layouts
+# (e.g. repo-root/Trusta-AST-Frontend or src/frontend); the first existing
+# one wins. Set FRONTEND_DIST_DIR to override explicitly.
+_frontend_base = Path(__file__).resolve().parent.parent
+_frontend_candidates = [
+    Path(os.environ["FRONTEND_DIST_DIR"]) if os.getenv("FRONTEND_DIST_DIR") else None,
+    _frontend_base / "frontend" / "dist",
+    _frontend_base / "Trusta-AST-Frontend" / "dist",
+]
+FRONTEND_DIST = next(
+    (p for p in _frontend_candidates if p and p.exists()),
+    _frontend_base / "frontend" / "dist",
+)
 if FRONTEND_DIST.exists():
     # html=True enables index.html serving on /frontend/ requests
     app.mount(
