@@ -40,8 +40,8 @@ mkdir -p logs .cache/huggingface
 cp .env.example .env
 # Edit .env and update HF_HOME, LOG_DIR, SERVICE_HOST, and SERVICE_PORT first
 
-TRUSTA_ACCEL=cuda bash deploy/linux/setup_env.sh
-bash deploy/linux/run_service.sh
+TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
+bash scripts/linux/run_service.sh
 ```
 
 After the service starts successfully, open:
@@ -64,8 +64,8 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 Copy-Item .env.example .env
 notepad .env
 
-.\deploy\windows\setup_env.ps1 -Accel xpu
-.\deploy\windows\run_service.bat
+.\scripts\windows\setup_env.ps1 -Accel xpu
+.\scripts\windows\run_service.bat
 ```
 
 After the service starts successfully, open:
@@ -82,7 +82,7 @@ To use NVIDIA CUDA instead, change `-Accel xpu` to `-Accel cuda`.
 
 ```text
 AI-Scaler-Toolkit/
-├─ deploy/
+├─ scripts/
 │  ├─ linux/
 │  │  ├─ run_service.sh
 │  │  ├─ setup_env.sh
@@ -459,21 +459,21 @@ If you skip this step, the API still works, but DRAM specification fields may be
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
 ```
 
 If the machine does not have NVIDIA CUDA, switch to XPU:
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh
 ```
 
 Skip vLLM environment setup:
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash scripts/linux/setup_env.sh
 ```
 
 The script creates the environment in `src/service/.venv`; **you do not need to activate the virtual environment manually**.
@@ -484,14 +484,14 @@ The script creates the environment in `src/service/.venv`; **you do not need to 
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\setup_env.ps1 -Accel xpu
+.\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 To use CUDA instead:
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\setup_env.ps1 -Accel cuda
+.\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
 The script creates the environment in `service\.venv`; **you do not need to activate the virtual environment manually**.
@@ -544,14 +544,14 @@ On CUDA-capable Linux hosts, `setup_env.sh` automatically creates an isolated vL
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-bash deploy/linux/run_service.sh
+bash scripts/linux/run_service.sh
 ```
 
 If you need `/system/resources` to read full DRAM information through `dmidecode`, you can start the service with sufficient permissions:
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-sudo bash deploy/linux/run_service.sh
+sudo bash scripts/linux/run_service.sh
 ```
 
 > It is recommended to use the `sudoers` setup described earlier to grant only the required `dmidecode` command instead of running the whole service as root long-term.
@@ -560,7 +560,7 @@ sudo bash deploy/linux/run_service.sh
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\run_service.bat
+.\scripts\windows\run_service.bat
 ```
 
 The startup script directly uses Python from `src/service/.venv`; **you do not need to activate the virtual environment manually**.
@@ -732,28 +732,28 @@ Each time you pull a new version from GitHub, it is recommended to resync depend
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh
 ```
 
 If switching to CUDA:
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
 ```
 
 ### Windows
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\setup_env.ps1 -Accel xpu
+.\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 If switching to CUDA:
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\setup_env.ps1 -Accel cuda
+.\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
 ---
@@ -764,8 +764,8 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 
 This means the Python environment has not been created yet. Run:
 
-- Linux: `TRUSTA_ACCEL=xpu bash deploy/linux/setup_env.sh`
-- Windows: `.\deploy\windows\setup_env.ps1 -Accel xpu`
+- Linux: `TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh`
+- Windows: `.\scripts\windows\setup_env.ps1 -Accel xpu`
 
 ### Q2. After moving to a new machine, the model cache still points to the old path
 
@@ -812,7 +812,7 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 Make sure CUDA Toolkit is installed and the driver version is compatible. If you are not using an NVIDIA GPU, use:
 
 ```powershell
-.\deploy\windows\setup_env.ps1 -Accel xpu
+.\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 ### Q7. What should I do if fine-tuning with DeepSpeed hits offload / buffer / swapper errors?

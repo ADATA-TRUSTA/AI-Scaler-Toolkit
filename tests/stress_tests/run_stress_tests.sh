@@ -29,7 +29,7 @@ echo "========================================"
 # Check if service is running
 if ! curl -s http://localhost:8000/health > /dev/null; then
     echo "Error: Service is not running on http://localhost:8000"
-    echo "Please start the service first: bash deploy/linux/run_service.sh"
+    echo "Please start the service first: bash scripts/linux/run_service.sh"
     exit 1
 fi
 

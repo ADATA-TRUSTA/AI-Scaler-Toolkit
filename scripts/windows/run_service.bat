@@ -1,7 +1,6 @@
 @echo off
 setlocal
-REM 啟動服務（CUDA / 一般用途）
-REM 若使用 Intel XPU，請改執行 run_service_xpu.bat
+REM 啟動服務（CUDA / XPU 通用）
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..\..") do set "PROJECT_ROOT=%%~fI"

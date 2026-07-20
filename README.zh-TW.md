@@ -40,8 +40,8 @@ mkdir -p logs .cache/huggingface
 cp .env.example .env
 # 編輯 .env，優先修改 HF_HOME、LOG_DIR、SERVICE_HOST、SERVICE_PORT
 
-TRUSTA_ACCEL=cuda bash deploy/linux/setup_env.sh
-bash deploy/linux/run_service.sh
+TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
+bash scripts/linux/run_service.sh
 ```
 
 啟動成功後，直接用瀏覽器開啟：
@@ -64,8 +64,8 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 Copy-Item .env.example .env
 notepad .env
 
-.\deploy\windows\setup_env.ps1 -Accel xpu
-.\deploy\windows\run_service.bat
+.\scripts\windows\setup_env.ps1 -Accel xpu
+.\scripts\windows\run_service.bat
 ```
 
 啟動成功後，直接用瀏覽器開啟：
@@ -82,7 +82,7 @@ notepad .env
 
 ```text
 AI-Scaler-Toolkit/
-├─ deploy/
+├─ scripts/
 │  ├─ linux/
 │  │  ├─ run_service.sh
 │  │  ├─ setup_env.sh
@@ -459,21 +459,21 @@ sudo visudo -f /etc/sudoers.d/ast-dmidecode
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
 ```
 
 若主機沒有 NVIDIA CUDA 環境，可改用 XPU：
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh
 ```
 
 跳過 vLLM 環境建置：
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash scripts/linux/setup_env.sh
 ```
 
 腳本會在 `src/service/.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
@@ -484,14 +484,14 @@ TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash deploy/linux/setup_env.sh
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\setup_env.ps1 -Accel xpu
+.\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 若要改用 CUDA：
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\setup_env.ps1 -Accel cuda
+.\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
 腳本會在 `service\.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
@@ -544,14 +544,14 @@ cmake --build build --config Release -j
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-bash deploy/linux/run_service.sh
+bash scripts/linux/run_service.sh
 ```
 
 若需要讓 `/system/resources` API 透過 `dmidecode` 讀取完整 DRAM 資訊，可改用具備權限的方式啟動：
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-sudo bash deploy/linux/run_service.sh
+sudo bash scripts/linux/run_service.sh
 ```
 
 > 建議優先依照前文設定 `sudoers`，只授權特定 `dmidecode` 指令；除非必要，不建議長期以 root 執行整個服務。
@@ -561,7 +561,7 @@ sudo bash deploy/linux/run_service.sh
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\run_service.bat
+.\scripts\windows\run_service.bat
 ```
 
 啟動腳本會直接使用 `src/service/.venv` 內的 Python；**不需要手動啟動虛擬環境**。
@@ -733,28 +733,28 @@ LOG_BACKUP_COUNT=14
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh
 ```
 
 若改用 CUDA：
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
 ```
 
 ### Windows
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\setup_env.ps1 -Accel xpu
+.\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 若改用 CUDA：
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\deploy\windows\setup_env.ps1 -Accel cuda
+.\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
 ---
@@ -765,8 +765,8 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 
 代表尚未建立 Python 環境，請先執行：
 
-- Linux：`TRUSTA_ACCEL=xpu bash deploy/linux/setup_env.sh`
-- Windows：`.\deploy\windows\setup_env.ps1 -Accel xpu`
+- Linux：`TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh`
+- Windows：`.\scripts\windows\setup_env.ps1 -Accel xpu`
 
 ### Q2. 新機器下載後，模型快取還指到舊路徑
 
@@ -813,7 +813,7 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 請確認已安裝 CUDA Toolkit，且驅動版本相容。若不是 NVIDIA GPU，請改用：
 
 ```powershell
-.\deploy\windows\setup_env.ps1 -Accel xpu
+.\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 ### Q7. 用 DeepSpeed 做 fine-tune 時出現 offload / buffer / swapper 類錯誤怎麼辦？

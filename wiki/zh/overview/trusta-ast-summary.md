@@ -172,12 +172,12 @@ POST /inference/estimate_memory # 預估 VRAM 需求
 
 ### 基本配置
 ```bash
-# 安裝環境（Linux + CUDA 範例；Windows 請用 deploy/windows/ 底下的腳本）
+# 安裝環境（Linux + CUDA 範例；Windows 請用 scripts/windows/ 底下的腳本）
 cp .env.example .env
-TRUSTA_ACCEL=cuda bash deploy/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
 
 # 啟動服務（服務埠由 .env 的 SERVICE_PORT 控制，預設 8000）
-bash deploy/linux/run_service.sh
+bash scripts/linux/run_service.sh
 ```
 
 > 注意：引擎與模型**不是**用環境變數指定，而是在 `POST /inference/load_model`
