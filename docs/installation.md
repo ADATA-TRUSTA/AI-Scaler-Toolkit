@@ -96,20 +96,20 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 
 ### 建立 `.env`
 
-專案啟動時，`backend/service/settings.py` 會優先讀取專案根目錄的 `.env`；如果 `.env` 不存在，才會退回 `.env.example`。
+專案啟動時，`backend/service/settings.py` 會優先讀取 `backend/`(service/ 所在目錄)的 `.env`；如果 `.env` 不存在，才會退回 `.env.example`。
 
 **原則：請優先修改 `.env`，不要直接改 `backend/service/settings.py`。**
 
 #### Linux
 
 ```bash
-cp .env.example .env
+cp backend/.env.example backend/.env
 ```
 
 #### Windows（PowerShell）
 
 ```powershell
-Copy-Item .env.example .env
+Copy-Item backend\.env.example backend\.env
 ```
 
 接著用文字編輯器開啟 `.env`，至少建議確認以下內容：

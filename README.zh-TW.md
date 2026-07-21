@@ -40,7 +40,7 @@ git clone <YOUR_GITHUB_REPOSITORY_URL> AI-Scaler-Toolkit
 cd AI-Scaler-Toolkit
 
 mkdir -p logs .cache/huggingface
-cp .env.example .env
+cp backend/.env.example backend/.env
 # 編輯 .env，優先修改 HF_HOME、LOG_DIR、SERVICE_HOST、SERVICE_PORT
 
 TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
@@ -64,7 +64,7 @@ git clone <YOUR_GITHUB_REPOSITORY_URL> AI-Scaler-Toolkit
 cd AI-Scaler-Toolkit
 
 New-Item -ItemType Directory -Force logs, .cache\huggingface
-Copy-Item .env.example .env
+Copy-Item backend\.env.example backend\.env
 notepad .env
 
 .\backend\scripts\windows\setup_env.ps1 -Accel xpu
@@ -91,6 +91,7 @@ AI-Scaler-Toolkit/
 │  │  ├─ settings.py
 │  │  ├─ pyproject.toml
 │  │  └─ configs/
+│  ├─ .env.example          # 服務從這裡讀取 .env（PROJECT_ROOT = backend/）
 │  ├─ tests/
 │  ├─ pytest.ini
 │  └─ scripts/
@@ -111,7 +112,6 @@ AI-Scaler-Toolkit/
 │  └─ datasets/
 ├─ wiki/
 ├─ .github/
-├─ .env.example
 ├─ LICENSE
 ├─ README.md
 └─ README.zh-TW.md

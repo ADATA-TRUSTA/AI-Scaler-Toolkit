@@ -96,20 +96,20 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 
 ### Create `.env`
 
-When the project starts, `backend/service/settings.py` loads `.env` from the project root first. If `.env` does not exist, it falls back to `.env.example`.
+When the project starts, `backend/service/settings.py` loads `.env` from `backend/` (the directory holding the `service/` package) first. If `.env` does not exist, it falls back to `.env.example`.
 
 **Rule: update `.env` first; do not modify `backend/service/settings.py` directly unless necessary.**
 
 #### Linux
 
 ```bash
-cp .env.example .env
+cp backend/.env.example backend/.env
 ```
 
 #### Windows (PowerShell)
 
 ```powershell
-Copy-Item .env.example .env
+Copy-Item backend\.env.example backend\.env
 ```
 
 Then open `.env` in a text editor and at least verify the following values:

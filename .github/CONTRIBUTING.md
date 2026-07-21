@@ -33,7 +33,7 @@ full walkthrough. In short:
 ### Linux
 
 ```bash
-cp .env.example .env
+cp backend/.env.example backend/.env
 # Edit .env (HF_HOME, LOG_DIR, SERVICE_HOST, SERVICE_PORT)
 TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
 bash backend/scripts/linux/run_service.sh
@@ -42,7 +42,7 @@ bash backend/scripts/linux/run_service.sh
 ### Windows
 
 ```powershell
-Copy-Item .env.example .env
+Copy-Item backend\.env.example backend\.env
 notepad .env
 .\backend\scripts\windows\setup_env.ps1 -Accel xpu
 .\backend\scripts\windows\run_service.bat

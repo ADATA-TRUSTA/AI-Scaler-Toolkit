@@ -173,7 +173,7 @@ POST /inference/estimate_memory # 預估 VRAM 需求
 ### 基本配置
 ```bash
 # 安裝環境（Linux + CUDA 範例；Windows 請用 backend/scripts/windows/ 底下的腳本）
-cp .env.example .env
+cp backend/.env.example backend/.env
 TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
 
 # 啟動服務（服務埠由 .env 的 SERVICE_PORT 控制，預設 8000）
