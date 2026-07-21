@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path "$ScriptDir\..\..\").Path
-$ServiceDir  = Join-Path $ProjectRoot "src\service"
+$ServiceDir  = Join-Path $ProjectRoot "service"
 
 # llama.cpp（選配，僅 llama-server 需要）：改由安裝期抓取，取代原本的 git submodule。
 # 版本 pin 在此手動維護；要 bump 版本就改 $LlamaCppRef。

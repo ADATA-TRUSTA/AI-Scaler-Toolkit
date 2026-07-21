@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-SERVICE_DIR="$PROJECT_ROOT/src/service"
+SERVICE_DIR="$PROJECT_ROOT/service"
 VLLM_SERVER_DIR="$SERVICE_DIR/inference/engines/vllm_server"
 
 # llama.cpp（選配，僅 llama-server 需要）：改由安裝期抓取，取代原本的 git submodule。
