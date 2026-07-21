@@ -1,7 +1,7 @@
 {
   "model_name": "Qwen/Qwen3.5-122B-A10B",
   "method": "lora",
-  "dataset_path": "examples/datasets/dataset.jsonl",
+  "dataset_path": "../examples/datasets/dataset.jsonl",
   "output_dir": "./finetune_output/qwen3.5_122b_A10B_lora",
   "offload_folder": "./deepspeed_offload",
   "lora_r": 64,

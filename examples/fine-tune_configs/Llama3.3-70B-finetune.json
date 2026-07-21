@@ -1,7 +1,7 @@
 {
   "model_name": "meta-llama/Llama-3.3-70B-Instruct",
   "method": "lora",
-  "dataset_path": "examples/datasets/dataset.jsonl",
+  "dataset_path": "../examples/datasets/dataset.jsonl",
   "output_dir": "./finetune_output/llama3.3_70b_lora",
   "offload_folder": "./deepspeed_offload",
   "lora_r": 64,
