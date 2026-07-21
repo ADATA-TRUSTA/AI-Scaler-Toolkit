@@ -1,0 +1,22 @@
+# Normalize all text files to LF in the repository, independent of each
+# machine's core.autocrlf setting. This bakes the line-ending policy into
+# the repo so every clone/CI behaves the same.
+* text=auto
+
+# Shell scripts must stay LF even when checked out on Windows.
+*.sh text eol=lf
+
+# Windows scripts keep CRLF.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets: never normalize.
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bin binary
+*.safetensors binary
+*.so binary
+*.pyd binary
