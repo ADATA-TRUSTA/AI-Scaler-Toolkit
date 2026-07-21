@@ -1,7 +1,7 @@
 # GitHub AST / AI-Scaler-Toolkit
 
-<img src="../../../../src/frontend/dist/Trusta-16.ico" alt="Trusta Icon" width="24" height="24" style="vertical-align: middle; margin-right: 8px;">
-<img src="../../../../src/frontend/dist_client/Adata.ico" alt="Adata Icon" width="24" height="24" style="vertical-align: middle; margin-left: 8px;">
+<img src="../../../../frontend/dist/Trusta-16.ico" alt="Trusta Icon" width="24" height="24" style="vertical-align: middle; margin-right: 8px;">
+<img src="../../../../frontend/dist_client/Adata.ico" alt="Adata Icon" width="24" height="24" style="vertical-align: middle; margin-left: 8px;">
 
 ## 🌐 Language / 語言
 

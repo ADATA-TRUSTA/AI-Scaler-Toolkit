@@ -121,10 +121,10 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions `
 
 專案已內含前端靜態檔：
 
-- `src/frontend/dist`
-- `src/frontend/dist_client`
+- `frontend/dist`
+- `frontend/dist_client`
 
-目前後端會掛載 `src/frontend/dist` 到 `/frontend/`，根路徑 `/` 會在 `index.html` 存在時自動轉址到 `/frontend/`。
+目前後端會掛載 `frontend/dist` 到 `/frontend/`，根路徑 `/` 會在 `index.html` 存在時自動轉址到 `/frontend/`。
 
 因此：
 

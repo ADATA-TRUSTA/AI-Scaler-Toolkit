@@ -19,7 +19,12 @@ models/
 checkpoints/
 .cache/
 finetune_output/
-src/service/utils/llama.cpp/
+backend/service/utils/llama.cpp/
+
+# Backend runtime state (regenerated at runtime; must not be committed even if upstream ships them)
+backend/service/configs/current_*.json
+backend/service/configs/last_finetuned_model.json
+backend/service/model_offload/
 
 # IDE
 .vscode/

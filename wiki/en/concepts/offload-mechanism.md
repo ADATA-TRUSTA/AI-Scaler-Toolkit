@@ -37,8 +37,8 @@ Offload is not a single custom module; instead it uses the capabilities of exist
   - `zero3_offload_cpu_cpu`, `zero3_offload_cpu_disk`, `zero3_offload_disk_cpu`, `zero3_offload_disk_disk`
 - Note: Disk offload significantly lengthens training time and is a measure for "extremely low-memory environments."
 
-> Quantization benchmarking: VRAM reduction and tok/s can be measured with `tests/benchmark_offload_vram.py`,
-> with results written to `tests/benchmark_offload_vram_results.json`; any numbers cited on this page should be based on that benchmark.
+> Quantization benchmarking: VRAM reduction and tok/s can be measured with `backend/tests/benchmark_offload_vram.py`,
+> with results written to `backend/tests/benchmark_offload_vram_results.json`; any numbers cited on this page should be based on that benchmark.
 >
 > Measured example (RTX 5060 Ti, 16 GB): Qwen3-14B bf16 (~27.5 GB of weights) ran via `device_map=auto` + `offload_folder` at a peak of **~13.4 GB GPU VRAM** (**~51% less** than the ~27.5 GB it would need fully on GPU), at **~0.5 tok/s** under heavy CPU/disk offload — i.e. offload trades throughput to fit a model that otherwise would not load.
 

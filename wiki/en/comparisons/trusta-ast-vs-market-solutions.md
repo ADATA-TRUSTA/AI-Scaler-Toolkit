@@ -16,7 +16,7 @@ provenanceState: merged
 This document compares **Trusta AST** with existing LLM service solutions (Ollama, LM Studio, vLLM, llama.cpp, etc.), focusing on the **DRAM/SSD offload mechanism** and **integrated fine-tuning**.
 
 > ⚠️ **Important note**: The competitor columns below reflect general public understanding and have **not been benchmarked on this project's identical hardware/models**.
-> This project only benchmarks "its own" numbers (see `tests/benchmark_llama_server_prefill.py`, `tests/benchmark_offload_vram.py`).
+> This project only benchmarks "its own" numbers (see `backend/tests/benchmark_llama_server_prefill.py`, `backend/tests/benchmark_offload_vram.py`).
 > Therefore this page does **not list competitors' tok/s, training time, or cost figures**.
 
 ## Qualitative Feature Comparison
@@ -77,9 +77,9 @@ Main Process (FastAPI) ←→ Worker Process (Inference)
 
 ## Performance and Cost (how to obtain credible numbers)
 
-- **This service's tok/s / TTFT / load time**: `tests/benchmark_llama_server_prefill.py` (results in `tests/benchmark_llama_server_prefill_results.json`).
-- **VRAM reduction (before vs. after offload)**: `tests/benchmark_offload_vram.py`.
-- **Fine-tuning time**: `tests/stress_tests/stress_test_finetune.py` can measure this service's own wall-clock time.
+- **This service's tok/s / TTFT / load time**: `backend/tests/benchmark_llama_server_prefill.py` (results in `backend/tests/benchmark_llama_server_prefill_results.json`).
+- **VRAM reduction (before vs. after offload)**: `backend/tests/benchmark_offload_vram.py`.
+- **Fine-tuning time**: `backend/tests/stress_tests/stress_test_finetune.py` can measure this service's own wall-clock time.
 - **Competitor comparison**: this requires separately installing Ollama / standalone vLLM etc. and manually benchmarking under identical conditions; this project does not provide such data.
 
 ## Conclusion

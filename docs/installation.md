@@ -96,9 +96,9 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 
 ### 建立 `.env`
 
-專案啟動時，`src/service/settings.py` 會優先讀取專案根目錄的 `.env`；如果 `.env` 不存在，才會退回 `.env.example`。
+專案啟動時，`backend/service/settings.py` 會優先讀取專案根目錄的 `.env`；如果 `.env` 不存在，才會退回 `.env.example`。
 
-**原則：請優先修改 `.env`，不要直接改 `src/service/settings.py`。**
+**原則：請優先修改 `.env`，不要直接改 `backend/service/settings.py`。**
 
 #### Linux
 
@@ -163,13 +163,13 @@ REDIS_DB=0
 若已經編譯好 llama.cpp，也可在 `.env` 補上：
 
 ```dotenv
-LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/llama-server
+LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/llama-server
 ```
 
 Windows 範例：
 
 ```dotenv
-LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/Release/llama-server.exe
+LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/Release/llama-server.exe
 ```
 
 > 路徑可以用正斜線 `/` 或反斜線 `\`，Python 的 `pathlib` 兩者皆支援。
@@ -182,7 +182,7 @@ LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/Release/llama-server
 | `TIKTOKEN_RS_CACHE_DIR` | TikToken / GPT-OSS 快取 | 專案根目錄 |
 | `LOG_DIR` | 日誌輸出目錄 | `<project>/logs` |
 | `LLAMA_SERVER_BINARY` | llama-server 可執行檔路徑 | 自動尋找 build 輸出 |
-| `VLLM_SERVER_PROJECT_DIR` | vLLM 隔離環境目錄 | `src/service/inference/engines/vllm_server` |
+| `VLLM_SERVER_PROJECT_DIR` | vLLM 隔離環境目錄 | `backend/service/inference/engines/vllm_server` |
 
 ### dmidecode 權限設定（Linux 選配）
 
@@ -208,24 +208,24 @@ sudo visudo -f /etc/sudoers.d/ast-dmidecode
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
 ```
 
 若主機沒有 NVIDIA CUDA 環境，可改用 XPU：
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh
 ```
 
 跳過 vLLM 環境建置：
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash backend/scripts/linux/setup_env.sh
 ```
 
-腳本會在 `src/service/.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
+腳本會在 `backend/service/.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
 
 > **提醒**：若要使用 fine-tune，請使用 **Linux + CUDA** 安裝流程。
 
@@ -233,26 +233,26 @@ TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash scripts/linux/setup_env.sh
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 若要改用 CUDA：
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\setup_env.ps1 -Accel cuda
+.\backend\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
-腳本會在 `service\.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
+腳本會在 `backend\service\.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
 
 ### 若要使用 llama-server
 
-`llama.cpp` 來源於安裝期抓取（`TRUSTA_SETUP_LLAMA=1 bash scripts/linux/setup_env.sh`,Windows 用 `.\scripts\windows\setup_env.ps1 -SetupLlama`）到 `src/service/utils/llama.cpp`,再自行編譯：
+`llama.cpp` 來源於安裝期抓取（`TRUSTA_SETUP_LLAMA=1 bash backend/scripts/linux/setup_env.sh`,Windows 用 `.\backend\scripts\windows\setup_env.ps1 -SetupLlama`）到 `backend/service/utils/llama.cpp`,再自行編譯：
 
 #### Linux
 
 ```bash
-cd /home/test/project/AI-Scaler-Toolkit/src/service/utils/llama.cpp
+cd /home/test/project/AI-Scaler-Toolkit/backend/service/utils/llama.cpp
 cmake -B build
 cmake --build build -j
 ```
@@ -267,7 +267,7 @@ cmake --build build -j
 #### Windows（PowerShell，需 Visual Studio Build Tools 2022）
 
 ```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit\src\service\utils\llama.cpp
+cd C:\Users\<user>\project\AI-Scaler-Toolkit\backend\service\utils\llama.cpp
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release -j
 ```
@@ -293,14 +293,14 @@ cmake --build build --config Release -j
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-bash scripts/linux/run_service.sh
+bash backend/scripts/linux/run_service.sh
 ```
 
 若需要讓 `/system/resources` API 透過 `dmidecode` 讀取完整 DRAM 資訊，可改用具備權限的方式啟動：
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-sudo bash scripts/linux/run_service.sh
+sudo bash backend/scripts/linux/run_service.sh
 ```
 
 > 建議優先依照前文設定 `sudoers`，只授權特定 `dmidecode` 指令；除非必要，不建議長期以 root 執行整個服務。
@@ -310,10 +310,10 @@ sudo bash scripts/linux/run_service.sh
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\run_service.bat
+.\backend\scripts\windows\run_service.bat
 ```
 
-啟動腳本會直接使用 `src/service/.venv` 內的 Python；**不需要手動啟動虛擬環境**。
+啟動腳本會直接使用 `backend/service/.venv` 內的 Python；**不需要手動啟動虛擬環境**。
 
 ### 預設服務位址
 

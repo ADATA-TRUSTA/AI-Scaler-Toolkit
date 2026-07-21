@@ -96,9 +96,9 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 
 ### Create `.env`
 
-When the project starts, `src/service/settings.py` loads `.env` from the project root first. If `.env` does not exist, it falls back to `.env.example`.
+When the project starts, `backend/service/settings.py` loads `.env` from the project root first. If `.env` does not exist, it falls back to `.env.example`.
 
-**Rule: update `.env` first; do not modify `src/service/settings.py` directly unless necessary.**
+**Rule: update `.env` first; do not modify `backend/service/settings.py` directly unless necessary.**
 
 #### Linux
 
@@ -163,13 +163,13 @@ REDIS_DB=0
 If you already compiled llama.cpp, you can also add this to `.env`:
 
 ```dotenv
-LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/llama-server
+LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/llama-server
 ```
 
 Windows example:
 
 ```dotenv
-LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/Release/llama-server.exe
+LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/Release/llama-server.exe
 ```
 
 > Paths can use either `/` or `\`; Python `pathlib` supports both.
@@ -182,7 +182,7 @@ LLAMA_SERVER_BINARY=./src/service/utils/llama.cpp/build/bin/Release/llama-server
 | `TIKTOKEN_RS_CACHE_DIR` | TikToken / GPT-OSS cache | Project root |
 | `LOG_DIR` | Log output directory | `<project>/logs` |
 | `LLAMA_SERVER_BINARY` | Path to the `llama-server` executable | Auto-detected from build output |
-| `VLLM_SERVER_PROJECT_DIR` | vLLM isolated environment directory | `src/service/inference/engines/vllm_server` |
+| `VLLM_SERVER_PROJECT_DIR` | vLLM isolated environment directory | `backend/service/inference/engines/vllm_server` |
 
 ### `dmidecode` Permission Setup (Linux, Optional)
 
@@ -208,24 +208,24 @@ If you skip this step, the API still works, but DRAM specification fields may be
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
 ```
 
 If the machine does not have NVIDIA CUDA, switch to XPU:
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh
 ```
 
 Skip vLLM environment setup:
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash backend/scripts/linux/setup_env.sh
 ```
 
-The script creates the environment in `src/service/.venv`; **you do not need to activate the virtual environment manually**.
+The script creates the environment in `backend/service/.venv`; **you do not need to activate the virtual environment manually**.
 
 > **Reminder**: If you need fine-tuning, use the **Linux + CUDA** installation path.
 
@@ -233,26 +233,26 @@ The script creates the environment in `src/service/.venv`; **you do not need to 
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 To use CUDA instead:
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\setup_env.ps1 -Accel cuda
+.\backend\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
-The script creates the environment in `service\.venv`; **you do not need to activate the virtual environment manually**.
+The script creates the environment in `backend\service\.venv`; **you do not need to activate the virtual environment manually**.
 
 ### If You Want to Use `llama-server`
 
-The `llama.cpp` source is fetched at setup time (`TRUSTA_SETUP_LLAMA=1 bash scripts/linux/setup_env.sh`, or `.\scripts\windows\setup_env.ps1 -SetupLlama` on Windows) into `src/service/utils/llama.cpp`, then compiled manually:
+The `llama.cpp` source is fetched at setup time (`TRUSTA_SETUP_LLAMA=1 bash backend/scripts/linux/setup_env.sh`, or `.\backend\scripts\windows\setup_env.ps1 -SetupLlama` on Windows) into `backend/service/utils/llama.cpp`, then compiled manually:
 
 #### Linux
 
 ```bash
-cd /home/test/project/AI-Scaler-Toolkit/src/service/utils/llama.cpp
+cd /home/test/project/AI-Scaler-Toolkit/backend/service/utils/llama.cpp
 cmake -B build
 cmake --build build -j
 ```
@@ -267,7 +267,7 @@ cmake --build build -j
 #### Windows (PowerShell, requires Visual Studio Build Tools 2022)
 
 ```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit\src\service\utils\llama.cpp
+cd C:\Users\<user>\project\AI-Scaler-Toolkit\backend\service\utils\llama.cpp
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release -j
 ```
@@ -293,14 +293,14 @@ On CUDA-capable Linux hosts, `setup_env.sh` automatically creates an isolated vL
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-bash scripts/linux/run_service.sh
+bash backend/scripts/linux/run_service.sh
 ```
 
 If you need `/system/resources` to read full DRAM information through `dmidecode`, you can start the service with sufficient permissions:
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-sudo bash scripts/linux/run_service.sh
+sudo bash backend/scripts/linux/run_service.sh
 ```
 
 > It is recommended to use the `sudoers` setup described earlier to grant only the required `dmidecode` command instead of running the whole service as root long-term.
@@ -309,10 +309,10 @@ sudo bash scripts/linux/run_service.sh
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\run_service.bat
+.\backend\scripts\windows\run_service.bat
 ```
 
-The startup script directly uses Python from `src/service/.venv`; **you do not need to activate the virtual environment manually**.
+The startup script directly uses Python from `backend/service/.venv`; **you do not need to activate the virtual environment manually**.
 
 ### Default Service URLs
 

@@ -22,7 +22,7 @@ By participating in this project you agree to abide by our
 - Report bugs and request features via [Issues](../../issues)
 - Improve documentation (English and 繁體中文 docs live under `docs/`)
 - Fix bugs or implement features via pull requests
-- Add or improve tests under `tests/`
+- Add or improve tests under `backend/tests/`
 
 ## Development Setup
 
@@ -35,8 +35,8 @@ full walkthrough. In short:
 ```bash
 cp .env.example .env
 # Edit .env (HF_HOME, LOG_DIR, SERVICE_HOST, SERVICE_PORT)
-TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
-bash scripts/linux/run_service.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
+bash backend/scripts/linux/run_service.sh
 ```
 
 ### Windows
@@ -44,18 +44,18 @@ bash scripts/linux/run_service.sh
 ```powershell
 Copy-Item .env.example .env
 notepad .env
-.\scripts\windows\setup_env.ps1 -Accel xpu
-.\scripts\windows\run_service.bat
+.\backend\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\run_service.bat
 ```
 
 > **Note**: Fine-tuning currently supports **Linux + CUDA** only.
 
 ## Running Tests
 
-Tests use `pytest` (configured in `pytest.ini`, `testpaths = tests`):
+Tests use `pytest` (configured in `backend/pytest.ini`, `testpaths = tests`, run from `backend/`):
 
 ```bash
-pytest
+cd backend && pytest
 ```
 
 Please make sure the test suite passes before opening a pull request, and add

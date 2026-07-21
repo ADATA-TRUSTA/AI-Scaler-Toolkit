@@ -172,12 +172,12 @@ unload as needed, then switch to a different engine:
 
 ### Basic Configuration
 ```bash
-# Install the environment (Linux + CUDA example; on Windows use the scripts under scripts/windows/)
+# Install the environment (Linux + CUDA example; on Windows use the scripts under backend/scripts/windows/)
 cp .env.example .env
-TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
 
 # Start the service (the service port is controlled by SERVICE_PORT in .env, default 8000)
-bash scripts/linux/run_service.sh
+bash backend/scripts/linux/run_service.sh
 ```
 
 > Note: the engine and model are **not** specified via environment variables, but rather via the `engine` / `model_name` fields in the body of the `POST /inference/load_model`

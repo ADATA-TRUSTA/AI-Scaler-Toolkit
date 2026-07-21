@@ -10,28 +10,28 @@ Each time you pull a new version from GitHub, it is recommended to resync depend
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh
 ```
 
 If switching to CUDA:
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
 ```
 
 ### Windows
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 If switching to CUDA:
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\setup_env.ps1 -Accel cuda
+.\backend\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
 ---
@@ -42,8 +42,8 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 
 This means the Python environment has not been created yet. Run:
 
-- Linux: `TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh`
-- Windows: `.\scripts\windows\setup_env.ps1 -Accel xpu`
+- Linux: `TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh`
+- Windows: `.\backend\scripts\windows\setup_env.ps1 -Accel xpu`
 
 ### Q2. After moving to a new machine, the model cache still points to the old path
 
@@ -58,8 +58,8 @@ TIKTOKEN_RS_CACHE_DIR=<your project root>
 
 First verify that the frontend files exist in the project:
 
-- `src/frontend/dist/index.html`
-- `src/frontend/dist/assets/`
+- `frontend/dist/index.html`
+- `frontend/dist/assets/`
 
 If files already exist under `dist`, simply reopen `http://127.0.0.1:8000/`.
 
@@ -90,17 +90,17 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 Make sure CUDA Toolkit is installed and the driver version is compatible. If you are not using an NVIDIA GPU, use:
 
 ```powershell
-.\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 ### Q7. What should I do if fine-tuning with DeepSpeed hits offload / buffer / swapper errors?
 
 The built-in DeepSpeed profiles are located at:
 
-- `src/service/configs/deepspeed/zero3_offload_cpu_cpu.json`
-- `src/service/configs/deepspeed/zero3_offload_cpu_disk.json`
-- `src/service/configs/deepspeed/zero3_offload_disk_cpu.json`
-- `src/service/configs/deepspeed/zero3_offload_disk_disk.json`
+- `backend/service/configs/deepspeed/zero3_offload_cpu_cpu.json`
+- `backend/service/configs/deepspeed/zero3_offload_cpu_disk.json`
+- `backend/service/configs/deepspeed/zero3_offload_disk_cpu.json`
+- `backend/service/configs/deepspeed/zero3_offload_disk_disk.json`
 
 If the error mentions `buffer`, `swapper`, NVMe offload, aio, or offload queue problems, the most common first step is to increase `zero_optimization.offload_param.buffer_count`.
 

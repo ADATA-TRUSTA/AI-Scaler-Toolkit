@@ -33,7 +33,7 @@ confidence: medium
 
 成本節省的來源是「**所需 GPU 級距下降**」：開 offload 後模型可在較小 VRAM 的機器運行，因此可用較便宜的硬體。
 
-- **VRAM 降幅（實測）**：在 RTX 5060 Ti（16GB）上，Qwen3-14B（bf16、權重約 27.5GB，單卡放不下）透過 `device_map=auto` + `offload_folder` 執行，峰值 GPU VRAM 僅 **~13.4GB**，相較「全程放 GPU 所需的 ~27.5GB」**降低約 51%**。代價是吞吐——在大量 CPU/磁碟 offload 下，生成降到 **~0.5 tok/s**，所以 offload 的重點是「讓原本跑不動的模型能跑」，不是速度。可用 `tests/benchmark_offload_vram.py` 重現（原始數據：`tests/benchmark_offload_vram_results.json`）。
+- **VRAM 降幅（實測）**：在 RTX 5060 Ti（16GB）上，Qwen3-14B（bf16、權重約 27.5GB，單卡放不下）透過 `device_map=auto` + `offload_folder` 執行，峰值 GPU VRAM 僅 **~13.4GB**，相較「全程放 GPU 所需的 ~27.5GB」**降低約 51%**。代價是吞吐——在大量 CPU/磁碟 offload 下，生成降到 **~0.5 tok/s**，所以 offload 的重點是「讓原本跑不動的模型能跑」，不是速度。可用 `backend/tests/benchmark_offload_vram.py` 重現（原始數據：`backend/tests/benchmark_offload_vram_results.json`）。
 - **金額節省**：屬**估算**，取決於 GPU 報價假設。依目前初步評估，**訓練成本約可節省 ~80%（估算，非實測金額）**；此數字僅供參考，實際依模型、硬體與使用時數而定。
 
 ## 🔑 技術重點

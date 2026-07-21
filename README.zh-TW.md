@@ -1,9 +1,9 @@
 # AI Scaler Toolkit
 
 <p align="center">
-  <img src="src/frontend/dist/Trusta-16.ico" alt="Trusta" width="32" height="32">
+  <img src="frontend/dist/Trusta-16.ico" alt="Trusta" width="32" height="32">
   &nbsp;&nbsp;
-  <img src="src/frontend/dist_client/Adata.ico" alt="ADATA" width="32" height="32">
+  <img src="frontend/dist_client/Adata.ico" alt="ADATA" width="32" height="32">
 </p>
 
 <p align="center">
@@ -43,8 +43,8 @@ mkdir -p logs .cache/huggingface
 cp .env.example .env
 # 編輯 .env，優先修改 HF_HOME、LOG_DIR、SERVICE_HOST、SERVICE_PORT
 
-TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
-bash scripts/linux/run_service.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
+bash backend/scripts/linux/run_service.sh
 ```
 
 啟動成功後，直接用瀏覽器開啟：
@@ -67,8 +67,8 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 Copy-Item .env.example .env
 notepad .env
 
-.\scripts\windows\setup_env.ps1 -Accel xpu
-.\scripts\windows\run_service.bat
+.\backend\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\run_service.bat
 ```
 
 啟動成功後，直接用瀏覽器開啟：
@@ -85,34 +85,33 @@ notepad .env
 
 ```text
 AI-Scaler-Toolkit/
-├─ scripts/
-│  ├─ linux/
-│  │  ├─ run_service.sh
-│  │  ├─ setup_env.sh
-│  │  └─ stop_service.sh
-│  ├─ windows/
-│  │  ├─ run_service.bat
-│  │  └─ setup_env.ps1
-│  └─ docker/
-├─ docs/
-├─ examples/
-│  └─ datasets/
-├─ src/
+├─ backend/                 # 後端服務，從上游 backend repo 同步
 │  ├─ service/
 │  │  ├─ app.py
 │  │  ├─ settings.py
 │  │  ├─ pyproject.toml
 │  │  └─ configs/
-│  ├─ frontend/
-│  │  ├─ dist/
-│  │  └─ dist_client/
-│  └─ console/
-├─ tests/
+│  ├─ tests/
+│  ├─ pytest.ini
+│  └─ scripts/
+│     ├─ linux/
+│     │  ├─ run_service.sh
+│     │  ├─ setup_env.sh
+│     │  └─ stop_service.sh
+│     ├─ windows/
+│     │  ├─ run_service.bat
+│     │  └─ setup_env.ps1
+│     └─ docker/
+├─ console/                 # 無頭 Python client
+├─ frontend/                # 預先編譯的前端（由後端提供）
+│  ├─ dist/
+│  └─ dist_client/
+├─ docs/
+├─ examples/
+│  └─ datasets/
 ├─ wiki/
-├─ logs/
 ├─ .github/
 ├─ .env.example
-├─ pytest.ini
 ├─ LICENSE
 ├─ README.md
 └─ README.zh-TW.md

@@ -1,9 +1,9 @@
 # AI Scaler Toolkit
 
 <p align="center">
-  <img src="src/frontend/dist/Trusta-16.ico" alt="Trusta" width="32" height="32">
+  <img src="frontend/dist/Trusta-16.ico" alt="Trusta" width="32" height="32">
   &nbsp;&nbsp;
-  <img src="src/frontend/dist_client/Adata.ico" alt="ADATA" width="32" height="32">
+  <img src="frontend/dist_client/Adata.ico" alt="ADATA" width="32" height="32">
 </p>
 
 <p align="center">
@@ -43,8 +43,8 @@ mkdir -p logs .cache/huggingface
 cp .env.example .env
 # Edit .env and update HF_HOME, LOG_DIR, SERVICE_HOST, and SERVICE_PORT first
 
-TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
-bash scripts/linux/run_service.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
+bash backend/scripts/linux/run_service.sh
 ```
 
 After the service starts successfully, open:
@@ -67,8 +67,8 @@ New-Item -ItemType Directory -Force logs, .cache\huggingface
 Copy-Item .env.example .env
 notepad .env
 
-.\scripts\windows\setup_env.ps1 -Accel xpu
-.\scripts\windows\run_service.bat
+.\backend\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\run_service.bat
 ```
 
 After the service starts successfully, open:
@@ -85,34 +85,33 @@ To use NVIDIA CUDA instead, change `-Accel xpu` to `-Accel cuda`.
 
 ```text
 AI-Scaler-Toolkit/
-├─ scripts/
-│  ├─ linux/
-│  │  ├─ run_service.sh
-│  │  ├─ setup_env.sh
-│  │  └─ stop_service.sh
-│  ├─ windows/
-│  │  ├─ run_service.bat
-│  │  └─ setup_env.ps1
-│  └─ docker/
-├─ docs/
-├─ examples/
-│  └─ datasets/
-├─ src/
+├─ backend/                 # Backend service, synced from the upstream backend repo
 │  ├─ service/
 │  │  ├─ app.py
 │  │  ├─ settings.py
 │  │  ├─ pyproject.toml
 │  │  └─ configs/
-│  ├─ frontend/
-│  │  ├─ dist/
-│  │  └─ dist_client/
-│  └─ console/
-├─ tests/
+│  ├─ tests/
+│  ├─ pytest.ini
+│  └─ scripts/
+│     ├─ linux/
+│     │  ├─ run_service.sh
+│     │  ├─ setup_env.sh
+│     │  └─ stop_service.sh
+│     ├─ windows/
+│     │  ├─ run_service.bat
+│     │  └─ setup_env.ps1
+│     └─ docker/
+├─ console/                 # Headless Python client
+├─ frontend/                # Prebuilt web UI (served by the backend)
+│  ├─ dist/
+│  └─ dist_client/
+├─ docs/
+├─ examples/
+│  └─ datasets/
 ├─ wiki/
-├─ logs/
 ├─ .github/
 ├─ .env.example
-├─ pytest.ini
 ├─ LICENSE
 ├─ README.md
 └─ README.zh-TW.md

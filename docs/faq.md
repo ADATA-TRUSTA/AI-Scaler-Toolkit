@@ -10,28 +10,28 @@
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh
 ```
 
 若改用 CUDA：
 
 ```bash
 cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
 ```
 
 ### Windows
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 若改用 CUDA：
 
 ```powershell
 cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\scripts\windows\setup_env.ps1 -Accel cuda
+.\backend\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
 ---
@@ -42,8 +42,8 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 
 代表尚未建立 Python 環境，請先執行：
 
-- Linux：`TRUSTA_ACCEL=xpu bash scripts/linux/setup_env.sh`
-- Windows：`.\scripts\windows\setup_env.ps1 -Accel xpu`
+- Linux：`TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh`
+- Windows：`.\backend\scripts\windows\setup_env.ps1 -Accel xpu`
 
 ### Q2. 新機器下載後，模型快取還指到舊路徑
 
@@ -58,8 +58,8 @@ TIKTOKEN_RS_CACHE_DIR=<你的專案根目錄>
 
 請先確認專案內的前端資料夾已有檔案：
 
-- `src/frontend/dist/index.html`
-- `src/frontend/dist/assets/`
+- `frontend/dist/index.html`
+- `frontend/dist/assets/`
 
 若 `dist` 內已有檔案，直接重新開啟 `http://127.0.0.1:8000/` 即可。
 
@@ -90,17 +90,17 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 請確認已安裝 CUDA Toolkit，且驅動版本相容。若不是 NVIDIA GPU，請改用：
 
 ```powershell
-.\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\setup_env.ps1 -Accel xpu
 ```
 
 ### Q7. 用 DeepSpeed 做 fine-tune 時出現 offload / buffer / swapper 類錯誤怎麼辦？
 
 本專案內建的 DeepSpeed profile 位於：
 
-- `src/service/configs/deepspeed/zero3_offload_cpu_cpu.json`
-- `src/service/configs/deepspeed/zero3_offload_cpu_disk.json`
-- `src/service/configs/deepspeed/zero3_offload_disk_cpu.json`
-- `src/service/configs/deepspeed/zero3_offload_disk_disk.json`
+- `backend/service/configs/deepspeed/zero3_offload_cpu_cpu.json`
+- `backend/service/configs/deepspeed/zero3_offload_cpu_disk.json`
+- `backend/service/configs/deepspeed/zero3_offload_disk_cpu.json`
+- `backend/service/configs/deepspeed/zero3_offload_disk_disk.json`
 
 若錯誤訊息提到 `buffer`、`swapper`、NVMe offload、aio / offload queue 類問題，最常見的第一步是調高 `zero_optimization.offload_param.buffer_count`。
 

@@ -121,10 +121,10 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions `
 
 The project already contains static frontend assets:
 
-- `src/frontend/dist`
-- `src/frontend/dist_client`
+- `frontend/dist`
+- `frontend/dist_client`
 
-The backend currently mounts `src/frontend/dist` at `/frontend/`, and the root path `/` automatically redirects to `/frontend/` when `index.html` exists.
+The backend currently mounts `frontend/dist` at `/frontend/`, and the root path `/` automatically redirects to `/frontend/` when `index.html` exists.
 
 Therefore:
 

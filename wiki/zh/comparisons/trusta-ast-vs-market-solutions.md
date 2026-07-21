@@ -16,7 +16,7 @@ provenanceState: merged
 本文件對比 **Trusta AST** 與現有 LLM 服務方案（Ollama、LM Studio、vLLM、llama.cpp 等）的差異，重點在 **DRAM/SSD offload 機制** 與 **整合式 fine-tuning**。
 
 > ⚠️ **重要聲明**：下方競品欄位為一般公開認知，**未在本專案的相同硬體/模型上實測**。
-> 本專案只實測「自己」的數字（見 `tests/benchmark_llama_server_prefill.py`、`tests/benchmark_offload_vram.py`）。
+> 本專案只實測「自己」的數字（見 `backend/tests/benchmark_llama_server_prefill.py`、`backend/tests/benchmark_offload_vram.py`）。
 > 因此本頁**不列出競品的 tok/s、訓練時間或成本數字**。
 
 ## 定性功能對比
@@ -77,9 +77,9 @@ Trusta AST 依引擎/情境使用既有框架能力做 offload：
 
 ## 效能與成本（如何取得可信數字）
 
-- **本服務 tok/s / TTFT / 載入時間**：`tests/benchmark_llama_server_prefill.py`（結果見 `tests/benchmark_llama_server_prefill_results.json`）。
-- **VRAM 降幅（offload 前後）**：`tests/benchmark_offload_vram.py`。
-- **Fine-tuning 時間**：`tests/stress_tests/stress_test_finetune.py` 可量測本服務自身的 wall-clock。
+- **本服務 tok/s / TTFT / 載入時間**：`backend/tests/benchmark_llama_server_prefill.py`（結果見 `backend/tests/benchmark_llama_server_prefill_results.json`）。
+- **VRAM 降幅（offload 前後）**：`backend/tests/benchmark_offload_vram.py`。
+- **Fine-tuning 時間**：`backend/tests/stress_tests/stress_test_finetune.py` 可量測本服務自身的 wall-clock。
 - **競品對比**：需另行安裝 Ollama / 獨立 vLLM 等並在相同條件下手動實測，本專案不提供該數據。
 
 ## 結論

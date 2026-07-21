@@ -33,7 +33,7 @@ confidence: medium
 
 The source of cost savings is "**a lower required GPU tier**": with offload enabled, models can run on machines with smaller VRAM, so cheaper hardware can be used.
 
-- **VRAM reduction (measured)**: On an RTX 5060 Ti (16 GB), Qwen3-14B (bf16, ~27.5 GB of weights) — which does not fit fully on the card — was run via `device_map=auto` + `offload_folder`, using a peak of **~13.4 GB GPU VRAM** vs. the **~27.5 GB** needed to keep everything on GPU: a **~51% reduction**. The trade-off is throughput — with heavy CPU/disk offload, generation dropped to **~0.5 tok/s**, so offload is about *fitting a model that otherwise wouldn't run*, not speed. Reproduce with `tests/benchmark_offload_vram.py` (raw data: `tests/benchmark_offload_vram_results.json`).
+- **VRAM reduction (measured)**: On an RTX 5060 Ti (16 GB), Qwen3-14B (bf16, ~27.5 GB of weights) — which does not fit fully on the card — was run via `device_map=auto` + `offload_folder`, using a peak of **~13.4 GB GPU VRAM** vs. the **~27.5 GB** needed to keep everything on GPU: a **~51% reduction**. The trade-off is throughput — with heavy CPU/disk offload, generation dropped to **~0.5 tok/s**, so offload is about *fitting a model that otherwise wouldn't run*, not speed. Reproduce with `backend/tests/benchmark_offload_vram.py` (raw data: `backend/tests/benchmark_offload_vram_results.json`).
 - **Monetary savings**: an **estimate**, dependent on GPU pricing assumptions. Based on the current preliminary assessment, **training costs can be reduced by approximately ~80% (an estimate, not a benchmarked amount)**; this figure is for reference only, and actual results depend on the model, hardware, and hours of usage.
 
 ## 🔑 Technical Highlights
