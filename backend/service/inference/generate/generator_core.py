@@ -1,37 +1,41 @@
 """
 Generator Core - Core utilities for text generation
-Contains parameter validation, tokenization helpers, and common generation logic
+Contains parameter validation, tokenization helpers, and common generation logic.
 """
-import math
-import torch
-import logging
-from typing import Dict, Any, Optional, List
-from pathlib import Path
-from io import BytesIO
+
 import base64
-import requests
-from transformers import AutoTokenizer
+import logging
+import math
+from io import BytesIO
+from pathlib import Path
+from typing import Any, cast
+
+import httpx
+import torch
 from PIL import Image
+from transformers import BatchEncoding, PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
 
 
-def _convert_messages_to_text_parts(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _convert_messages_to_text_parts(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert plain string chat content into multimodal text parts format."""
-    converted_messages: List[Dict[str, Any]] = []
+    converted_messages: list[dict[str, Any]] = []
     for msg in messages:
         content = msg.get("content", "")
         if isinstance(content, str):
-            converted_messages.append({
-                "role": msg["role"],
-                "content": [{"type": "text", "text": content}],
-            })
+            converted_messages.append(
+                {
+                    "role": msg["role"],
+                    "content": [{"type": "text", "text": content}],
+                }
+            )
         else:
             converted_messages.append(msg)
     return converted_messages
 
 
-def _extract_image_url_from_part(part: Dict[str, Any]) -> Optional[str]:
+def _extract_image_url_from_part(part: dict[str, Any]) -> str | None:
     """Extract normalized image source from a multimodal content part."""
     if not isinstance(part, dict):
         return None
@@ -54,9 +58,9 @@ def _extract_image_url_from_part(part: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _collect_message_image_sources(messages: List[Dict[str, Any]]) -> List[str]:
+def _collect_message_image_sources(messages: list[dict[str, Any]]) -> list[str]:
     """Collect image sources from message content parts in traversal order."""
-    image_sources: List[str] = []
+    image_sources: list[str] = []
     for msg in messages:
         content = msg.get("content")
         if not isinstance(content, list):
@@ -69,17 +73,17 @@ def _collect_message_image_sources(messages: List[Dict[str, Any]]) -> List[str]:
 
 
 def _build_messages_with_loaded_images(
-    messages: List[Dict[str, Any]],
-    pil_images: List[Image.Image],
+    messages: list[dict[str, Any]],
+    pil_images: list[Image.Image],
     *,
     embed_images: bool,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Replace image_url parts with embedded images or placeholders, preserving order."""
     normalized = _convert_messages_to_text_parts(messages)
     if not pil_images:
         return normalized
 
-    converted: List[Dict[str, Any]] = []
+    converted: list[dict[str, Any]] = []
     image_index = 0
     last_user_idx = -1
 
@@ -92,7 +96,7 @@ def _build_messages_with_loaded_images(
         if isinstance(content, str):
             content = [{"type": "text", "text": content}]
 
-        new_parts: List[Dict[str, Any]] = []
+        new_parts: list[dict[str, Any]] = []
         if isinstance(content, list):
             for part in content:
                 if not isinstance(part, dict):
@@ -136,10 +140,11 @@ def _build_messages_with_loaded_images(
 
 
 def _inject_image_placeholders_into_messages(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     num_images: int,
-) -> List[Dict[str, Any]]:
-    """Normalise all message content to list-of-parts and inject
+) -> list[dict[str, Any]]:
+    """
+    Normalise all message content to list-of-parts and inject
     ``{"type": "image"}`` placeholders into the last user message.
     """
     # Step 1: normalise ALL messages – string content → [{"type": "text", ...}]
@@ -164,8 +169,7 @@ def _inject_image_placeholders_into_messages(
 
     if isinstance(content, list):
         has_image_part = any(
-            isinstance(p, dict) and p.get("type") in {"image", "image_url"}
-            for p in content
+            isinstance(p, dict) and p.get("type") in {"image", "image_url"} for p in content
         )
         if not has_image_part:
             last_user["content"] = image_parts + list(content)
@@ -177,10 +181,11 @@ def _inject_image_placeholders_into_messages(
 
 
 def _build_messages_with_embedded_images(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     pil_images: list,
-) -> List[Dict[str, Any]]:
-    """Build messages where PIL Image objects are embedded directly into the
+) -> list[dict[str, Any]]:
+    """
+    Build messages where PIL Image objects are embedded directly into the
     last user message content as ``{"type": "image", "image": <PIL.Image>}``.
 
     This is the *official* Gemma 4 API (HF model card) and avoids the
@@ -209,8 +214,7 @@ def _build_messages_with_embedded_images(
 
     if isinstance(content, list):
         has_image_part = any(
-            isinstance(p, dict) and p.get("type") in {"image", "image_url"}
-            for p in content
+            isinstance(p, dict) and p.get("type") in {"image", "image_url"} for p in content
         )
         if not has_image_part:
             last_user["content"] = image_parts + list(content)
@@ -222,15 +226,16 @@ def _build_messages_with_embedded_images(
 
 
 def _apply_processor_chat_template_with_fallback(
-    processor,
-    prompt: List[Dict[str, Any]],
+    processor: Any,  # noqa: ANN401 - duck-typed transformers processor
+    prompt: list[dict[str, Any]],
     *,
     tokenize: bool,
-    extra_kwargs: Dict[str, Any],
-    model_device,
+    extra_kwargs: dict[str, Any],
+    model_device: str | torch.device,
     max_length: int,
-):
-    """Apply processor chat template with content-format fallback.
+) -> Any:  # noqa: ANN401 - returns processor BatchEncoding (tokenize) or str
+    """
+    Apply processor chat template with content-format fallback.
 
     Some text-only processors expect plain string `content`, while some multimodal
     processors require OpenAI-style content parts. Try the original payload first,
@@ -241,12 +246,12 @@ def _apply_processor_chat_template_with_fallback(
     if converted_prompt != prompt:
         variants.append(("text_parts", converted_prompt))
 
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
     for variant_name, candidate_prompt in variants:
         try:
             if tokenize:
-                # 不傳 processor_kwargs 以避免 Gemma 4 等 processor 的 kwarg 警告；
-                # truncation/max_length 對 apply_chat_template 的文字路徑影響有限。
+                # Skip processor_kwargs to avoid kwarg warnings from processors like Gemma 4;
+                # truncation/max_length barely affect the text path of apply_chat_template.
                 return processor.apply_chat_template(
                     candidate_prompt,
                     tokenize=True,
@@ -277,7 +282,7 @@ def _apply_processor_chat_template_with_fallback(
 
 
 def _safe_float_param(
-    params: Dict[str, Any],
+    params: dict[str, Any],
     key: str,
     default: float,
     minimum: float,
@@ -309,7 +314,7 @@ def _safe_float_param(
 
 
 def _safe_int_param(
-    params: Dict[str, Any],
+    params: dict[str, Any],
     key: str,
     default: int,
     minimum: int,
@@ -331,7 +336,7 @@ def _safe_int_param(
     return max(minimum, min(value, maximum))
 
 
-def _load_images(image_sources: List[str]) -> List[Image.Image]:
+def _load_images(image_sources: list[str]) -> list[Image.Image]:
     """Load images from local path/http(s)/data URL and convert to RGB PIL images."""
     if not image_sources:
         return []
@@ -339,7 +344,7 @@ def _load_images(image_sources: List[str]) -> List[Image.Image]:
     if len(image_sources) > 8:
         raise ValueError("Too many images. Maximum supported images per request is 8.")
 
-    loaded: List[Image.Image] = []
+    loaded: list[Image.Image] = []
     for raw in image_sources:
         if not isinstance(raw, str) or not raw.strip():
             raise ValueError("Each image input must be a non-empty string")
@@ -354,7 +359,7 @@ def _load_images(image_sources: List[str]) -> List[Image.Image]:
                 continue
 
             if src.startswith("http://") or src.startswith("https://"):
-                response = requests.get(src, timeout=10)
+                response = httpx.get(src, timeout=10, follow_redirects=True)
                 response.raise_for_status()
                 image = Image.open(BytesIO(response.content)).convert("RGB")
                 loaded.append(image)
@@ -371,13 +376,13 @@ def _load_images(image_sources: List[str]) -> List[Image.Image]:
     return loaded
 
 
-def validate_and_prepare_params(params: Dict[str, Any]) -> Dict[str, Any]:
+def validate_and_prepare_params(params: dict[str, Any]) -> dict[str, Any]:
     """
-    Validate and normalize generation parameters to safe ranges
-    
+    Validate and normalize generation parameters to safe ranges.
+
     Args:
         params: Raw generation parameters from request
-        
+
     Returns:
         Validated and normalized parameters
     """
@@ -395,7 +400,7 @@ def validate_and_prepare_params(params: Dict[str, Any]) -> Dict[str, Any]:
             "[Generator] Sampling requested but both top_p and top_k disable candidate selection; fallback to greedy decoding"
         )
         do_sample = False
-    
+
     validated = {
         "temperature": temperature,
         "top_p": top_p,
@@ -405,41 +410,43 @@ def validate_and_prepare_params(params: Dict[str, Any]) -> Dict[str, Any]:
         "total_timeout": total_timeout,
         "do_sample": do_sample,
     }
-    
-    logger.info(f"[Generator] Validated params: temp={temperature}, top_p={top_p}, "
-                f"top_k={top_k}, rep_penalty={repetition_penalty}, max_tokens={max_new_tokens}, do_sample={do_sample}")
-    
+
+    logger.info(
+        f"[Generator] Validated params: temp={temperature}, top_p={top_p}, "
+        f"top_k={top_k}, rep_penalty={repetition_penalty}, max_tokens={max_new_tokens}, do_sample={do_sample}"
+    )
+
     return validated
 
 
 def tokenize_prompt(
-    prompt: Any,
-    tokenizer: AutoTokenizer,
-    model_device,
-    params: Optional[Dict[str, Any]] = None,
-    processor=None,
-) -> Dict[str, torch.Tensor]:
+    prompt: str | list[dict[str, Any]],
+    tokenizer: PreTrainedTokenizerBase,
+    model_device: str | torch.device,
+    params: dict[str, Any] | None = None,
+    processor: Any = None,  # noqa: ANN401 - duck-typed transformers processor
+) -> BatchEncoding:
     """
     Tokenize prompt with proper max_length handling.
     Supports both string prompt and list of messages (chat).
-    
+
     Args:
         prompt: Input text prompt (str) or list of messages (List[Dict])
         tokenizer: The tokenizer instance
         model_device: Device to move tensors to
         params: Optional dictionary of parameters (including enable_thinking)
-        
+
     Returns:
         Tokenized inputs as tensors
     """
     # Get model's maximum length
-    max_length = getattr(tokenizer, 'model_max_length', None)
+    max_length = getattr(tokenizer, "model_max_length", None)
     if max_length is None or max_length > 1000000:
         # If not defined or set to a very large value, use reasonable default
         max_length = 8192
-    
+
     param_images = params.get("images") if params else None
-    prompt_image_sources: List[str] = []
+    prompt_image_sources: list[str] = []
     if isinstance(prompt, list) and len(prompt) > 0 and isinstance(prompt[0], dict):
         prompt_image_sources = _collect_message_image_sources(prompt)
 
@@ -462,19 +469,19 @@ def tokenize_prompt(
             if enable_thinking is not None:
                 extra_kwargs["enable_thinking"] = enable_thinking
 
-        # 記錄圖片尺寸，方便診斷圖片是否被正確處理
+        # Log image dimensions to help diagnose whether images are handled correctly
         for i, img in enumerate(pil_images):
             logger.info("[Generator] Image[%d]: size=%s mode=%s", i, img.size, img.mode)
 
-        # 建立兩種 messages——它們對應不同的 Path
+        # Build two message variants — each one feeds a different Path
         if isinstance(prompt, list) and len(prompt) > 0 and isinstance(prompt[0], dict):
-            # Path A1 用：將 PIL Image 內嵌入 content
+            # For Path A1: embed the PIL Image directly in content
             messages_embedded = _build_messages_with_loaded_images(
                 prompt,
                 pil_images,
                 embed_images=True,
             )
-            # Path A2 / B 用：僅 {"type":"image"} placeholder
+            # For Path A2 / B: only a {"type":"image"} placeholder
             messages_placeholder = _build_messages_with_loaded_images(
                 prompt,
                 pil_images,
@@ -483,14 +490,22 @@ def tokenize_prompt(
         else:
             text_content = str(prompt) if prompt else ""
             base_content = [{"type": "text", "text": text_content}] if text_content else []
-            messages_embedded = [{"role": "user", "content": [{"type": "image", "image": img} for img in pil_images] + base_content}]
-            messages_placeholder = [{"role": "user", "content": [{"type": "image"} for _ in pil_images] + base_content}]
+            messages_embedded = [
+                {
+                    "role": "user",
+                    "content": [{"type": "image", "image": img} for img in pil_images]
+                    + base_content,
+                }
+            ]
+            messages_placeholder = [
+                {"role": "user", "content": [{"type": "image"} for _ in pil_images] + base_content}
+            ]
 
-        # ── Path A1：內嵌 PIL Image，不使用 images= kwarg ─────────────────────────
-        # Gemma 4 官方 HF model card 建議的方式：
-        # {"type": "image", "image": <PIL.Image>} 小 不使用 images= kwarg
-        # 避免 apply_chat_template 內部訕圖 images kwarg 時 Jinja 對
-        # 字串做 string key 索引導致的「string indices must be integers」錯誤。
+        # ── Path A1: embed the PIL Image, no images= kwarg ───────────────────────
+        # The approach recommended by the official Gemma 4 HF model card:
+        # {"type": "image", "image": <PIL.Image>} and no images= kwarg.
+        # Avoids the "string indices must be integers" error that occurs when
+        # apply_chat_template handles the images kwarg and Jinja indexes a string by key.
         try:
             inputs = processor.apply_chat_template(
                 messages_embedded,
@@ -500,7 +515,9 @@ def tokenize_prompt(
                 return_tensors="pt",
                 **extra_kwargs,
             ).to(model_device)
-            logger.info("[Generator] Tokenized via apply_chat_template + embedded PIL images (path A1)")
+            logger.info(
+                "[Generator] Tokenized via apply_chat_template + embedded PIL images (path A1)"
+            )
             return inputs
         except Exception as e_a1:
             logger.warning(
@@ -508,7 +525,7 @@ def tokenize_prompt(
                 e_a1,
             )
 
-        # ── Path A2：placholder + images= kwarg ──────────────────────────────────
+        # ── Path A2: placeholder + images= kwarg ─────────────────────────────────
         try:
             inputs = processor.apply_chat_template(
                 messages_placeholder,
@@ -527,10 +544,10 @@ def tokenize_prompt(
                 e_a2,
             )
 
-        # ── Path B：圖文分離兩步驟 ─────────────────────────────────────────
-        # Step B-1: 用 placeholder messages 產生文字 template
-        # 必須用 messages_placeholder（含 {"type":"image"}）不能用原始 prompt，
-        # 否則文字中無 <start_of_image> 標記 → processor 不知道圖片放哪。
+        # ── Path B: two-step split of text and images ────────────────────────────
+        # Step B-1: build the text template from placeholder messages
+        # Must use messages_placeholder (with {"type":"image"}), not the raw prompt,
+        # otherwise the text has no <start_of_image> marker → processor cannot place the images.
         try:
             prompt_text = processor.apply_chat_template(
                 messages_placeholder,
@@ -559,7 +576,7 @@ def tokenize_prompt(
                 prompt_text = str(prompt) if not isinstance(prompt, list) else ""
 
         # Step B-2: processor(text_with_image_markers, images=pil_images)
-        # 不傳 truncation/processor_kwargs 避免 Gemma 4 的矛盾警告
+        # Skip truncation/processor_kwargs to avoid Gemma 4's conflicting warnings
         inputs = processor(
             text=prompt_text,
             images=pil_images,
@@ -575,7 +592,7 @@ def tokenize_prompt(
             enable_thinking = params.get("enable_thinking")
             if enable_thinking is not None:
                 extra_kwargs["enable_thinking"] = enable_thinking
-        
+
         # Prefer processor.apply_chat_template when available, but keep a
         # fallback because some text-only processors expect plain string content
         # while some multimodal processors expect OpenAI-style text parts.
@@ -589,47 +606,49 @@ def tokenize_prompt(
                 max_length=max_length,
             )
             return inputs
-        
+
         # Fallback: use tokenizer directly
-        inputs = tokenizer.apply_chat_template(
-            prompt,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            return_dict=True,
-            truncation=True,
-            max_length=max_length,
-            **extra_kwargs
-        ).to(model_device)
-        return inputs
-    
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=max_length
-    ).to(model_device)
-    
-    return inputs
+        # cast: apply_chat_template is overloaded and, combined with **kwargs, pyright
+        # collapses it to a str|list union; return_dict=True yields a BatchEncoding.
+        encoded = cast(
+            BatchEncoding,
+            tokenizer.apply_chat_template(
+                prompt,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True,
+                truncation=True,
+                max_length=max_length,
+                **extra_kwargs,
+            ),
+        )
+        return encoded.to(model_device)
+
+    # This branch only runs for plain-text prompts; the chat (list[dict]) path returns above.
+    text_prompt = cast(str, prompt)
+    return tokenizer(text_prompt, return_tensors="pt", truncation=True, max_length=max_length).to(
+        model_device
+    )
 
 
 def get_generation_kwargs(
-    inputs: Dict[str, torch.Tensor],
-    params: Dict[str, Any],
-    tokenizer: AutoTokenizer,
-    eos_token_ids,
-    streamer=None
-) -> Dict[str, Any]:
+    inputs: BatchEncoding,
+    params: dict[str, Any],
+    tokenizer: PreTrainedTokenizerBase,
+    eos_token_ids: int | list[int] | None,
+    streamer: Any = None,  # noqa: ANN401 - duck-typed transformers streamer
+) -> dict[str, Any]:
     """
-    Build generation kwargs for model.generate()
-    
+    Build generation kwargs for model.generate().
+
     Args:
         inputs: Tokenized input tensors
         params: Validated generation parameters
         tokenizer: Tokenizer instance
         eos_token_ids: End of sequence token ID(s)
         streamer: Optional text streamer for streaming generation
-        
+
     Returns:
         Dictionary of generation arguments
     """
@@ -653,34 +672,34 @@ def get_generation_kwargs(
             generation_kwargs["top_p"] = params["top_p"]
         if params["top_k"] > 0:
             generation_kwargs["top_k"] = params["top_k"]
-    
+
     if streamer is not None:
         generation_kwargs["streamer"] = streamer
-    
+
     return generation_kwargs
 
 
 def decode_generated_tokens(
     outputs: torch.Tensor,
     input_length: int,
-    tokenizer: AutoTokenizer,
-    skip_special_tokens: bool = True
+    tokenizer: PreTrainedTokenizerBase,
+    skip_special_tokens: bool = True,
 ) -> str:
     """
-    Decode generated tokens (excluding input prompt)
-    
+    Decode generated tokens (excluding input prompt).
+
     Args:
         outputs: Generated token tensor from model
         input_length: Length of input tokens to skip
         tokenizer: Tokenizer instance
         skip_special_tokens: Whether to skip special tokens in decoding
-        
+
     Returns:
         Decoded text string
     """
     generated_tokens = outputs[0][input_length:]
-    generated_text = tokenizer.decode(
-        generated_tokens,
-        skip_special_tokens=skip_special_tokens
+    # cast: decoding a single sequence returns str; the stub overload widens to str|list[str].
+    generated_text = cast(
+        str, tokenizer.decode(generated_tokens, skip_special_tokens=skip_special_tokens)
     )
     return generated_text

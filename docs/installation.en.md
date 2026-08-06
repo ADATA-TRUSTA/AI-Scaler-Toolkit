@@ -225,7 +225,7 @@ cd /home/test/project/AI-Scaler-Toolkit
 TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash backend/scripts/linux/setup_env.sh
 ```
 
-The script creates the environment in `backend/service/.venv`; **you do not need to activate the virtual environment manually**.
+The script creates the environment in `backend/.venv`; **you do not need to activate the virtual environment manually**.
 
 > **Reminder**: If you need fine-tuning, use the **Linux + CUDA** installation path.
 
@@ -243,7 +243,7 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 .\backend\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
-The script creates the environment in `backend\service\.venv`; **you do not need to activate the virtual environment manually**.
+The script creates the environment in `backend\.venv`; **you do not need to activate the virtual environment manually**.
 
 ### If You Want to Use `llama-server`
 
@@ -312,7 +312,7 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 .\backend\scripts\windows\run_service.bat
 ```
 
-The startup script directly uses Python from `backend/service/.venv`; **you do not need to activate the virtual environment manually**.
+The startup script directly uses Python from `backend/.venv`; **you do not need to activate the virtual environment manually**.
 
 ### Default Service URLs
 

@@ -1,19 +1,22 @@
+"""vLLM engine: launches and health-checks an OpenAI-compatible vLLM server."""
+
+import glob
 import json
 import os
-import glob
-import signal
 import shutil
+import signal
 import subprocess
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional
 from multiprocessing import Queue
 from multiprocessing.synchronize import Event as EventClass
-import psutil
+from typing import IO, Any
+
 import httpx
-from openai import OpenAI, APIError
+import psutil
+from openai import APIError, OpenAI
 
 from ...config_models import InferenceConfig
 from ...settings import (
@@ -47,12 +50,13 @@ _REQUIRED_NVIDIA_RUNTIME_LIBS = (
 
 
 # end of imports
-def sweep_stale_vllm_processes() -> Dict[str, Any]:
-    """在服務啟動時清理殘留 vLLM serve 進程。
+def sweep_stale_vllm_processes() -> dict[str, Any]:
+    """
+    Clean up leftover vLLM serve processes at service startup.
 
-    透過環境變數控制：
-    - VLLM_STARTUP_SWEEP: 1/true/yes/on 啟用（預設啟用）
-    - VLLM_SWEEP_PORTS: 逗號分隔 port 清單（預設 5000）
+    Controlled by environment variables:
+    - VLLM_STARTUP_SWEEP: 1/true/yes/on to enable (enabled by default)
+    - VLLM_SWEEP_PORTS: comma-separated port list (default 5000)
     """
 
     enabled = VLLM_STARTUP_SWEEP
@@ -65,7 +69,7 @@ def sweep_stale_vllm_processes() -> Dict[str, Any]:
         return {"enabled": True, "ports": [], "killed": 0, "pids": []}
 
     target_ports = set(ports)
-    killed_pids: List[int] = []
+    killed_pids: list[int] = []
 
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
@@ -89,8 +93,8 @@ def sweep_stale_vllm_processes() -> Dict[str, Any]:
             )
 
             try:
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
+                pgid = os.getpgid(proc.pid)  # pyright: ignore[reportAttributeAccessIssue]  # POSIX-only; vLLM runs on Linux
+                os.killpg(pgid, signal.SIGKILL)  # pyright: ignore[reportAttributeAccessIssue]  # POSIX-only; vLLM runs on Linux
             except (ProcessLookupError, PermissionError, OSError):
                 try:
                     proc.kill()
@@ -122,43 +126,48 @@ def sweep_stale_vllm_processes() -> Dict[str, Any]:
 
 @dataclass
 class VllmRuntimeContext:
-    """彙整 vLLM engine 在「載入 → 推論 → 卸載」期間的所有可變狀態。
+    """
+    All mutable state of the vLLM engine across load -> inference -> unload.
 
-    把原本散落的 instance 屬性集中，
+    Collecting the previously scattered instance attributes means:
 
-    1. ``unload`` 只需 ``self.runtime = VllmRuntimeContext()``
-       就把所有狀態歸零，避免漏掉某個欄位繼續殘留（例如保留舊 ``client``）。
-    2. 可獨立構造 ``VllmRuntimeContext`` 餵給某些 helper
-       做單元測試，不必綁住完整 engine 與 multiprocessing queue。
-    3. 所有與生命週期相關的欄位列在同一處。
+    1. ``unload`` only needs ``self.runtime = VllmRuntimeContext()`` to reset
+       everything, so no field is left stale (e.g. an old ``client``).
+    2. A ``VllmRuntimeContext`` can be built standalone and fed to helpers in
+       unit tests, without wiring up a full engine and multiprocessing queues.
+    3. Every lifecycle-related field is declared in one place.
 
-    注意：``config`` （``InferenceConfig``）仍維持在 ``BaseEngine`` 上
+    Note: ``config`` (``InferenceConfig``) still lives on ``BaseEngine``.
     """
 
     base_url: str = ""
     api_key: str = ""
     health_timeout_s: float = 0.0
-    served_model_name: Optional[str] = None
-    current_request_id: Optional[str] = None
+    served_model_name: str | None = None
+    current_request_id: str | None = None
 
-    client: Optional[OpenAI] = None
-    server_process: Optional[subprocess.Popen] = None
-    stdout_pump_thread: Optional[threading.Thread] = None
-    stderr_pump_thread: Optional[threading.Thread] = None
+    client: OpenAI | None = None
+    server_process: subprocess.Popen | None = None
+    stdout_pump_thread: threading.Thread | None = None
+    stderr_pump_thread: threading.Thread | None = None
 
     stderr_buffer_lock: threading.Lock = field(default_factory=threading.Lock)
-    # vLLM 子程序最近一段 stderr，用來給 ErrorClassifier 分類。
-    # vLLM v1 multi-process（APIServer + EngineCore）一次失敗會打出
-    # 兩段 traceback 共 200+ 行；maxlen 設過小會把根因（如 OOM）推出去。
-    stderr_recent_lines: Deque[str] = field(default_factory=lambda: deque(maxlen=500))
+    # Recent stderr from the vLLM subprocess, fed to the error classifier.
+    # vLLM v1 multi-process (APIServer + EngineCore) prints two tracebacks
+    # totalling 200+ lines per failure; too small a maxlen pushes the root
+    # cause (e.g. OOM) out of the buffer.
+    stderr_recent_lines: deque[str] = field(default_factory=lambda: deque(maxlen=500))
 
 
 class VllmEngine(BaseEngine):
-    """vLLM OpenAI-compatible engine.
+    """
+    vLLM OpenAI-compatible engine.
 
-    生命週期策略：
-    - `load_model`: 由後端程序啟動 `vllm serve`，並等待 `/v1/models` 健康檢查成功。
-    - `unload`: 關閉由本 engine 啟動的 vLLM server 進程並釋放本地資源。
+    Lifecycle policy:
+    - `load_model`: launches `vllm serve` from the backend process and waits for
+      the `/v1/models` health check to succeed.
+    - `unload`: stops the vLLM server process this engine started and releases
+      local resources.
     """
 
     def __init__(
@@ -167,29 +176,32 @@ class VllmEngine(BaseEngine):
         data_queue: Queue,
         stop_event: EventClass,
         stop_generation_flag: EventClass,
-    ):
+    ) -> None:
         super().__init__(status_queue, data_queue, stop_event, stop_generation_flag)
-        self.config: Optional[InferenceConfig] = None
-        # 所有與 vLLM server 生命週期相關的可變狀態統一收進 runtime。
-        # 預設值在此填入：實際 load_model 會覆寫 base_url / api_key / health_timeout_s。
+        self.config: InferenceConfig | None = None
+        # All mutable state tied to the vLLM server lifecycle lives in runtime.
+        # Defaults are seeded here; load_model overwrites base_url / api_key /
+        # health_timeout_s.
         self.runtime: VllmRuntimeContext = VllmRuntimeContext(
             api_key=VLLM_OPENAI_API_KEY,
             health_timeout_s=VLLM_HEALTH_TIMEOUT,
         )
 
-    def _log_context(self, *, stream_label: str) -> Dict[str, Any]:
-        """組出供 logger ``extra`` 使用的結構化欄位。
-
-        所有欄位皆容忍 None / 缺漏，方便 ELK 等外部系統建索引時僅看到實際存在的鍵。
+    def _log_context(self, *, stream_label: str) -> dict[str, Any]:
         """
-        ctx: Dict[str, Any] = {"stream": stream_label}
+        Build the structured fields passed as logger ``extra``.
+
+        Every field tolerates None / absence, so external systems such as ELK
+        only index keys that actually exist.
+        """
+        ctx: dict[str, Any] = {"stream": stream_label}
         proc = self.runtime.server_process
         if proc is not None:
             ctx["vllm_pid"] = proc.pid
         try:
             ctx["vllm_port"] = self._resolve_vllm_port()
         except Exception:
-            # _resolve_vllm_port 在設定錯誤時會 raise；log 用途下不應該因此爆炸
+            # _resolve_vllm_port raises on misconfiguration; logging must not blow up
             pass
         if self.runtime.served_model_name:
             ctx["model_name"] = self.runtime.served_model_name
@@ -197,8 +209,8 @@ class VllmEngine(BaseEngine):
             ctx["model_name"] = self.config.model_name
         return ctx
 
-    def _pump_server_logs(self, stream, is_stderr: bool = False) -> None:
-        """將 vLLM 子程序輸出轉發到當前 service logger，附帶結構化欄位。"""
+    def _pump_server_logs(self, stream: "IO[str] | None", is_stderr: bool = False) -> None:
+        """Forward vLLM subprocess output to this service's logger with structured fields."""
         if stream is None:
             return
         stream_label = "stderr" if is_stderr else "stdout"
@@ -239,12 +251,10 @@ class VllmEngine(BaseEngine):
     def _is_vllm_request_logging_enabled(self) -> bool:
         return VLLM_ENABLE_LOG_REQUESTS
 
-    def _recreate_client(self):
-        self.runtime.client = OpenAI(
-            base_url=self.runtime.base_url, api_key=self.runtime.api_key
-        )
+    def _recreate_client(self) -> None:
+        self.runtime.client = OpenAI(base_url=self.runtime.base_url, api_key=self.runtime.api_key)
 
-    def _find_port_owner(self, port: int) -> Optional[psutil.Process]:
+    def _find_port_owner(self, port: int) -> psutil.Process | None:
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
                 for conn in proc.net_connections(kind="inet"):
@@ -254,7 +264,7 @@ class VllmEngine(BaseEngine):
                 continue
         return None
 
-    def _cleanup_port(self, port: int):
+    def _cleanup_port(self, port: int) -> None:
         owner = self._find_port_owner(port)
         if owner is None:
             return
@@ -273,12 +283,10 @@ class VllmEngine(BaseEngine):
                 f"Port {port} is occupied by non-vLLM-serve process (PID={owner.pid}, name={owner.name()})."
             )
 
-        logger.warning(
-            "[Worker] Cleaning stale vLLM process on port=%s pid=%s", port, owner.pid
-        )
+        logger.warning("[Worker] Cleaning stale vLLM process on port=%s pid=%s", port, owner.pid)
         try:
-            pgid = os.getpgid(owner.pid)
-            os.killpg(pgid, signal.SIGKILL)
+            pgid = os.getpgid(owner.pid)  # pyright: ignore[reportAttributeAccessIssue]  # POSIX-only; vLLM runs on Linux
+            os.killpg(pgid, signal.SIGKILL)  # pyright: ignore[reportAttributeAccessIssue]  # POSIX-only; vLLM runs on Linux
         except (ProcessLookupError, PermissionError, OSError):
             try:
                 owner.kill()
@@ -292,20 +300,23 @@ class VllmEngine(BaseEngine):
         time.sleep(1.0)
 
     def _detect_multimodal_support(self, config: InferenceConfig) -> bool:
-        """離線判斷模型是否為多模態（視覺/音訊）架構。
+        """
+        Detect offline whether the model has a multimodal (vision/audio) architecture.
 
-        透過讀取模型資料夾的 config.json 檢查：
-        1. architectures 欄位是否含多模態命名模式（ForConditionalGeneration 等）
-        2. 是否存在 vision_config 子物件（強訊號）
+        Reads config.json from the model folder and checks:
+        1. whether ``architectures`` contains a multimodal naming pattern
+           (``ForConditionalGeneration`` etc.)
+        2. whether a ``vision_config`` sub-object exists (strong signal)
 
-        判斷失敗或找不到 config.json 時一律回傳 False（保守策略，
-        避免在純文字模型上加上無意義的旗標）。
+        Returns False whenever detection fails or config.json is missing — a
+        conservative default that avoids adding meaningless flags to text-only
+        models.
         """
         model_source = config.model_path or config.model_name
         if not model_source:
             return False
 
-        # 僅支援本地路徑；HF repo id 離線無法讀取
+        # Local paths only; an HF repo id cannot be read offline
         config_path = os.path.join(model_source, "config.json")
         if not os.path.isfile(config_path):
             logger.debug(
@@ -315,18 +326,18 @@ class VllmEngine(BaseEngine):
             return False
 
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 hf_cfg = json.load(f)
         except (OSError, ValueError) as e:
             logger.debug("[Worker] Multimodal auto-detect failed to read config: %s", e)
             return False
 
-        # 訊號 1：vision_config 子物件（最強訊號）
+        # Signal 1: vision_config sub-object (strongest signal)
         if isinstance(hf_cfg.get("vision_config"), dict):
             logger.debug("[Worker] Multimodal detected via vision_config field")
             return True
 
-        # 訊號 2：architectures 含已知多模態命名模式
+        # Signal 2: architectures contains a known multimodal naming pattern
         mm_patterns = (
             "ForConditionalGeneration",
             "ChatModel",
@@ -349,10 +360,12 @@ class VllmEngine(BaseEngine):
 
         return False
 
-    def _core_args(self, config: InferenceConfig) -> List[str]:
-        """核心必備旗標：模型/位址/dtype/記憶體配額/最大長度/served 名稱/TP。
+    def _core_args(self, config: InferenceConfig) -> list[str]:
+        """
+        Core required flags: model / address / dtype / memory budget / max len /
+        served name / TP.
 
-        這些是每次啟動 vLLM server 都會送的固定 CLI 參數。
+        These are the fixed CLI arguments passed on every vLLM server start.
         """
         model_source = config.model_path or config.model_name
         max_model_len = config.vllm_max_model_len or config.n_ctx
@@ -378,17 +391,14 @@ class VllmEngine(BaseEngine):
             str(config.vllm_tensor_parallel_size),
         ]
 
-    def _perf_args(self, config: InferenceConfig) -> List[str]:
-        """效能/行為相關的條件式旗標：量化、KV cache、prefix cache、log 行為。"""
-        args: List[str] = []
+    def _perf_args(self, config: InferenceConfig) -> list[str]:
+        """Conditional performance/behaviour flags: quantization, KV cache, prefix cache, logging."""
+        args: list[str] = []
         if config.vllm_quantization:
             args.extend(["--quantization", config.vllm_quantization])
         if config.vllm_kv_cache_dtype:
             args.extend(["--kv-cache-dtype", config.vllm_kv_cache_dtype])
-        if (
-            config.vllm_kv_offloading_size is not None
-            and config.vllm_kv_offloading_size > 0
-        ):
+        if config.vllm_kv_offloading_size is not None and config.vllm_kv_offloading_size > 0:
             args.extend(
                 [
                     "--kv-offloading-size",
@@ -398,6 +408,9 @@ class VllmEngine(BaseEngine):
             )
         if config.vllm_max_num_seqs is not None:
             args.extend(["--max-num-seqs", str(config.vllm_max_num_seqs)])
+
+        if config.vllm_max_num_batched_tokens is not None:
+            args.extend(["--max-num-batched-tokens", str(config.vllm_max_num_batched_tokens)])
         if config.vllm_enforce_eager:
             args.append("--enforce-eager")
         if config.trust_remote_code:
@@ -406,13 +419,16 @@ class VllmEngine(BaseEngine):
             args.append("--no-enable-log-requests")
         return args
 
-    def _mm_args(self, config: InferenceConfig) -> List[str]:
-        """多模態相關旗標：``--limit-mm-per-prompt`` 的 image/audio/video 配額。
-
-        若使用者未顯式設定 image limit 且模型偵測為多模態，會自動補 image=1；
-        純文字模型即使誤加此旗標 vLLM 也會忽略，故風險可控。
+    def _mm_args(self, config: InferenceConfig) -> list[str]:
         """
-        # 使用 getattr 以相容舊版 InferenceConfig（未定義對應欄位時不會報錯）
+        Multimodal flags: the image/audio/video budgets of ``--limit-mm-per-prompt``.
+
+        If the user set no explicit image limit and the model is detected as
+        multimodal, image=1 is added automatically; vLLM ignores the flag on
+        text-only models, so the risk is contained.
+        """
+        # getattr keeps compatibility with older InferenceConfig versions that
+        # may not define these fields
         mm_image_limit = getattr(config, "vllm_mm_image_limit", None)
         mm_audio_limit = getattr(config, "vllm_mm_audio_limit", None)
         mm_video_limit = getattr(config, "vllm_mm_video_limit", None)
@@ -425,7 +441,7 @@ class VllmEngine(BaseEngine):
             )
             mm_image_limit = 1
 
-        mm_limits: Dict[str, int] = {}
+        mm_limits: dict[str, int] = {}
         if mm_image_limit is not None:
             mm_limits["image"] = int(mm_image_limit)
         if mm_audio_limit is not None:
@@ -437,14 +453,16 @@ class VllmEngine(BaseEngine):
             return []
         return ["--limit-mm-per-prompt", json.dumps(mm_limits)]
 
-    def _template_args(self, config: InferenceConfig) -> List[str]:
-        """architectures override 與自訂 chat template。
-
-        ``vllm_hf_overrides`` 用於強制覆寫 ``config.json`` 的 architectures，
-        例：``'{"architectures":["Gemma4ForConditionalGeneration"]}'``。
-        ``vllm_chat_template`` 用於 ``tokenizer_config.json`` 缺 chat_template 時。
+    def _template_args(self, config: InferenceConfig) -> list[str]:
         """
-        args: List[str] = []
+        architectures override and custom chat template.
+
+        ``vllm_hf_overrides`` force-overrides the architectures in ``config.json``,
+        e.g. ``'{"architectures":["Gemma4ForConditionalGeneration"]}'``.
+        ``vllm_chat_template`` is for when ``tokenizer_config.json`` has no
+        chat_template.
+        """
+        args: list[str] = []
 
         hf_overrides = getattr(config, "vllm_hf_overrides", None)
         if hf_overrides:
@@ -458,12 +476,13 @@ class VllmEngine(BaseEngine):
 
         return args
 
-    def _build_server_cmd(self, config: InferenceConfig) -> List[str]:
-        """組出完整 ``vllm serve <args...>`` 命令。
-
-        各分組（core/perf/mm/template）由獨立 method 負責，便於單元測試。
+    def _build_server_cmd(self, config: InferenceConfig) -> list[str]:
         """
-        cmd: List[str] = ["vllm", "serve"]
+        Assemble the full ``vllm serve <args...>`` command.
+
+        Each group (core/perf/mm/template) has its own method to ease unit testing.
+        """
+        cmd: list[str] = ["vllm", "serve"]
         cmd.extend(self._core_args(config))
         cmd.extend(self._perf_args(config))
         cmd.extend(self._mm_args(config))
@@ -471,60 +490,68 @@ class VllmEngine(BaseEngine):
         return cmd
 
     def _resolve_vllm_server_dir(self) -> str:
-        """解析 vllm_server 隔離環境專案目錄。"""
+        """Resolve the project directory of the isolated vllm_server environment."""
         project_dir = VLLM_SERVER_PROJECT_DIR
         if not os.path.isdir(project_dir):
             raise RuntimeError(f"VLLM_SERVER_PROJECT_DIR does not exist: {project_dir}")
         return project_dir
 
-    def _resolve_launch_prefixes(self) -> List[List[str]]:
-        """產生可用的 vllm launcher 前綴清單（不含 ``serve <args>`` 部分）。
+    def _resolve_launch_prefixes(self) -> list[list[str]]:
+        """
+        Build the list of usable vllm launcher prefixes (without ``serve <args>``).
 
-        回傳順序代表優先序：venv 內
+        Return order is the preference order: the venv's
         ``python -m vllm.entrypoints.cli.main`` >
-        系統 ``uv run --project ... python -m vllm.entrypoints.cli.main``。
+        system ``uv run --project ... python -m vllm.entrypoints.cli.main``.
 
-        為了相容容器內掛載到不同絕對路徑的情境，不直接執行
-        ``.venv/bin/vllm`` console script：該檔案的 shebang 會寫死建立虛擬環境
-        當下的 interpreter 絕對路徑，搬移路徑後容易在 subprocess spawn 階段
-        直接得到 ``ENOENT``。
+        The ``.venv/bin/vllm`` console script is deliberately not executed, so
+        that containers mounting the venv at a different absolute path still
+        work: that file's shebang hardcodes the interpreter path from venv
+        creation time, and a moved path easily yields ``ENOENT`` at subprocess
+        spawn.
 
-        若兩者皆不可用直接拋出 ``RuntimeError``，呼叫端可在 ``load_model``
-        最早期就接到失敗，而非到實際 spawn 子程序時才 panic。
+        If neither is available this raises ``RuntimeError`` so the caller sees
+        the failure at the very start of ``load_model`` instead of panicking
+        when the subprocess is actually spawned.
         """
         project_dir = self._resolve_vllm_server_dir()
 
-        prefixes: List[List[str]] = []
+        prefixes: list[list[str]] = []
 
-        python_bin = os.path.join(project_dir, ".venv", "bin", "python")
-        if os.path.isfile(python_bin) and os.access(python_bin, os.X_OK):
-            prefixes.append([python_bin, "-m", "vllm.entrypoints.cli.main"])
+        # Try both "python" and "python3" — uv venv may only create one depending
+        # on the host system. Using the venv binary directly avoids uv project
+        # discovery walking up the tree and picking up the backend's pyproject.toml.
+        venv_bin = os.path.join(project_dir, ".venv", "bin")
+        found_python_bin: str | None = None
+        for py_name in ("python", "python3"):
+            candidate = os.path.join(venv_bin, py_name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                found_python_bin = candidate
+                prefixes.append([candidate, "-m", "vllm.entrypoints.cli.main"])
+                break
 
         uv_path = shutil.which("uv")
         if uv_path:
-            prefixes.append(
-                [
-                    uv_path,
-                    "run",
-                    "--project",
-                    project_dir,
-                    "python",
-                    "-m",
-                    "vllm.entrypoints.cli.main",
-                ]
-            )
+            # Use --no-project so uv does not traverse up the directory tree and
+            # accidentally pick up the backend's pyproject.toml (now at repo root).
+            # Explicitly pass --python to pin to the isolated venv's interpreter.
+            uv_cmd = [uv_path, "run", "--no-project"]
+            if found_python_bin:
+                uv_cmd += ["--python", found_python_bin]
+            uv_cmd += ["python", "-m", "vllm.entrypoints.cli.main"]
+            prefixes.append(uv_cmd)
 
         if not prefixes:
             raise RuntimeError(
                 f"vLLM launcher unavailable: no executable at "
-                f"{python_bin} and `uv` not found on PATH. "
+                f"{venv_bin} and `uv` not found on PATH. "
                 "Please set up the vllm_server isolated environment first."
             )
         return prefixes
 
-    def _discover_runtime_library_dirs(self, project_venv: str) -> List[str]:
-        """搜尋隔離 venv 內需要加入 ``LD_LIBRARY_PATH`` 的共享函式庫目錄。"""
-        discovered: List[str] = []
+    def _discover_runtime_library_dirs(self, project_venv: str) -> list[str]:
+        """Find shared-library dirs in the isolated venv that must join ``LD_LIBRARY_PATH``."""
+        discovered: list[str] = []
         seen: set[str] = set()
         search_roots = [
             os.path.join(project_venv, "lib"),
@@ -555,8 +582,7 @@ class VllmEngine(BaseEngine):
                 )
                 is_torch_lib = normalized_dir.endswith("/site-packages/torch/lib")
                 is_nvidia_lib = (
-                    "/site-packages/nvidia/" in normalized_dir
-                    and normalized_dir.endswith("/lib")
+                    "/site-packages/nvidia/" in normalized_dir and normalized_dir.endswith("/lib")
                 )
 
                 if not (has_cuda_libs or is_torch_lib or is_nvidia_lib):
@@ -570,21 +596,19 @@ class VllmEngine(BaseEngine):
 
         return discovered
 
-    def _find_shared_library(self, project_venv: str, pattern: str) -> Optional[str]:
-        """在隔離 venv 中尋找指定共享函式庫。"""
+    def _find_shared_library(self, project_venv: str, pattern: str) -> str | None:
+        """Locate a given shared library inside the isolated venv."""
         for lib_root_name in ("lib", "lib64"):
             lib_root = os.path.join(project_venv, lib_root_name)
             if not os.path.isdir(lib_root):
                 continue
-            for candidate in glob.iglob(
-                os.path.join(lib_root, "**", pattern), recursive=True
-            ):
+            for candidate in glob.iglob(os.path.join(lib_root, "**", pattern), recursive=True):
                 if os.path.isfile(candidate):
                     return os.path.abspath(candidate)
         return None
 
     def _repair_isolated_nvidia_runtime(self, project_dir: str) -> None:
-        """修復 vLLM 隔離環境中未完整展開的 NVIDIA runtime wheels。"""
+        """Repair NVIDIA runtime wheels that were not fully unpacked in the isolated vLLM env."""
         project_venv = os.path.join(project_dir, ".venv")
         missing_pairs = [
             (lib_name, package_name)
@@ -602,9 +626,7 @@ class VllmEngine(BaseEngine):
 
         python_bin = os.path.join(project_venv, "bin", "python")
         if not (os.path.isfile(python_bin) and os.access(python_bin, os.X_OK)):
-            raise RuntimeError(
-                f"vLLM isolated env missing python interpreter: {python_bin}"
-            )
+            raise RuntimeError(f"vLLM isolated env missing python interpreter: {python_bin}")
 
         repair_env = os.environ.copy()
         active_venv = repair_env.get("VIRTUAL_ENV")
@@ -666,8 +688,8 @@ class VllmEngine(BaseEngine):
             ", ".join(lib_name for lib_name, _ in missing_pairs),
         )
 
-    def _build_server_env(self) -> Dict[str, str]:
-        """建立 vLLM 子程序環境變數。"""
+    def _build_server_env(self) -> dict[str, str]:
+        """Build the environment variables for the vLLM subprocess."""
         env = os.environ.copy()
         env.setdefault("VLLM_LOGGING_LEVEL", VLLM_LOGGING_LEVEL)
         env["HF_HUB_OFFLINE"] = "1"
@@ -685,51 +707,50 @@ class VllmEngine(BaseEngine):
         extra_lib_dirs = self._discover_runtime_library_dirs(project_venv)
         if extra_lib_dirs:
             env["LD_LIBRARY_PATH"] = os.pathsep.join(
-                extra_lib_dirs
-                + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else [])
+                extra_lib_dirs + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else [])
             )
 
-        env["PATH"] = os.pathsep.join(
-            [os.path.join(project_venv, "bin"), env.get("PATH", "")]
-        )
+        env["PATH"] = os.pathsep.join([os.path.join(project_venv, "bin"), env.get("PATH", "")])
         return env
 
     def _validate_runtime_environment(self) -> None:
-        """在 load_model 進入子流程前先做完整環境體檢，提早給出可動作的錯誤。
-
-        檢查項目：
-        1. ``VLLM_SERVER_PROJECT_DIR`` 設定且為實際存在的資料夾。
-          2. 至少一種 launcher 可用（venv ``python -m vllm.entrypoints.cli.main``
-              或系統 uv）。
-        3. ``VLLM_PORT`` 在 1–65535 範圍。
-
-        失敗會直接 raise；呼叫端的 ``load_model`` try/except 會把錯誤透過
-        status_queue 通知主程序。
         """
-        # 1+2：解析 project dir 與 launcher 前綴（這兩步本身就會 raise）
+        Full environment check before load_model proceeds, to surface actionable errors early.
+
+        Checks:
+        1. ``VLLM_SERVER_PROJECT_DIR`` is set and points at an existing directory.
+          2. At least one launcher is available (venv
+              ``python -m vllm.entrypoints.cli.main`` or system uv).
+        3. ``VLLM_PORT`` is within 1-65535.
+
+        Failures raise directly; the caller's ``load_model`` try/except reports
+        the error to the main process via status_queue.
+        """
+        # 1+2: resolve project dir and launcher prefixes (both raise on failure)
         project_dir = self._resolve_vllm_server_dir()
         self._resolve_launch_prefixes()
         self._repair_isolated_nvidia_runtime(project_dir)
-        # 3：port 範圍
+        # 3: port range
         self._resolve_vllm_port()
 
-    def _start_server_process(self, config: InferenceConfig):
+    def _start_server_process(self, config: InferenceConfig) -> None:
         port = self._resolve_vllm_port()
         self._cleanup_port(port)
 
-        # 關鍵：這裡在 load_model 階段實際啟動 vLLM OpenAI-compatible server。
+        # Key step: this is where load_model actually starts the vLLM
+        # OpenAI-compatible server.
         raw_cmd = self._build_server_cmd(config)
-        # raw_cmd 的形式為 ["vllm", "serve", ...]；組合 launcher 時要去掉 leading "vllm"
-        # 因為各 prefix 本身已含到 vLLM module 為止
-        # （venv `python -m vllm.entrypoints.cli.main` 或
-        # `uv run ... python -m vllm.entrypoints.cli.main`）。
+        # raw_cmd has the form ["vllm", "serve", ...]; drop the leading "vllm"
+        # when combining with a launcher, because each prefix already goes up to
+        # the vLLM module (venv `python -m vllm.entrypoints.cli.main` or
+        # `uv run ... python -m vllm.entrypoints.cli.main`).
         serve_args = raw_cmd[1:] if raw_cmd and raw_cmd[0] == "vllm" else raw_cmd
 
-        launch_candidates: List[List[str]] = [
+        launch_candidates: list[list[str]] = [
             [*prefix, *serve_args] for prefix in self._resolve_launch_prefixes()
         ]
 
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
         env = self._build_server_env()
         with self.runtime.stderr_buffer_lock:
             self.runtime.stderr_recent_lines.clear()
@@ -768,10 +789,10 @@ class VllmEngine(BaseEngine):
 
         raise RuntimeError(f"Failed to start vLLM server. {last_error}")
 
-    def _stop_server_process(self):
+    def _stop_server_process(self) -> None:
         if self.runtime.server_process and self.runtime.server_process.poll() is None:
             try:
-                os.killpg(os.getpgid(self.runtime.server_process.pid), signal.SIGINT)
+                os.killpg(os.getpgid(self.runtime.server_process.pid), signal.SIGINT)  # pyright: ignore[reportAttributeAccessIssue]  # POSIX-only; vLLM runs on Linux
                 self.runtime.server_process.wait(timeout=10)
             except (
                 ProcessLookupError,
@@ -780,9 +801,7 @@ class VllmEngine(BaseEngine):
                 subprocess.TimeoutExpired,
             ):
                 try:
-                    os.killpg(
-                        os.getpgid(self.runtime.server_process.pid), signal.SIGTERM
-                    )
+                    os.killpg(os.getpgid(self.runtime.server_process.pid), signal.SIGTERM)  # pyright: ignore[reportAttributeAccessIssue]  # POSIX-only; vLLM runs on Linux
                     self.runtime.server_process.wait(timeout=5)
                 except (
                     ProcessLookupError,
@@ -791,9 +810,7 @@ class VllmEngine(BaseEngine):
                     subprocess.TimeoutExpired,
                 ):
                     try:
-                        os.killpg(
-                            os.getpgid(self.runtime.server_process.pid), signal.SIGKILL
-                        )
+                        os.killpg(os.getpgid(self.runtime.server_process.pid), signal.SIGKILL)  # pyright: ignore[reportAttributeAccessIssue]  # POSIX-only; vLLM runs on Linux
                     except (ProcessLookupError, PermissionError, OSError):
                         pass
 
@@ -802,18 +819,20 @@ class VllmEngine(BaseEngine):
     def _wait_for_port_release(
         self, port: int, timeout: float = 15.0, poll_interval: float = 0.5
     ) -> bool:
-        """主動 poll 直到指定 port 無人佔用，或 timeout 為止。
+        """
+        Poll until the given port has no owner, or until timeout.
 
-        熱替換情境：``unload`` 立即接著 ``load_model`` 時，若舊 vLLM 進程
-        SIGKILL 後 OS 仍有殘留的 socket TIME_WAIT 或 GPU memory 尚未刷掉，
-        下一次 ``_cleanup_port`` 會撞上殘骸。本方法提供一個明確的同步點，
-        讓 unload 在 port 真正釋放後才返回。
+        Hot-swap case: when ``unload`` is immediately followed by ``load_model``,
+        the OS may still hold a socket in TIME_WAIT after the old vLLM process
+        was SIGKILLed, or GPU memory may not be flushed yet, so the next
+        ``_cleanup_port`` hits leftovers. This method provides an explicit
+        synchronization point so unload only returns once the port is truly free.
 
         Returns:
-            ``True`` 表示在 timeout 內成功釋放；``False`` 表示逾時仍被佔用。
+            ``True`` if released within the timeout; ``False`` if still occupied.
         """
         deadline = time.time() + max(0.0, timeout)
-        last_owner_pid: Optional[int] = None
+        last_owner_pid: int | None = None
         while time.time() < deadline:
             owner = self._find_port_owner(port)
             if owner is None:
@@ -835,12 +854,15 @@ class VllmEngine(BaseEngine):
         return False
 
     def _drain_stderr_pump(self, timeout: float = 2.0) -> None:
-        """等 stderr pump thread 把 pipe 內 buffered 內容 drain 完。
+        """
+        Wait for the stderr pump thread to drain the buffered pipe contents.
 
-        子程序死亡瞬間 kernel 會把 pipe 標 EOF，但 reader thread 還沒 readline
-        到所有殘留內容；若立即 ``_classify_recent_stderr`` 會抓到不完整的 buffer
-        （vLLM v1 常見只剩 APIServer wrapper 的最後兩行，根因 OOM 被略掉）。
-        在偵測子程序死亡後呼叫此 helper，給 reader thread 短時間把剩餘內容讀完。
+        The kernel marks the pipe EOF the moment the subprocess dies, but the
+        reader thread has not yet read every leftover line; calling
+        ``_classify_recent_stderr`` right away would see an incomplete buffer
+        (with vLLM v1 typically only the APIServer wrapper's last two lines,
+        dropping the real OOM root cause). Call this helper after detecting
+        subprocess death to give the reader thread a moment to finish.
         """
         thread = self.runtime.stderr_pump_thread
         if thread is None or not thread.is_alive():
@@ -848,38 +870,40 @@ class VllmEngine(BaseEngine):
         thread.join(timeout=timeout)
 
     def _classify_recent_stderr(self) -> VllmErrorReport:
-        """讀取最近的 stderr 並交由 ErrorClassifier 分類。"""
+        """Read the recent stderr and hand it to the error classifier."""
         with self.runtime.stderr_buffer_lock:
             lines = list(self.runtime.stderr_recent_lines)
         return classify_stderr(lines)
 
     def _get_error_reason(self) -> str:
-        """回傳供 RuntimeError 使用的純文字錯誤摘要（向後相容介面）。"""
+        """Return the plain-text error summary for RuntimeError (backward-compatible API)."""
         return self._classify_recent_stderr().to_text()
 
-    def _normalize_messages(self, prompt: Any) -> List[Dict[str, Any]]:
-        """將前端 prompt 轉為 OpenAI chat messages 格式。
+    def _normalize_messages(self, prompt: Any) -> list[dict[str, Any]]:  # noqa: ANN401 - arbitrary client-supplied prompt payload
+        """
+        Convert a frontend prompt into OpenAI chat messages format.
 
-        content 可能是：
-        - str: 純文字
-        - list[dict]: 多模態 multi-part，例如
+        content may be:
+        - str: plain text
+        - list[dict]: multimodal multi-part, e.g.
             [{"type": "text", "text": "..."},
             {"type": "image_url", "image_url": {"url": "data:..."}}]
-        必須原樣保留 list 結構，不可 str() 強轉，否則圖片會丟失。
+        The list structure must be preserved verbatim — coercing with str()
+        would drop the images.
         """
         if isinstance(prompt, list):
-            normalized: List[Dict[str, Any]] = []
+            normalized: list[dict[str, Any]] = []
             for msg in prompt:
                 if not isinstance(msg, dict):
                     continue
                 role = str(msg.get("role", "user"))
                 content = msg.get("content", "")
 
-                # 若 content 是 list（多模態 multi-part），保留原結構
+                # If content is a list (multimodal multi-part), keep it as is
                 if isinstance(content, list):
                     normalized.append({"role": role, "content": content})
                 elif isinstance(content, dict):
-                    # 某些客戶端會送單一 dict
+                    # Some clients send a single dict
                     normalized.append({"role": role, "content": [content]})
                 else:
                     normalized.append({"role": role, "content": str(content)})
@@ -891,56 +915,12 @@ class VllmEngine(BaseEngine):
             return [{"role": "user", "content": prompt}]
         return [{"role": "user", "content": str(prompt)}]
 
-    def _reorder_multimodal_content(
-        self, messages: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """依 Gemma 4 官方 best practice 將 image/audio/video 排在 text 之前。
-
-        若 content 不是 list（純文字情況）則原樣返回。
-        未知 type 的 part 一律保留在最後以避免遺漏。
-        """
-        media_types = {
-            "image_url",
-            "image",
-            "audio_url",
-            "audio",
-            "input_audio",
-            "video_url",
-            "video",
-        }
-        text_types = {"text"}
-
-        for msg in messages:
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-
-            media_parts: List[Any] = []
-            text_parts: List[Any] = []
-            other_parts: List[Any] = []
-            for p in content:
-                if not isinstance(p, dict):
-                    other_parts.append(p)
-                    continue
-                ptype = p.get("type")
-                if ptype in media_types:
-                    media_parts.append(p)
-                elif ptype in text_types:
-                    text_parts.append(p)
-                else:
-                    other_parts.append(p)
-
-            # 只有同時存在 media 與 text 時才重排，避免改動無意義
-            if media_parts and text_parts:
-                msg["content"] = media_parts + text_parts + other_parts
-
-        return messages
-
     def _check_server_alive_or_raise(self) -> None:
-        """若 vLLM 子程序已死，立即拋出帶分類資訊的 RuntimeError。
+        """
+        Raise a classified RuntimeError immediately if the vLLM subprocess died.
 
-        在 health check 輪詢的每次迭代之前呼叫；避免 server crash 後仍空轉
-        直到整個 ``health_timeout_s`` 用完才回報。
+        Called before each health-check poll iteration, so a crashed server is
+        reported at once instead of spinning until ``health_timeout_s`` expires.
         """
         proc = self.runtime.server_process
         if proc is None:
@@ -948,8 +928,9 @@ class VllmEngine(BaseEngine):
         if proc.poll() is None:
             return
 
-        # 關鍵：先讓 reader thread 讀完 pipe 殘留內容（含 EngineCore traceback），
-        # 否則 _classify_recent_stderr 只看得到 APIServer wrapper 那幾行
+        # Key step: let the reader thread finish the leftover pipe contents
+        # (including the EngineCore traceback) first, otherwise
+        # _classify_recent_stderr only sees the APIServer wrapper lines.
         self._drain_stderr_pump(timeout=2.0)
 
         exit_code = proc.returncode
@@ -968,14 +949,16 @@ class VllmEngine(BaseEngine):
         )
 
         start = time.time()
-        last_error: Optional[str] = None
+        last_error: str | None = None
 
         while time.time() - start < self.runtime.health_timeout_s:
-            # 每輪輪詢都先檢查子程序是否已死（含 sleep 後的下一輪）
+            # Check for subprocess death at the start of every poll (including
+            # the iteration after a sleep)
             self._check_server_alive_or_raise()
 
             try:
-                # 關鍵：使用 OpenAI-compatible `models.list()` 驗證 vLLM server 可用性。
+                # Key step: use the OpenAI-compatible `models.list()` to verify
+                # the vLLM server is reachable.
                 if self.runtime.client is None:
                     raise RuntimeError("OpenAI client not initialized")
                 models_response = self.runtime.client.models.list(timeout=5.0)
@@ -994,105 +977,31 @@ class VllmEngine(BaseEngine):
                 last_error = str(e)
                 time.sleep(1.0)
 
-        # Timeout 之後再做最後一次 process 狀態判定，並附上分類後的 stderr 摘要
+        # After the timeout, check the process state one last time and attach the
+        # classified stderr summary
         self._check_server_alive_or_raise()
         report = self._classify_recent_stderr()
         url = f"{self.runtime.base_url}/models"
-        details_parts: List[str] = []
+        details_parts: list[str] = []
         if last_error:
             details_parts.append(f"last_error={last_error}")
         details_parts.append(f"category={report.category}")
         details_parts.append(f"stderr_excerpt={report.to_text()}")
         details = "; " + "; ".join(details_parts)
         raise RuntimeError(
-            f"vLLM OpenAI-compatible server 啟動 timeout: "
+            f"vLLM OpenAI-compatible server startup timeout: "
             f"{self.runtime.health_timeout_s:.0f}s, endpoint={url}{details}"
         )
 
-    def _prepare_payload(
-        self, prompt: Any, params: Optional[Dict[str, Any]] = None, stream: bool = False
-    ) -> Dict[str, Any]:
-        params = params or {}
-
-        logger.debug(
-            "[vLLM] _prepare_payload raw prompt type=%s preview=%.300s",
-            type(prompt).__name__,
-            str(prompt),
-        )
-
-        messages = self._reorder_multimodal_content(self._normalize_messages(prompt))
-
-        logger.debug("[vLLM] _prepare_payload messages: %s", messages)
-        # Debug log：確認 multi-part content 未被意外 str 化
-        # 正常多模態：[('user', 'list', 2)]；純文字：[('user', 'str', None)]
-        if logger.isEnabledFor(10):  # DEBUG level
-            try:
-                structure = [
-                    (
-                        m.get("role"),
-                        type(m.get("content")).__name__,
-                        (
-                            len(m["content"])
-                            if isinstance(m.get("content"), list)
-                            else None
-                        ),
-                    )
-                    for m in messages
-                ]
-                logger.debug("[vLLM] payload messages structure: %s", structure)
-            except Exception:
-                pass
-
-        model_name = self.runtime.served_model_name
-        if model_name is None and self.config is not None:
-            model_name = self.config.model_name
-        if model_name is None:
-            model_name = "vllm-server"
-
-        payload: Dict[str, Any] = {
-            "model": model_name,
-            "messages": messages,
-            "max_tokens": max(1, int(params.get("max_new_tokens", 512))),
-            "temperature": max(0.0, min(float(params.get("temperature", 0.7)), 2.0)),
-            "top_p": max(0.0, min(float(params.get("top_p", 0.9)), 1.0)),
-            "stream": stream,
-        }
-
-        # OpenAI function-calling 格式；None / 空 list 不送，避免干擾純聊天請求
-        tools = params.get("tools")
-        if tools:
-            payload["tools"] = tools
-
-        tool_choice = params.get("tool_choice")
-        if tool_choice is not None:
-            payload["tool_choice"] = tool_choice
-
-        extra_body: Dict[str, Any] = {}
-        repetition_penalty = params.get("repetition_penalty")
-        if repetition_penalty is not None:
-            extra_body["repetition_penalty"] = float(repetition_penalty)
-
-        top_k = params.get("top_k")
-        if top_k is not None:
-            extra_body["top_k"] = int(top_k)
-
-        enable_thinking = params.get("enable_thinking")
-        if enable_thinking is not None:
-            chat_template_kwargs = extra_body.setdefault("chat_template_kwargs", {})
-            chat_template_kwargs["enable_thinking"] = bool(enable_thinking)
-
-        if extra_body:
-            payload["extra_body"] = extra_body
-
-        return payload
-
-    def load_model(self, config: InferenceConfig):
+    def load_model(self, config: InferenceConfig) -> None:
+        """Validate environment, launch the vLLM server, and await readiness."""
         self.config = config
         self.runtime.api_key = VLLM_OPENAI_API_KEY
         self.runtime.health_timeout_s = VLLM_HEALTH_TIMEOUT
         try:
-            # 提早做環境體檢：launcher 不可用、port 設錯時直接 raise，
-            # 不浪費時間走後面的 client 建立、子程序啟動、health poll。
+            # Check the environment early: raise straight away when no launcher
+            # is available or the port is misconfigured, instead of wasting time
+            # on client creation, subprocess start and health polling.
             self.status_queue.put({"status": "loading", "stage": "vllm_env_validate"})
             self._validate_runtime_environment()
 
@@ -1123,22 +1032,20 @@ class VllmEngine(BaseEngine):
             )
         except Exception as e:
             startup_excerpt = self._get_error_reason()
-            logger.error("[Worker] vLLM startup failed: %s", e)
-            logger.error("[Worker] vLLM stderr excerpt:\n%s", startup_excerpt)
+            logger.exception("[Worker] vLLM startup failed: %s", e)
+            logger.exception("[Worker] vLLM stderr excerpt:\n%s", startup_excerpt)
             self._stop_server_process()
             self.runtime.served_model_name = None
-            raise RuntimeError(
-                f"vLLM startup failed: {e}; stderr_excerpt={startup_excerpt}"
-            ) from e
+            raise RuntimeError(f"vLLM startup failed: {e}; stderr_excerpt={startup_excerpt}") from e
 
-    def _normalize_prompt(
-        self, prompt: Any, params: Optional[Dict[str, Any]] = None
-    ) -> str:
+    def _normalize_prompt(self, prompt: Any, params: dict[str, Any] | None = None) -> str:  # noqa: ANN401 - arbitrary client-supplied prompt payload
         _ = params
         messages = self._normalize_messages(prompt)
 
-        def _content_to_text(content: Any) -> str:
-            # 多模態 multi-part 情況：只抽取 text，圖片/音訊以 placeholder 表示
+        def _content_to_text(content: Any) -> str:  # noqa: ANN401 - OpenAI message content is str or multi-part list
+
+            # Multimodal multi-part case: keep only text, represent image/audio
+            # with a placeholder
             if isinstance(content, list):
                 parts = []
                 for p in content:
@@ -1156,218 +1063,18 @@ class VllmEngine(BaseEngine):
                 return " ".join(parts)
             return str(content)
 
-        return "\n".join(
-            f"{m['role']}: {_content_to_text(m['content'])}" for m in messages
-        )
+        return "\n".join(f"{m['role']}: {_content_to_text(m['content'])}" for m in messages)
 
-    def _build_sampling_params(self, params: Dict[str, Any]):
-        return self._prepare_payload(prompt="", params=params, stream=False)
+    # NOTE: generate() / generate_stream() intentionally removed — vLLM is
+    # served directly over async HTTP from the main process (see
+    # service/inference/async_server_client.py), never through the worker.
+    # The BaseEngine defaults emit a clear error if this is ever misrouted.
 
-    def _abort_request(self, request_id: Optional[str]):
-        logger.info("[Worker] vLLM abort requested for request_id=%s", request_id)
-
-    def generate(self, request: Dict[str, Any]):
-        request_id = request.get("request_id")
-        prompt = request.get("prompt")
-        params = request.get("params", {})
-        request_stop_flag = request.get("request_stop_flag")
-        if not self.config or not self.runtime.served_model_name:
-            self.data_queue.put(
-                {
-                    "type": "error",
-                    "request_id": request_id,
-                    "error": "vLLM engine not loaded",
-                }
-            )
-            return
-
-        # 在發出 HTTP 請求前先檢查 stop flag（並發場景下可能已被設定）
-        _req_stopped = (
-            isinstance(request_stop_flag, threading.Event)
-            and request_stop_flag.is_set()
-        )
-        if self.stop_generation_flag.is_set() or _req_stopped:
-            logger.info("[vLLM] generate aborted before start (request_id=%s)", request_id)
-            self.data_queue.put(
-                {
-                    "type": "result",
-                    "request_id": request_id,
-                    "result": "",
-                    "stopped": True,
-                }
-            )
-            return
-
-        start = time.perf_counter()
-        try:
-            payload = self._prepare_payload(prompt=prompt, params=params, stream=False)
-            timeout_s = float(params["total_timeout"])
-
-            # 關鍵：改為 OpenAI SDK 呼叫 vLLM OpenAI-compatible server。
-            if self.runtime.client is None:
-                raise RuntimeError("OpenAI client not initialized")
-
-            completion = self.runtime.client.chat.completions.create(
-                timeout=timeout_s,
-                **payload,
-            )
-
-            result_text = ""
-            if completion.choices:
-                message = completion.choices[0].message
-                result_text = str(message.content or "")
-
-            usage = completion.usage
-            prompt_tokens = getattr(usage, "prompt_tokens", None)
-            gen_tokens = getattr(usage, "completion_tokens", None)
-            total_tokens = getattr(usage, "total_tokens", None)
-
-            elapsed = max(1e-6, time.perf_counter() - start)
-            response = {
-                "type": "result",
-                "request_id": request_id,
-                "result": result_text,
-            }
-            if total_tokens is not None:
-                response["total_tokens"] = total_tokens
-            if gen_tokens is not None:
-                response["gen_tokens"] = gen_tokens
-                response["gen_tps"] = float(gen_tokens) / elapsed
-            if prompt_tokens is not None:
-                response["prompt_tokens"] = prompt_tokens
-
-            self.data_queue.put(response)
-        except (APIError, OSError, ValueError, TypeError, RuntimeError) as e:
-            logger.error("[Worker] vLLM generate error: %s", e)
-            self.data_queue.put(
-                {"type": "error", "request_id": request_id, "error": str(e)}
-            )
-
-    def generate_stream(self, request: Dict[str, Any]):
-        request_id = request.get("request_id")
-        prompt = request.get("prompt")
-        params = request.get("params", {})
-        request_stop_flag = request.get("request_stop_flag")
-
-        # print debug log with prompt and params preview (truncated to 300 chars to avoid log flooding)
-        logger.debug(
-            "[vLLM] generate_stream request_id=%s prompt type=%s preview=%.300s params preview=%.300s",
-            request_id,
-            type(prompt).__name__,
-            str(prompt),
-            str(params),
-        )
-
-        if not self.config or not self.runtime.served_model_name:
-            self.data_queue.put(
-                {
-                    "type": "error",
-                    "request_id": request_id,
-                    "error": "vLLM engine not loaded",
-                }
-            )
-            return
-
-        start = time.perf_counter()
-        prompt_tokens = None
-        gen_tokens = 0
-        total_tokens = None
-
-        try:
-            payload = self._prepare_payload(prompt=prompt, params=params, stream=True)
-            timeout_s = float(params["total_timeout"])
-
-            # 關鍵：串流由 OpenAI SDK iterator 處理，不再手動解析 SSE `data:` 行。
-            if self.runtime.client is None:
-                raise RuntimeError("OpenAI client not initialized")
-
-            logger.info("[vLLM] Using client.chat.completions.create")
-            stream = self.runtime.client.chat.completions.create(
-                timeout=timeout_s,
-                stream_options={"include_usage": True},
-                **payload,
-            )
-
-            for event in stream:
-                _req_stopped = (
-                    isinstance(request_stop_flag, threading.Event)
-                    and request_stop_flag.is_set()
-                )
-                if self.stop_generation_flag.is_set() or _req_stopped:
-                    logger.info(
-                        "[vLLM] Stream aborted (request_id=%s, global=%s, local=%s)",
-                        request_id,
-                        self.stop_generation_flag.is_set(),
-                        _req_stopped,
-                    )
-                    break
-
-                chunk_text = ""
-                if event.choices:
-                    delta = event.choices[0].delta
-                    chunk_text = str((delta.content or ""))
-
-                usage = getattr(event, "usage", None)
-                if usage is not None:
-                    if getattr(usage, "prompt_tokens", None) is not None:
-                        prompt_tokens = int(usage.prompt_tokens)
-                    if getattr(usage, "completion_tokens", None) is not None:
-                        gen_tokens = int(usage.completion_tokens)
-                    if getattr(usage, "total_tokens", None) is not None:
-                        total_tokens = int(usage.total_tokens)
-
-                if chunk_text:
-                    # 注意：vLLM 在 stream_options={"include_usage": True} 時
-                    # 僅於最後一筆事件回傳完整 usage（prompt/completion/total tokens），
-                    # 不會逐 chunk 提供 token 計數。為了避免使用 split-based 估算
-                    # 造成 CJK / BPE tokenizer 嚴重失真，這裡刻意省略 chunk_tokens；
-                    # 下游消費端對缺漏 chunk_tokens 已是 if not None 防呆。
-                    # 真實 token 計數一律由結尾 done_payload 中的 usage 欄位提供。
-                    self.data_queue.put(
-                        {
-                            "type": "stream_chunk",
-                            "request_id": request_id,
-                            "chunk": chunk_text,
-                            "done": False,
-                        }
-                    )
-
-            elapsed = max(1e-6, time.perf_counter() - start)
-            gen_tps = float(gen_tokens) / elapsed if gen_tokens else 0.0
-            prompt_tps = float(prompt_tokens) / elapsed if prompt_tokens else 0.0
-            done_payload = {
-                "type": "stream_chunk",
-                "request_id": request_id,
-                "chunk": "",
-                "done": True,
-                "gen_tokens": gen_tokens,
-                "gen_tps": gen_tps,
-                "prompt_tokens": prompt_tokens if prompt_tokens is not None else 0,
-                "prompt_tps": prompt_tps,
-            }
-            if total_tokens is not None:
-                done_payload["total_tokens"] = total_tokens
-            elif prompt_tokens is not None:
-                done_payload["total_tokens"] = int(prompt_tokens) + int(gen_tokens)
-            else:
-                done_payload["total_tokens"] = gen_tokens
-            _req_stopped_final = (
-                isinstance(request_stop_flag, threading.Event)
-                and request_stop_flag.is_set()
-            )
-            if self.stop_generation_flag.is_set() or _req_stopped_final:
-                done_payload["stopped"] = True
-
-            self.data_queue.put(done_payload)
-        except (APIError, OSError, ValueError, TypeError, RuntimeError) as e:
-            logger.error("[Worker] vLLM generate_stream error: %s", e)
-            self.data_queue.put(
-                {"type": "error", "request_id": request_id, "error": str(e)}
-            )
-
-    def unload(self):
-        # 關鍵：在 unload 階段關閉由本 engine 啟動的 vLLM server。
-        # 解析 port 失敗（環境變數設錯）時不該擋住 unload，故包 try。
+    def unload(self) -> None:
+        """Stop the managed vLLM server and reset all runtime state."""
+        # Key step: unload stops the vLLM server this engine started.
+        # A failed port resolution (misconfigured env var) must not block unload,
+        # hence the try.
         try:
             port = self._resolve_vllm_port()
         except Exception:
@@ -1375,14 +1082,15 @@ class VllmEngine(BaseEngine):
 
         self._stop_server_process()
 
-        # 熱替換時 unload 緊接 load_model；確保舊 server 真的釋放 port，
-        # 避免下一次 _cleanup_port 撞上 TIME_WAIT 或殘留進程。
+        # On hot swap, load_model follows unload immediately; make sure the old
+        # server really released the port so the next _cleanup_port does not hit
+        # TIME_WAIT or a leftover process.
         port_released = True
         if port is not None:
             port_released = self._wait_for_port_release(port)
 
-        # 一次性整體重置：所有 vLLM 生命週期狀態歸零，
-        # 避免漏掉某個欄位（之前手動 5 行 reset 出過不對齊風險）。
+        # Single wholesale reset: every vLLM lifecycle field goes back to zero,
+        # so none is missed (the previous manual 5-line reset risked drifting).
         self.runtime = VllmRuntimeContext(
             api_key=VLLM_OPENAI_API_KEY,
             health_timeout_s=VLLM_HEALTH_TIMEOUT,
@@ -1402,13 +1110,12 @@ class VllmEngine(BaseEngine):
         )
         logger.info("[Worker] %s", unload_msg)
 
-    def apply_chat_template(self, request: Dict[str, Any]):
+    def apply_chat_template(self, request: dict[str, Any]) -> None:
+        """Flatten chat messages into a plain-text prompt for logging/debug."""
         request_id = request.get("request_id")
         try:
             messages = request.get("messages", [])
-            prompt = self._normalize_prompt(
-                messages, request.get("template_kwargs", {})
-            )
+            prompt = self._normalize_prompt(messages, request.get("template_kwargs", {}))
             self.data_queue.put(
                 {
                     "type": "result",
@@ -1426,23 +1133,24 @@ class VllmEngine(BaseEngine):
             )
 
     def _vllm_admin_url(self, path: str) -> str:
-        """組出 vLLM server 管理 endpoint URL（不含 /v1 前綴）。"""
-        # base_url 形如 http://host:port/v1，admin endpoints 位於 root 之下。
+        """Build a vLLM server admin endpoint URL (without the /v1 prefix)."""
+        # base_url looks like http://host:port/v1; admin endpoints sit under root.
         base = self.runtime.base_url
         root = base[:-3] if base.endswith("/v1") else base
         if not path.startswith("/"):
             path = "/" + path
         return f"{root.rstrip('/')}{path}"
 
-    def cleanup_generation_memory(self):
-        """請 vLLM server 重置 prefix cache 以釋放累積的 KV 記憶體。
-
-        vLLM OpenAI-compatible server 提供 ``POST /reset_prefix_cache`` admin
-        endpoint，呼叫後會清空 prefix cache 條目（不影響當前在跑的請求）。
-        若 server 尚未啟動或網路錯誤，記錄 warning 但不向上拋出，避免清理動作
-        把整個服務拖垮。
+    def cleanup_generation_memory(self) -> None:
         """
-        # 在 vLLM server 尚未就緒時直接回報（避免空打 HTTP）
+        Ask the vLLM server to reset its prefix cache and free accumulated KV memory.
+
+        The vLLM OpenAI-compatible server exposes the ``POST /reset_prefix_cache``
+        admin endpoint, which clears prefix cache entries (in-flight requests are
+        unaffected). If the server is not up yet or the request fails, log a
+        warning instead of propagating, so cleanup cannot take the service down.
+        """
+        # Report directly when the vLLM server is not ready (avoids a pointless HTTP call)
         if not self.runtime.base_url or self.runtime.client is None:
             self.data_queue.put(
                 {
@@ -1454,9 +1162,7 @@ class VllmEngine(BaseEngine):
 
         url = self._vllm_admin_url("/reset_prefix_cache")
         headers = (
-            {"Authorization": f"Bearer {self.runtime.api_key}"}
-            if self.runtime.api_key
-            else {}
+            {"Authorization": f"Bearer {self.runtime.api_key}"} if self.runtime.api_key else {}
         )
 
         try:
@@ -1471,7 +1177,7 @@ class VllmEngine(BaseEngine):
                 }
             )
         except httpx.HTTPStatusError as e:
-            # endpoint 在某些 vLLM 版本可能尚未啟用；不視為致命錯誤
+            # The endpoint may be disabled in some vLLM builds; not fatal
             status_code = e.response.status_code if e.response is not None else None
             logger.warning(
                 "[Worker] vLLM reset_prefix_cache returned %s; cleanup degraded.",

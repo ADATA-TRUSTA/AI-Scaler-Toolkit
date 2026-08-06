@@ -1,10 +1,15 @@
-import requests
 import time
 import sys
 import logging
 import random
 import os
 from datetime import datetime
+
+import httpx
+
+# load_model / chat endpoints block for minutes; disable the client timeout to
+# match requests' default (no timeout).
+http = httpx.Client(timeout=None)
 
 # Ensure logs directory exists
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -41,7 +46,7 @@ def wait_for_model_load(timeout=600):
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            resp = requests.get(f"{BASE_URL}/inference/status")
+            resp = http.get(f"{BASE_URL}/inference/status")
             status = resp.json()
             
             if status.get("loaded"):
@@ -59,7 +64,7 @@ def wait_for_model_load(timeout=600):
 
 def ensure_model_exists(model_name):
     """Ensure the model is registered."""
-    resp = requests.get(f"{BASE_URL}/config/models")
+    resp = http.get(f"{BASE_URL}/config/models")
     models = resp.json()
     base_models = models.get("base_models", [])
     finetuned_models = models.get("finetuned_models", [])
@@ -73,7 +78,7 @@ def ensure_model_exists(model_name):
 
 def get_registry_label(model_name):
     try:
-        resp = requests.get(f"{BASE_URL}/config/models")
+        resp = http.get(f"{BASE_URL}/config/models")
         models = resp.json()
         for m in models.get("base_models", []) + models.get("finetuned_models", []):
             if m.get("base_model_name") == model_name or m.get("label") == model_name:
@@ -96,14 +101,14 @@ def run_inference_cycle(iteration, config):
     }
     
     logger.info("Loading model...")
-    resp = requests.post(f"{BASE_URL}/inference/load_model", json=payload)
+    resp = http.post(f"{BASE_URL}/inference/load_model", json=payload)
     if resp.status_code != 200:
         # If 409, maybe previous unload failed?
         if resp.status_code == 409:
             logger.warning("Model already loaded or loading? Trying to unload first.")
-            requests.post(f"{BASE_URL}/inference/unload_model")
+            http.post(f"{BASE_URL}/inference/unload_model")
             time.sleep(5)
-            resp = requests.post(f"{BASE_URL}/inference/load_model", json=payload)
+            resp = http.post(f"{BASE_URL}/inference/load_model", json=payload)
             if resp.status_code != 200:
                 logger.error(f"Failed to load model: {resp.text}")
                 return False
@@ -121,7 +126,7 @@ def run_inference_cycle(iteration, config):
         "max_new_tokens": 20,
         "temperature": 0.1
     }
-    resp = requests.post(f"{BASE_URL}/inference/chat", json=chat_payload)
+    resp = http.post(f"{BASE_URL}/inference/chat", json=chat_payload)
     if resp.status_code == 200:
         logger.info(f"Response: {resp.json().get('response')}")
     else:
@@ -130,13 +135,13 @@ def run_inference_cycle(iteration, config):
         
     # 3. Unload
     logger.info("Unloading...")
-    requests.post(f"{BASE_URL}/inference/unload_model")
+    http.post(f"{BASE_URL}/inference/unload_model")
     
     # Wait a bit for cleanup
     time.sleep(3)
     
     # Verify unloaded
-    status = requests.get(f"{BASE_URL}/inference/status").json()
+    status = http.get(f"{BASE_URL}/inference/status").json()
     if status.get("loaded"):
         logger.error("Model failed to unload properly")
         return False

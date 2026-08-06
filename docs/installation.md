@@ -225,7 +225,7 @@ cd /home/test/project/AI-Scaler-Toolkit
 TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash backend/scripts/linux/setup_env.sh
 ```
 
-腳本會在 `backend/service/.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
+腳本會在 `backend/.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
 
 > **提醒**：若要使用 fine-tune，請使用 **Linux + CUDA** 安裝流程。
 
@@ -243,7 +243,7 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 .\backend\scripts\windows\setup_env.ps1 -Accel cuda
 ```
 
-腳本會在 `backend\service\.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
+腳本會在 `backend\.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
 
 ### 若要使用 llama-server
 
@@ -313,7 +313,7 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 .\backend\scripts\windows\run_service.bat
 ```
 
-啟動腳本會直接使用 `backend/service/.venv` 內的 Python；**不需要手動啟動虛擬環境**。
+啟動腳本會直接使用 `backend/.venv` 內的 Python；**不需要手動啟動虛擬環境**。
 
 ### 預設服務位址
 

@@ -1,12 +1,19 @@
-﻿# 偵測 GPU 種類，以對應的 cmake 旗標與 uv extra 建立 Python 環境。
-# 用法：
-#   .\setup_env.ps1              # 自動偵測
-#   .\setup_env.ps1 -Accel xpu  # 手動指定 cuda | xpu
-#   .\setup_env.ps1 -SetupLlama # 一併取得 llama.cpp 原始碼（選配，僅 llama-server 需要）
+﻿# Detect the GPU type and build the Python environment with the matching uv extra
+# (torch cuda / xpu variant).
+# Usage:
+#   .\setup_env.ps1                # auto-detect the accelerator
+#   .\setup_env.ps1 -Accel xpu     # force cuda | xpu
+#   .\setup_env.ps1 -InstallLlama  # also install the prebuilt llama + GGUF convert tooling (no compiler)
+#   .\setup_env.ps1 -InstallLlama -LlamaBackend vulkan  # force the generic Vulkan build (sees every Intel/AMD/NVIDIA card)
 param(
     [ValidateSet("cuda", "xpu")]
     [string]$Accel = "",
-    [switch]$SetupLlama
+    [switch]$InstallLlama,             # Install the official prebuilt llama (server/quantize) + sparse-fetch the convert scripts
+    [string]$LlamaVersion = "b10107",  # Pinned llama version (maps to the installer's LLAMA_VERSION)
+    # llama inference backend, decoupled from the torch accel: auto = cuda when NVIDIA is present,
+    # else vulkan (env TRUSTA_LLAMA_BACKEND also overrides it)
+    [ValidateSet("auto", "cuda", "vulkan")]
+    [string]$LlamaBackend = "auto"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,27 +22,72 @@ $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path "$ScriptDir\..\..\").Path
 $ServiceDir  = Join-Path $ProjectRoot "service"
 
-# llama.cpp（選配，僅 llama-server 需要）：改由安裝期抓取，取代原本的 git submodule。
-# 版本 pin 在此手動維護；要 bump 版本就改 $LlamaCppRef。
-$LlamaCppDir = Join-Path $ServiceDir "utils\llama.cpp"
-$LlamaCppUrl = "https://github.com/ggml-org/llama.cpp"
-$LlamaCppRef = "50494a28003d15bb0b9a7a848fd5b6b713f39835"
+# GGUF convert tooling (convert_hf_to_gguf.py / convert_lora_to_gguf.py + conversion/ + gguf-py):
+# only shipped with the llama.cpp sources, not with the prebuilt binary. A sparse + blobless
+# fetch pulls just these paths (~1.7MB) — no C++, nothing to compile. The pinned revision is
+# maintained by hand here.
+$LlamaConvertDir = Join-Path $ServiceDir "utils\llama.cpp"
+$LlamaCppUrl     = "https://github.com/ggml-org/llama.cpp"
+$LlamaCppRef     = "c0bc8591e8815c63cb01dd3f051a8b0df02501c9"  # = tag b10107 HEAD
+$ConvertPaths    = @("convert_hf_to_gguf.py", "convert_lora_to_gguf.py", "conversion", "gguf-py")
 
-function Setup-LlamaCpp {
-    if (Test-Path (Join-Path $LlamaCppDir ".git")) {
-        Write-Host "[setup_env] 更新既有 llama.cpp：$LlamaCppDir"
-        git -C $LlamaCppDir fetch origin
+# Official prebuilt llama (ggml-org/llama-install.sh): no MSVC / CUDA toolkit / Vulkan SDK / CMake.
+# $LlamaBackend picks the llama build (decoupled from the torch accel): vulkan needs SKIP_CUDA=1
+# to actually take the Vulkan path (otherwise the official installer grabs CUDA whenever an
+# NVIDIA card is present).
+function Install-LlamaPrebuilt {
+    $installerUrl  = "https://raw.githubusercontent.com/ggml-org/llama-install.sh/master/install.ps1"
+    $installerPath = Join-Path $env:TEMP "llama-install.ps1"
+    Write-Host "[setup_env] downloading the official install.ps1: $installerUrl"
+    Invoke-WebRequest -UseBasicParsing -Uri $installerUrl -OutFile $installerPath
+
+    if ($script:LlamaBackendResolved -eq "vulkan") {
+        $env:SKIP_CUDA = "1"
+        Write-Host "[setup_env] llama backend=vulkan -> SKIP_CUDA=1 (generic Vulkan, sees Intel/AMD/NVIDIA)"
     } else {
-        Write-Host "[setup_env] clone llama.cpp：$LlamaCppUrl"
-        if (Test-Path $LlamaCppDir) { Remove-Item -Recurse -Force $LlamaCppDir }
-        git clone $LlamaCppUrl $LlamaCppDir
+        Write-Host "[setup_env] llama backend=cuda (native CUDA, NVIDIA only)"
     }
-    Write-Host "[setup_env] checkout 釘死版本 $LlamaCppRef"
-    git -C $LlamaCppDir checkout --detach $LlamaCppRef
-    Write-Host "[setup_env] llama.cpp 就緒；如需 llama-server 請自行 build（見 README）"
+    if ($LlamaVersion) {
+        $env:LLAMA_VERSION = $LlamaVersion
+        Write-Host "[setup_env] pinning LLAMA_VERSION=$LlamaVersion"
+    }
+    try {
+        # Run the installer in a child process so our $ErrorActionPreference="Stop" is not
+        # inherited, which would turn errors the installer deliberately swallows with 2>$null
+        # (e.g. cleaning a temp dir that does not exist) into fatal ones.
+        # $env:SKIP_CUDA / $env:LLAMA_VERSION are passed down through the process environment.
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $installerPath
+        if ($LASTEXITCODE -ne 0) {
+            # Install only when a compatible prebuilt exists: a failure (no build for this
+            # platform) warns and skips instead of aborting the whole setup
+            Write-Warning "[setup_env] llama install failed (exit $LASTEXITCODE) — this platform may have no compatible prebuilt. Skipped the llama binary; point LLAMA_SERVER_BINARY in .env at your own build, or re-run later."
+            $script:LlamaInstalled = $false
+            return
+        }
+    } finally {
+        Remove-Item Env:\SKIP_CUDA -ErrorAction SilentlyContinue
+        Remove-Item Env:\LLAMA_VERSION -ErrorAction SilentlyContinue
+        Remove-Item $installerPath -ErrorAction SilentlyContinue
+    }
+    $script:LlamaInstalled = $true
+    Write-Host "[setup_env] llama installed: $env:LOCALAPPDATA\Microsoft\WindowsApps\llama.exe"
 }
 
-# 自動偵測：有 nvidia-smi 就 CUDA，否則預設 XPU（Intel iGPU / Arc）
+function Get-LlamaConvertTooling {
+    if (-not (Test-Path (Join-Path $LlamaConvertDir ".git"))) {
+        if (Test-Path $LlamaConvertDir) { Remove-Item -Recurse -Force $LlamaConvertDir }
+        Write-Host "[setup_env] sparse checkout of the convert tooling: $LlamaCppUrl"
+        git init $LlamaConvertDir
+        git -C $LlamaConvertDir remote add origin $LlamaCppUrl
+        git -C $LlamaConvertDir sparse-checkout set --no-cone @ConvertPaths
+    }
+    Write-Host "[setup_env] fetching the convert scripts (pinned to $LlamaCppRef, only $($ConvertPaths -join ', '))"
+    git -C $LlamaConvertDir fetch --depth 1 --filter=blob:none origin $LlamaCppRef
+    git -C $LlamaConvertDir checkout --detach FETCH_HEAD
+    Write-Host "[setup_env] convert tooling ready (pure Python, no build step)"
+}
+
+# Auto-detect: CUDA when nvidia-smi exists, otherwise default to XPU (Intel iGPU / Arc)
 if (-not $Accel) {
     if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
         $Accel = "cuda"
@@ -45,44 +97,46 @@ if (-not $Accel) {
 }
 Write-Host "[setup_env] accelerator=$Accel"
 
-switch ($Accel) {
-    "cuda" { $CmakeFlag = "-DGGML_CUDA=on" }
-    "xpu"  { $CmakeFlag = "-DGGML_VULKAN=on" }
-}
+# XPU: the torch xpu SYCL runtime ships with pip (uv sync --extra xpu), so oneAPI is not needed;
+# it only needs a recent enough Intel GPU driver (an old one hangs torch xpu GEMM kernel compilation).
 
-# XPU：載入 Intel oneAPI 環境變數
-if ($Accel -eq "xpu") {
-    $SetvarsPath = "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
-    if (Test-Path $SetvarsPath) {
-        Write-Host "[setup_env] 初始化 oneAPI 環境..."
-        $envLines = cmd /c "call `"$SetvarsPath`" --force && set" 2>&1
-        foreach ($line in $envLines) {
-            if ($line -match "^([^=]+)=(.*)$") {
-                [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], "Process")
-            }
-        }
-        Write-Host "[setup_env] oneAPI 環境載入完成"
+Set-Location $ProjectRoot
+Write-Host "[setup_env] uv sync --extra $Accel"
+uv sync --extra $Accel
+
+# llama build selection (decoupled from the torch accel): env TRUSTA_LLAMA_BACKEND overrides the auto default
+if ($LlamaBackend -eq "auto" -and $env:TRUSTA_LLAMA_BACKEND) { $LlamaBackend = $env:TRUSTA_LLAMA_BACKEND }
+if ($LlamaBackend -notin @("auto", "cuda", "vulkan")) {
+    throw "[setup_env] unsupported LlamaBackend: $LlamaBackend (use auto | cuda | vulkan)"
+}
+$script:LlamaBackendResolved = $LlamaBackend
+if ($LlamaBackendResolved -eq "auto") {
+    # auto: native CUDA build when an NVIDIA card is present (fastest), otherwise the generic Vulkan build
+    if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+        $script:LlamaBackendResolved = "cuda"
     } else {
-        Write-Warning "[setup_env] 未找到 oneAPI setvars.bat，跳過 oneAPI 初始化"
+        $script:LlamaBackendResolved = "vulkan"
     }
 }
 
-Set-Location $ServiceDir
-$env:CMAKE_ARGS = $CmakeFlag
-Write-Host "[setup_env] CMAKE_ARGS=$CmakeFlag  uv sync --extra $Accel"
-uv sync --extra $Accel
-
-if ($SetupLlama -or $env:TRUSTA_SETUP_LLAMA -eq "1") {
-    Setup-LlamaCpp
+$script:LlamaInstalled = $false
+if ($InstallLlama -or $env:TRUSTA_INSTALL_LLAMA -eq "1") {
+    Install-LlamaPrebuilt
+    Get-LlamaConvertTooling
+    if ($LlamaInstalled) {
+        $LlamaStatus = "prebuilt $LlamaVersion ($LlamaBackendResolved) + convert tooling"
+    } else {
+        $LlamaStatus = "convert tooling only (binary skipped: no compatible prebuilt / install failed)"
+    }
 } else {
-    Write-Host "[setup_env] 跳過 llama.cpp 取得（選配；如需 llama-server 加 -SetupLlama）"
+    Write-Host "[setup_env] skipping llama (add -InstallLlama if you need inference / conversion)"
+    $LlamaStatus = "skipped"
 }
 
 Write-Host ""
 Write-Host "=========================================="
-Write-Host "  環境設定完成"
+Write-Host "  Environment setup complete"
 Write-Host "  Accelerator : $Accel"
-Write-Host "  CMAKE_ARGS  : $CmakeFlag"
 Write-Host "  Service Dir : $ServiceDir"
-Write-Host "  llama.cpp   : $(if ($SetupLlama -or $env:TRUSTA_SETUP_LLAMA -eq '1') { $LlamaCppRef } else { 'skipped' })"
+Write-Host "  llama       : $LlamaStatus"
 Write-Host "=========================================="

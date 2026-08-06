@@ -1,13 +1,13 @@
 @echo off
 setlocal
-REM 啟動服務（CUDA / XPU 通用）
+REM Start the service (works for both CUDA and XPU)
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..\..") do set "PROJECT_ROOT=%%~fI"
-set "VENV_PYTHON=%PROJECT_ROOT%\service\.venv\Scripts\python.exe"
+set "VENV_PYTHON=%PROJECT_ROOT%\.venv\Scripts\python.exe"
 
 if not exist "%VENV_PYTHON%" (
-    echo [run_service] Python environment not found at "%PROJECT_ROOT%\service\.venv"
+    echo [run_service] Python environment not found at "%PROJECT_ROOT%\.venv"
     echo Please run setup_env.ps1 first.
     pause
     exit /b 1

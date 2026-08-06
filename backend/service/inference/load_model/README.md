@@ -1,36 +1,36 @@
 # Load Model Module
 
-此模組包含模型載入的工具函數，特別是 PEFT/LoRA 微調模型的處理。
+This module holds model-loading helpers, in particular for PEFT/LoRA fine-tuned models.
 
-## 目錄結構
+## Directory Layout
 
 ```
 load_model/
-├── __init__.py           # 模組初始化，導出公共 API
-├── peft_loader.py        # PEFT/LoRA 模型載入工具
-└── README.md            # 此文件
+├── __init__.py           # Module init, exports the public API
+├── peft_loader.py        # PEFT/LoRA model loading helpers
+└── README.md            # This file
 ```
 
 ## PEFT Loader (`peft_loader.py`)
 
-### 功能
+### Purpose
 
-提供 PEFT/LoRA 微調模型的檢測和載入功能。
+Provides detection and loading of PEFT/LoRA fine-tuned models.
 
-### 主要函數
+### Main Functions
 
 #### `is_peft_model(model_path: str) -> bool`
 
-檢測指定路徑是否為 PEFT/LoRA 微調模型。
+Checks whether the given path holds a PEFT/LoRA fine-tuned model.
 
-**參數:**
-- `model_path`: 模型路徑
+**Parameters:**
+- `model_path`: Model path
 
-**返回:**
-- `True` 如果路徑包含 `adapter_config.json`（PEFT 模型的標誌檔案）
-- `False` 否則
+**Returns:**
+- `True` if the path contains `adapter_config.json` (the marker file of a PEFT model)
+- `False` otherwise
 
-**範例:**
+**Example:**
 ```python
 from service.inference.load_model import is_peft_model
 
@@ -40,47 +40,47 @@ if is_peft_model("/path/to/model"):
 
 #### `load_peft_model(model_path: str, base_model, hf_token: Optional[str] = None)`
 
-載入 PEFT/LoRA 微調模型的 adapters 並合併到 base model。
+Loads the adapters of a PEFT/LoRA fine-tuned model onto the base model.
 
-**參數:**
-- `model_path`: LoRA adapter 的路徑
-- `base_model`: 已載入的基礎模型實例
-- `hf_token`: HuggingFace token（可選）
+**Parameters:**
+- `model_path`: Path to the LoRA adapter
+- `base_model`: Already-loaded base model instance
+- `hf_token`: HuggingFace token (optional)
 
-**返回:**
-- 合併了 LoRA adapter 的模型實例
+**Returns:**
+- Model instance with the LoRA adapter attached
 
-**異常:**
-- `RuntimeError`: 如果 PEFT 函式庫未安裝
-- `Exception`: 如果載入失敗
+**Exceptions:**
+- `RuntimeError`: If the PEFT library is not installed
+- `Exception`: If loading fails
 
-**範例:**
+**Example:**
 ```python
 from transformers import AutoModelForCausalLM
 from service.inference.load_model import load_peft_model
 
-# 載入 base model
+# Load the base model
 base_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B")
 
-# 載入 LoRA adapters
+# Load the LoRA adapters
 model = load_peft_model("/path/to/lora_adapter", base_model)
 ```
 
 #### `read_base_model_name(model_path: str) -> str`
 
-從 PEFT 模型的 `adapter_config.json` 讀取 base model 名稱。
+Reads the base model name from a PEFT model's `adapter_config.json`.
 
-**參數:**
-- `model_path`: PEFT 模型路徑
+**Parameters:**
+- `model_path`: PEFT model path
 
-**返回:**
-- Base model 的名稱或路徑
+**Returns:**
+- Name or path of the base model
 
-**異常:**
-- `FileNotFoundError`: 如果 `adapter_config.json` 不存在
-- `ValueError`: 如果無法找到 `base_model_name_or_path` 欄位
+**Exceptions:**
+- `FileNotFoundError`: If `adapter_config.json` does not exist
+- `ValueError`: If the `base_model_name_or_path` field cannot be found
 
-**範例:**
+**Example:**
 ```python
 from service.inference.load_model.peft_loader import read_base_model_name
 
@@ -88,13 +88,13 @@ base_name = read_base_model_name("/path/to/lora_adapter")
 print(f"Base model: {base_name}")
 ```
 
-### 全域變數
+### Global Variables
 
 #### `PEFT_AVAILABLE: bool`
 
-指示 PEFT 函式庫是否可用。如果 `peft` 套件未安裝，此值為 `False`。
+Indicates whether the PEFT library is available. If the `peft` package is not installed, this is `False`.
 
-**範例:**
+**Example:**
 ```python
 from service.inference.load_model import PEFT_AVAILABLE
 
@@ -104,84 +104,70 @@ else:
     print("PEFT not installed. Install with: pip install peft")
 ```
 
-## 使用方式
+## Usage
 
-### 基本導入
+### Basic Import
 
 ```python
-from service.inference.load_model import (
-    is_peft_model,
-    load_peft_model,
-    PEFT_AVAILABLE
-)
+from service.inference.load_model import is_peft_model, load_peft_model, PEFT_AVAILABLE
 ```
 
-### 完整工作流程範例
+### Full Workflow Example
 
 ```python
 from pathlib import Path
 from transformers import AutoModelForCausalLM
-from service.inference.load_model import (
-    is_peft_model,
-    load_peft_model,
-    PEFT_AVAILABLE
-)
+from service.inference.load_model import is_peft_model, load_peft_model, PEFT_AVAILABLE
 from service.inference.load_model.peft_loader import read_base_model_name
 
 model_path = "/path/to/model"
 
-# 檢查是否為 PEFT 模型
+# Check whether this is a PEFT model
 if is_peft_model(model_path):
     if not PEFT_AVAILABLE:
         raise RuntimeError("PEFT not installed")
-    
-    # 讀取 base model 名稱
+
+    # Read the base model name
     base_model_name = read_base_model_name(model_path)
     print(f"Loading base model: {base_model_name}")
-    
-    # 載入 base model
+
+    # Load the base model
     base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_name,
-        device_map="auto",
-        torch_dtype="auto"
+        base_model_name, device_map="auto", torch_dtype="auto"
     )
-    
-    # 載入 LoRA adapters
+
+    # Load the LoRA adapters
     model = load_peft_model(model_path, base_model)
     print("✓ PEFT model loaded successfully")
 else:
-    # 一般模型：直接載入
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        device_map="auto",
-        torch_dtype="auto"
-    )
+    # Regular model: load directly
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", torch_dtype="auto")
     print("✓ Regular model loaded successfully")
 ```
 
-## 依賴項
+## Dependencies
 
-### 必需
-- `pathlib`: 路徑處理
-- `json`: 解析 adapter_config.json
-- `logging`: 日誌記錄
-- `typing`: 類型註解
+### Required
+- `pathlib`: Path handling
+- `json`: Parsing adapter_config.json
+- `logging`: Log output
+- `typing`: Type annotations
 
-### 可選
-- `peft`: LoRA/QLoRA 支援
-  - 安裝: `pip install peft`
-  - 如果未安裝，`PEFT_AVAILABLE` 將為 `False`
+### Optional
+- `peft`: LoRA/QLoRA support
+  - Install: `pip install peft`
+  - If not installed, `PEFT_AVAILABLE` is `False`
 
-## 整合到主系統
+## Integration With the Main System
 
-此模組已整合到 `model_inference_process.py`：
+This module is already wired into `model_inference_process.py`:
 
 ```python
-# 在 model_inference_process.py 中
+# In model_inference_process.py
 from .load_model import is_peft_model, load_peft_model, PEFT_AVAILABLE
 from .load_model.peft_loader import read_base_model_name
 
-# 使用範例（在 worker 進程中）
+# Usage example (inside the worker process)
 is_peft = is_peft_model(model_source)
 if is_peft:
     base_model_name = read_base_model_name(model_source)
@@ -189,39 +175,39 @@ if is_peft:
     model = load_peft_model(model_source, base_model, hf_token)
 ```
 
-## 錯誤處理
+## Error Handling
 
-### 常見錯誤
+### Common Errors
 
-1. **PEFT 未安裝**
+1. **PEFT not installed**
    ```
    RuntimeError: PEFT library not available. Install with: pip install peft
    ```
-   解決：`pip install peft`
+   Fix: `pip install peft`
 
-2. **adapter_config.json 缺失**
+2. **adapter_config.json missing**
    ```
    FileNotFoundError: adapter_config.json not found in /path/to/model
    ```
-   解決：確認路徑正確且為有效的 PEFT 模型
+   Fix: confirm the path is correct and is a valid PEFT model
 
-3. **base_model_name_or_path 缺失**
+3. **base_model_name_or_path missing**
    ```
    ValueError: base_model_name_or_path not found in adapter_config.json
    ```
-   解決：檢查 adapter_config.json 格式是否正確
+   Fix: check that adapter_config.json is well-formed
 
-## 擴展性
+## Extensibility
 
-未來可以在此模組中添加更多模型載入工具：
+More model-loading helpers can be added to this module later:
 
-- `awq_loader.py`: AWQ 量化模型載入
-- `gptq_loader.py`: GPTQ 量化模型載入
-- `merged_loader.py`: 合併後的模型載入
-- 等等...
+- `awq_loader.py`: Loading AWQ-quantized models
+- `gptq_loader.py`: Loading GPTQ-quantized models
+- `merged_loader.py`: Loading merged models
+- and so on...
 
-## 參考文件
+## References
 
-- [PEFT 官方文檔](https://huggingface.co/docs/peft)
-- [LOAD_LORA_INFERENCE.md](../../../LOAD_LORA_INFERENCE.md) - LoRA 推理使用指南
-- [QLORA_EXAMPLE.md](../../../QLORA_EXAMPLE.md) - QLoRA 訓練範例
+- [PEFT official docs](https://huggingface.co/docs/peft)
+- [LOAD_LORA_INFERENCE.md](../../../LOAD_LORA_INFERENCE.md) - LoRA inference guide
+- [QLORA_EXAMPLE.md](../../../QLORA_EXAMPLE.md) - QLoRA training example

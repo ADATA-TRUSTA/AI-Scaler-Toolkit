@@ -1,4 +1,5 @@
-"""High-level Training Manager facade.
+"""
+High-level Training Manager facade.
 
 This module exposes the same interface used by `service.app` but delegates the
 actual heavy training work to a dedicated worker process implemented in
@@ -13,7 +14,7 @@ Design goals:
 
 from pathlib import Path
 from threading import Lock
-from typing import Optional
+from typing import Any, Optional
 
 from .config_models import TrainingConfig, TrainingStatus
 from .settings import configure_logging
@@ -23,7 +24,8 @@ logger = configure_logging(__name__)
 
 
 class TrainingManager:
-    """Singleton facade used by FastAPI routes.
+    """
+    Singleton facade used by FastAPI routes.
 
     Public API is intentionally small and stable:
     - start_training(config: TrainingConfig) -> dict
@@ -37,7 +39,8 @@ class TrainingManager:
     _instance: Optional["TrainingManager"] = None
     _lock: Lock = Lock()
 
-    def __new__(cls):
+    def __new__(cls) -> "TrainingManager":
+        """Return the singleton TrainingManager instance."""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -55,8 +58,9 @@ class TrainingManager:
 
     # --- public facade methods -------------------------------------------------
 
-    def start_training(self, config: TrainingConfig):
-        """開始訓練（非阻塞）
+    def start_training(self, config: TrainingConfig) -> dict[str, Any]:
+        """
+        Start training (non-blocking).
 
         This will:
         - Save the current training configuration for debugging/inspection.
@@ -65,7 +69,7 @@ class TrainingManager:
 
         Returns a small dict for the API handler.
         """
-        # 保留與舊實作相同的並發保護語意：一次只允許一個訓練
+        # Keep the same concurrency guarantee as the old implementation: one training run at a time
         with self._lock:
             status = training_process_manager.get_status()
             if status.is_training:
@@ -79,22 +83,22 @@ class TrainingManager:
             return result
 
     def get_status(self) -> TrainingStatus:
-        """獲取訓練狀態（由 worker process 回報的快照）。"""
+        """Get the training status (a snapshot reported by the worker process)."""
         return training_process_manager.get_status()
-    
-    def get_history(self, session_id: str):
+
+    def get_history(self, session_id: str) -> dict[str, Any] | None:
         """Get full training history (system metrics & progress)."""
         return training_process_manager.get_history(session_id)
-    
-    def get_error_details(self):
+
+    def get_error_details(self) -> dict[str, Any] | None:
         """
-        獲取詳細的錯誤信息（包括完整的 traceback）
-        格式與 inference/error_details 一致
+        Return detailed error info, including the full traceback.
+        Matches the inference/error_details format.
         """
         return training_process_manager.get_error_details()
 
-    def stop_training(self):
-        """請求停止訓練（非同步，嘗試優雅結束 worker）。"""
+    def stop_training(self) -> dict[str, Any]:
+        """Request that training stop (async; attempts a graceful worker shutdown)."""
         with self._lock:
             result = training_process_manager.stop_training()
             logger.info("Training stop requested via worker process")

@@ -6,18 +6,16 @@ import base64
 import mimetypes
 import os
 from copy import deepcopy
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
 _IMAGE_DATA_URL_PREFIXES = ("data:image/", "data:application/octet-stream")
-_BASE64_ALLOWED_CHARS = set(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r"
-)
+_BASE64_ALLOWED_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r")
 
 
-def guess_mime_type(filename: Optional[str], content_type: Optional[str]) -> str:
+def guess_mime_type(filename: str | None, content_type: str | None) -> str:
     """Infer MIME type for an uploaded or local file."""
     if content_type and "/" in content_type:
         return content_type
@@ -64,7 +62,7 @@ def looks_like_base64_payload(value: str) -> bool:
     return all(ch in _BASE64_ALLOWED_CHARS for ch in raw)
 
 
-def normalize_image_input(value: Any) -> Optional[str]:
+def normalize_image_input(value: Any) -> str | None:  # noqa: ANN401 - accepts arbitrary caller-supplied image value
     """Normalize an image input into a supported string representation."""
     if value is None:
         return None
@@ -98,7 +96,7 @@ def normalize_image_input(value: Any) -> Optional[str]:
     return raw
 
 
-def normalize_openai_messages_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def normalize_openai_messages_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize image fields in OpenAI-format messages."""
     normalized = deepcopy(messages)
 
@@ -109,7 +107,9 @@ def normalize_openai_messages_images(messages: List[Dict[str, Any]]) -> List[Dic
         content = message.get("content")
         if not isinstance(content, list):
             if message_attachment_urls:
-                message["content"] = _merge_image_urls_into_content(content, message_attachment_urls)
+                message["content"] = _merge_image_urls_into_content(
+                    content, message_attachment_urls
+                )
             message.pop("attachments", None)
             continue
 
@@ -161,7 +161,7 @@ def normalize_openai_messages_images(messages: List[Dict[str, Any]]) -> List[Dic
     return normalized
 
 
-def _attachment_to_image_url(attachment: Any) -> Optional[str]:
+def _attachment_to_image_url(attachment: Any) -> str | None:  # noqa: ANN401 - duck-typed attachment (str/dict/None)
     if attachment is None:
         return None
 
@@ -207,7 +207,7 @@ def _attachment_to_image_url(attachment: Any) -> Optional[str]:
     return None
 
 
-def extract_image_urls_from_attachment_payload(attachments: Any) -> List[str]:
+def extract_image_urls_from_attachment_payload(attachments: Any) -> list[str]:  # noqa: ANN401 - duck-typed attachment payload (list/scalar/None)
     """Extract normalized image URLs from OpenClaw-style attachment payloads."""
     if attachments is None:
         return []
@@ -217,7 +217,7 @@ def extract_image_urls_from_attachment_payload(attachments: Any) -> List[str]:
     else:
         values = [attachments]
 
-    image_urls: List[str] = []
+    image_urls: list[str] = []
     for attachment in values:
         image_url = _attachment_to_image_url(attachment)
         if image_url:
@@ -225,17 +225,16 @@ def extract_image_urls_from_attachment_payload(attachments: Any) -> List[str]:
     return image_urls
 
 
-def _merge_image_urls_into_content(content: Any, image_urls: List[str]) -> List[Dict[str, Any]]:
+def _merge_image_urls_into_content(content: Any, image_urls: list[str]) -> list[dict[str, Any]]:  # noqa: ANN401 - duck-typed message content (str/list/other)
     image_parts = [
-        {"type": "image_url", "image_url": {"url": image_url}}
-        for image_url in image_urls
+        {"type": "image_url", "image_url": {"url": image_url}} for image_url in image_urls
     ]
 
     if isinstance(content, list):
         return content + image_parts
 
     if isinstance(content, str):
-        parts: List[Dict[str, Any]] = []
+        parts: list[dict[str, Any]] = []
         if content.strip():
             parts.append({"type": "text", "text": content})
         parts.extend(image_parts)
@@ -245,8 +244,8 @@ def _merge_image_urls_into_content(content: Any, image_urls: List[str]) -> List[
 
 
 def append_uploads_to_last_user_message(
-    messages: List[Dict[str, Any]], uploaded_image_urls: List[str]
-) -> List[Dict[str, Any]]:
+    messages: list[dict[str, Any]], uploaded_image_urls: list[str]
+) -> list[dict[str, Any]]:
     """Append uploaded images to the last user message content."""
     if not uploaded_image_urls:
         return messages
@@ -265,12 +264,11 @@ def append_uploads_to_last_user_message(
 
     content = normalized[last_user_idx].get("content")
     image_parts = [
-        {"type": "image_url", "image_url": {"url": image_url}}
-        for image_url in uploaded_image_urls
+        {"type": "image_url", "image_url": {"url": image_url}} for image_url in uploaded_image_urls
     ]
 
     if isinstance(content, str):
-        parts: List[Dict[str, Any]] = []
+        parts: list[dict[str, Any]] = []
         if content.strip():
             parts.append({"type": "text", "text": content})
         parts.extend(image_parts)

@@ -9,12 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional
-from datetime import datetime
-import requests
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -23,38 +23,36 @@ REGISTRY_PATH = Path("service/configs/models_registry.json")
 REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _get_max_context_length_from_hf(
-    model_id: str, hf_token: Optional[str] = None
-) -> Optional[int]:
+def _get_max_context_length_from_hf(model_id: str, hf_token: str | None = None) -> int | None:
     """
-    從 Hugging Face 獲取模型的 max context length
+    Fetch a model's max context length from Hugging Face.
 
-    嘗試順序：
-    1. 從 HF API 的 config.json 獲取 max_position_embeddings
-    2. 從 config.json 獲取 model_max_length
-    3. 從 config.json 獲取 n_positions
-    4. 從 tokenizer_config.json 獲取 model_max_length
+    Lookup order:
+    1. max_position_embeddings from config.json via the HF API
+    2. model_max_length from config.json
+    3. n_positions from config.json
+    4. model_max_length from tokenizer_config.json
 
     Args:
-        model_id: HuggingFace 模型 ID (例如: "Qwen/Qwen3-4B")
-        hf_token: HuggingFace token (可選)
+        model_id: HuggingFace model ID (e.g. "Qwen/Qwen3-4B")
+        hf_token: HuggingFace token (optional)
 
     Returns:
-        max context length 或 None（如果無法獲取）
+        The max context length, or None if it cannot be determined
     """
     try:
         headers = {}
         if hf_token:
             headers["Authorization"] = f"Bearer {hf_token}"
 
-        # 嘗試從 config.json 獲取
+        # Try config.json first
         config_url = f"https://huggingface.co/{model_id}/raw/main/config.json"
         try:
-            response = requests.get(config_url, headers=headers, timeout=10)
+            response = httpx.get(config_url, headers=headers, timeout=10, follow_redirects=True)
             if response.status_code == 200:
                 config = response.json()
 
-                # 嘗試多個可能的欄位名稱
+                # Try several possible field names
                 for key in [
                     "max_position_embeddings",
                     "model_max_length",
@@ -69,17 +67,15 @@ def _get_max_context_length_from_hf(
         except Exception as e:
             logger.debug(f"Failed to get config.json for {model_id}: {e}")
 
-        # 嘗試從 tokenizer_config.json 獲取
-        tokenizer_url = (
-            f"https://huggingface.co/{model_id}/raw/main/tokenizer_config.json"
-        )
+        # Fall back to tokenizer_config.json
+        tokenizer_url = f"https://huggingface.co/{model_id}/raw/main/tokenizer_config.json"
         try:
-            response = requests.get(tokenizer_url, headers=headers, timeout=10)
+            response = httpx.get(tokenizer_url, headers=headers, timeout=10, follow_redirects=True)
             if response.status_code == 200:
                 tokenizer_config = response.json()
                 if "model_max_length" in tokenizer_config:
                     max_len = tokenizer_config["model_max_length"]
-                    # 有些模型會設置一個非常大的數字（如 1000000000），過濾掉
+                    # Some models set an absurdly large value (e.g. 1000000000); filter it out
                     if isinstance(max_len, int) and max_len < 1000000:
                         logger.info(
                             f"Got max_context_length for {model_id}: {max_len} (from tokenizer_config)"
@@ -92,13 +88,13 @@ def _get_max_context_length_from_hf(
         return None
 
     except Exception as e:
-        logger.error(f"Error getting max_context_length for {model_id}: {e}")
+        logger.exception(f"Error getting max_context_length for {model_id}: {e}")
         return None
 
 
 # Seed models used only to initialize the registry file when it does not exist yet.
 # After creation, the JSON file is the single source of truth.
-SEED_BASE_MODELS: List[Dict] = [
+SEED_BASE_MODELS: list[dict] = [
     {
         "base_model_name": "openai/gss-opt-20b",
         "label": "OPENAI GSS-Opt-20B",
@@ -153,20 +149,25 @@ SEED_BASE_MODELS: List[Dict] = [
 
 @dataclass
 class FinetunedModelInfo:
-    base_model_name: Optional[str]
-    method: Optional[str]
+    """Metadata describing a locally finetuned model entry."""
+
+    base_model_name: str | None
+    method: str | None
     output_dir: str
-    label: Optional[str] = None
-    size: Optional[str] = None
-    max_context_length: Optional[int] = None
-    added_at: str = datetime.now().isoformat()
+    label: str | None = None
+    size: str | None = None
+    max_context_length: int | None = None
+    added_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 class ModelRegistry:
-    _instance: Optional["ModelRegistry"] = None
+    """Singleton registry of base, finetuned, and GGUF models."""
+
+    _instance: ModelRegistry | None = None
     _lock = Lock()
 
-    def __new__(cls):
+    def __new__(cls) -> ModelRegistry:
+        """Return the singleton ModelRegistry instance."""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -174,7 +175,7 @@ class ModelRegistry:
                     cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self):
+    def __init__(self) -> None:
         if getattr(self, "_initialized", False):
             return
         self.path = REGISTRY_PATH
@@ -183,7 +184,7 @@ class ModelRegistry:
         self._initialized = True
         logger.info(f"ModelRegistry initialized at {self.path}")
 
-    def _ensure_file(self):
+    def _ensure_file(self) -> None:
         if not self.path.exists():
             data = {
                 "base_models": SEED_BASE_MODELS,
@@ -192,22 +193,22 @@ class ModelRegistry:
             }
             self._write(data)
 
-    def _read(self) -> Dict:
+    def _read(self) -> dict:
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(self.path, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
             logger.warning(f"Failed to read registry, returning empty lists: {e}")
             # Do not silently re-seed here to avoid diverging from user's file.
             return {"base_models": [], "finetuned_models": []}
 
-    def _write(self, data: Dict):
+    def _write(self, data: dict) -> None:
         tmp = self.path.with_suffix(".json.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         tmp.replace(self.path)
 
-    def _identifier_variants(self, value: Optional[str]) -> set[str]:
+    def _identifier_variants(self, value: str | None) -> set[str]:
         """Return comparable identifier variants for labels and local paths."""
         if not value or not isinstance(value, str):
             return set()
@@ -222,7 +223,7 @@ class ModelRegistry:
             variants.add(os.path.normpath(stripped[2:]))
         return {item for item in variants if item}
 
-    def _model_identifier_fields(self, item: Dict, model_type: str) -> List[str]:
+    def _model_identifier_fields(self, item: dict, model_type: str) -> list[str]:
         if model_type == "base":
             return ["label", "local_path", "base_model_name"]
         if model_type == "finetuned":
@@ -231,29 +232,29 @@ class ModelRegistry:
             return ["label", "local_path", "filename"]
         return ["label"]
 
-    def _matches_model_identifier(self, item: Dict, model_type: str, label: str) -> bool:
+    def _matches_model_identifier(self, item: dict, model_type: str, label: str) -> bool:
         target_variants = self._identifier_variants(label)
         if not target_variants:
             return False
 
-        for field in self._model_identifier_fields(item, model_type):
-            if target_variants & self._identifier_variants(item.get(field)):
+        for field_name in self._model_identifier_fields(item, model_type):
+            if target_variants & self._identifier_variants(item.get(field_name)):
                 return True
         return False
 
-    def _normalize_model_item(self, item: Dict, model_type: str) -> Dict:
+    def _normalize_model_item(self, item: dict, model_type: str) -> dict:
         """
-        統一 list_models 輸出欄位：
+        Normalize the list_models output fields:
         {
             "model_name": "base_model_name",
             "model_path": "...",
             "label": "label",
             "size": "size",
             "max_context_length": "max_context_length"
-        }
+        }.
 
-        model_path 規則：
-        - base_models: local_path；若無則使用 HuggingFace 路徑(base_model_name)
+        model_path rules:
+        - base_models: local_path; falls back to the HuggingFace path (base_model_name)
         - finetuned_models: output_dir
         - llama_gguf_models: filename
         """
@@ -277,7 +278,7 @@ class ModelRegistry:
             "max_context_length": item.get("max_context_length"),
         }
 
-    def list_models(self) -> Dict:
+    def list_models(self) -> dict:
         """Return combined registry data suitable for UI consumption."""
         with self.mutex:
             data = self._read()
@@ -286,14 +287,13 @@ class ModelRegistry:
         last_finetuned = None
         if last_info_path.exists():
             try:
-                with open(last_info_path, "r", encoding="utf-8") as f:
+                with open(last_info_path, encoding="utf-8") as f:
                     last_finetuned = json.load(f)
             except Exception:
                 last_finetuned = None
 
         base_models = [
-            self._normalize_model_item(item, "base_models")
-            for item in data.get("base_models", [])
+            self._normalize_model_item(item, "base_models") for item in data.get("base_models", [])
         ]
         finetuned_models = [
             self._normalize_model_item(item, "finetuned_models")
@@ -312,17 +312,17 @@ class ModelRegistry:
         }
 
     def update_base_model_context_length(
-        self, model_id: str, hf_token: Optional[str] = None
-    ) -> Optional[int]:
+        self, model_id: str, hf_token: str | None = None
+    ) -> int | None:
         """
-        更新指定 base model 的 max_context_length
+        Update the max_context_length of a specific base model.
 
         Args:
-            model_id: 模型 ID (例如: "Qwen/Qwen3-4B")
-            hf_token: HuggingFace token (可選)
+            model_id: Model ID (e.g. "Qwen/Qwen3-4B")
+            hf_token: HuggingFace token (optional)
 
         Returns:
-            更新後的 max_context_length 或 None
+            The updated max_context_length, or None
         """
         max_len = _get_max_context_length_from_hf(model_id, hf_token)
         if max_len is not None:
@@ -338,12 +338,12 @@ class ModelRegistry:
                 logger.info(f"Updated max_context_length for {model_id}: {max_len}")
         return max_len
 
-    def refresh_all_context_lengths(self, hf_token: Optional[str] = None):
+    def refresh_all_context_lengths(self, hf_token: str | None = None) -> None:
         """
-        刷新所有 base models 的 max_context_length
+        Refresh max_context_length for all base models.
 
         Args:
-            hf_token: HuggingFace token (可選)
+            hf_token: HuggingFace token (optional)
         """
         with self.mutex:
             data = self._read()
@@ -368,32 +368,30 @@ class ModelRegistry:
         self,
         label: str,
         hf_model_name: str,
-        local_path: Optional[str] = None,
-        size: Optional[str] = None,
-        max_context_length: Optional[int] = None,
+        local_path: str | None = None,
+        size: str | None = None,
+        max_context_length: int | None = None,
         source: str = "hf",
-    ):
+    ) -> None:
         """
-        添加新的基礎模型到 registry
+        Add a new base model to the registry.
 
         Args:
-            label: 模型的顯示標籤
-            hf_model_name: Hugging Face 模型 ID
-            local_path: 本地路徑（可選）
-            size: 模型大小標籤（如 "~4B"，可選）
-            max_context_length: 最大上下文長度（可選）
-            source: 模型來源（預設 "hf"，可為 "gguf" 等）
+            label: Display label for the model
+            hf_model_name: Hugging Face model ID
+            local_path: Local path (optional)
+            size: Model size label (e.g. "~4B", optional)
+            max_context_length: Maximum context length (optional)
+            source: Model source (defaults to "hf"; may be "gguf", etc.)
         """
         with self.mutex:
             data = self._read()
             base_models = data.get("base_models", [])
 
-            # 檢查是否已存在（根據 label）
+            # Check whether it already exists (by label)
             for model in base_models:
                 if model.get("label") == label:
-                    logger.warning(
-                        f"Base model with label '{label}' already exists, updating..."
-                    )
+                    logger.warning(f"Base model with label '{label}' already exists, updating...")
                     model["base_model_name"] = hf_model_name
                     model["source"] = source
                     if local_path:
@@ -407,7 +405,7 @@ class ModelRegistry:
                     logger.info(f"Updated base model: {label}")
                     return
 
-            # 新增模型
+            # Add the model
             new_model = {
                 "base_model_name": hf_model_name,
                 "label": label,
@@ -428,33 +426,31 @@ class ModelRegistry:
         label: str,
         base_model_name: str,
         size: str = "unknown",
-        max_context_length: Optional[int] = None,
+        max_context_length: int | None = None,
         source: str = "local",  # default to local if not specified, user requested "hf" for downloads
-        local_path: Optional[str] = None,
-        filename: Optional[str] = None,
-    ):
+        local_path: str | None = None,
+        filename: str | None = None,
+    ) -> None:
         """
-        添加新的 GGUF 模型到 llama_gguf_models 清單
+        Add a new GGUF model to the llama_gguf_models list.
 
         Args:
-            label: 模型的顯示標籤 (用戶自訂)
-            base_model_name: 原始 huggingface repo name (e.g. "openai/gpt-oss-20b-F16") 或 path
-            size: 模型大小 (e.g. "13GB")
-            max_context_length: 最大上下文長度
-            source: 來源類型 "hf" 或 "local"
-            local_path: 檔案的絕對路徑
-            filename: GGUF 檔案名稱 (若與 label 不同則需指定，用於 HF from_pretrained)
+            label: Display label for the model (user-defined)
+            base_model_name: Original huggingface repo name (e.g. "openai/gpt-oss-20b-F16") or path
+            size: Model size (e.g. "13GB")
+            max_context_length: Maximum context length
+            source: Source type, "hf" or "local"
+            local_path: Absolute path to the file
+            filename: GGUF filename (required when it differs from label; used for HF from_pretrained)
         """
         with self.mutex:
             data = self._read()
             gguf_models = data.get("llama_gguf_models", [])
 
-            # 檢查是否已存在
+            # Check whether it already exists
             for model in gguf_models:
                 if model.get("label") == label:
-                    logger.warning(
-                        f"GGUF model with label '{label}' already exists, updating..."
-                    )
+                    logger.warning(f"GGUF model with label '{label}' already exists, updating...")
                     model["base_model_name"] = base_model_name
                     if size:
                         model["size"] = size
@@ -470,7 +466,7 @@ class ModelRegistry:
                     logger.info(f"Updated GGUF model: {label}")
                     return
 
-            # 新增
+            # Add it
             new_model = {
                 "base_model_name": base_model_name,
                 "label": label,
@@ -487,7 +483,7 @@ class ModelRegistry:
             self._write(data)
             logger.info(f"Added new GGUF model to registry: {label}")
 
-    def add_finetuned(self, info: FinetunedModelInfo):
+    def add_finetuned(self, info: FinetunedModelInfo) -> None:
         """Add or update a finetuned model entry by output_dir (idempotent)."""
         with self.mutex:
             data = self._read()
@@ -506,7 +502,7 @@ class ModelRegistry:
                             info.max_context_length = bm.get("max_context_length")
                         break
 
-            items: List[Dict] = data.get("finetuned_models", [])
+            items: list[dict] = data.get("finetuned_models", [])
             # de-duplicate by output_dir
             found = False
             for it in items:
@@ -520,7 +516,7 @@ class ModelRegistry:
             self._write(data)
             logger.info(f"Finetuned model added to registry: {info.output_dir}")
 
-    def delete_model(self, label: str) -> Optional[Dict]:
+    def delete_model(self, label: str) -> dict | None:
         """
         Delete a model from registry by label.
         Returns the deleted model info if found, else None.

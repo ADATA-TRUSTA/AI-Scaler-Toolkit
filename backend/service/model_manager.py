@@ -1,14 +1,23 @@
 """
 Model Manager with Singleton Pattern for Inference
-Uses separate process for model loading/inference to avoid OOM VRAM issues
+Uses separate process for model loading/inference to avoid OOM VRAM issues.
 """
 
-import torch
-from typing import Any, Dict, Optional, Iterator, List
+import asyncio
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from threading import Lock
+from typing import Any, cast
+
+import torch
 
 from .config_models import InferenceConfig
+from .inference.async_server_client import (
+    AsyncServerClient,
+    client_for_config,
+    is_server_engine,
+    resolve_server_endpoint,
+)
 from .inference.model_inference_process import ModelInferenceProcess
 from .settings import configure_logging
 
@@ -18,33 +27,155 @@ logger = configure_logging(__name__)
 class ModelManager:
     """
     Singleton Model Manager for inference
-    使用獨立進程進行模型加載和推理，確保 OOM 時能完全清理 VRAM
+    Loads and runs the model in a separate process so VRAM can be fully reclaimed on OOM.
     """
 
     _instance = None
     _lock = Lock()
 
-    def __new__(cls):
+    def __new__(cls) -> "ModelManager":
+        """Return the process-wide singleton instance."""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize singleton internal state once."""
         if getattr(self, "_initialized", False):
             return
 
-        # 使用獨立進程管理模型
+        # Manage the model in a separate process
         self.inference_process = ModelInferenceProcess()
-        self.config: Optional[InferenceConfig] = None
-        self.pending_config: Optional[InferenceConfig] = None
+        self.config: InferenceConfig | None = None
+        self.pending_config: InferenceConfig | None = None
+
+        # Async HTTP path for server engines (llama-server / vLLM): the main
+        # process talks to the managed server directly, bypassing the worker
+        # queue. Transformers stays on the worker path.
+        self._async_client: AsyncServerClient | None = None
+        self._async_client_endpoint: dict[str, Any] | None = None
+        self._stale_async_clients: list[AsyncServerClient] = []
+        self._async_stop_events: dict[str, asyncio.Event] = {}
+        self._async_stop_lock = Lock()
+
         self._initialized = True
+
+    # ---------------------- Async server-engine path ----------------------
+    def uses_async_http(self) -> bool:
+        """True when the loaded engine is reachable via direct async HTTP."""
+        return self.is_loaded() and is_server_engine(self.config)
+
+    def _get_async_client(self) -> AsyncServerClient:
+        """
+        Return the cached AsyncServerClient for the active server engine.
+
+        Rebuilds only when the resolved endpoint (base_url or api_key) changed
+        — e.g. a hot model swap between engines or a port change. Crucially it
+        compares the resolved endpoint (via resolve_server_endpoint) instead of
+        building a throwaway client every call, and queues any replaced client
+        so its keep-alive connections get closed instead of leaking.
+        """
+        if self.config is None:
+            raise RuntimeError("No model configuration loaded")
+        endpoint = resolve_server_endpoint(self.config)
+        if self._async_client is None or self._async_client_endpoint != endpoint:
+            if self._async_client is not None:
+                self._stale_async_clients.append(self._async_client)
+            self._async_client = client_for_config(self.config)
+            self._async_client_endpoint = endpoint
+        return self._async_client
+
+    async def _acquire_async_client(self) -> AsyncServerClient:
+        """
+        Async wrapper around _get_async_client that also closes any client
+        replaced by an endpoint change (aclose can only be awaited here)."""
+        client = self._get_async_client()
+        if self._stale_async_clients:
+            stale, self._stale_async_clients = self._stale_async_clients, []
+            for old in stale:
+                try:
+                    await old.aclose()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+        return client
+
+    def _register_async_stop(self, request_id: str | None) -> asyncio.Event | None:
+        if not request_id:
+            return None
+        event = asyncio.Event()
+        with self._async_stop_lock:
+            self._async_stop_events[request_id] = event
+        return event
+
+    def _unregister_async_stop(self, request_id: str | None) -> None:
+        if not request_id:
+            return
+        with self._async_stop_lock:
+            self._async_stop_events.pop(request_id, None)
+
+    def _signal_async_stop(self, request_id: str | None) -> bool:
+        """
+        Set the stop event for an in-flight async request.
+
+        With no request_id, broadcast to every registered async request
+        (stop-all, matching the old worker-path behaviour). Returns True if at
+        least one event was signalled.
+        """
+        with self._async_stop_lock:
+            if request_id:
+                event = self._async_stop_events.get(request_id)
+                events = [event] if event is not None else []
+            else:
+                events = list(self._async_stop_events.values())
+        for event in events:
+            event.set()
+        return bool(events)
+
+    async def aclose_async_client(self) -> None:
+        """Close the active and any stale async clients, releasing connections."""
+        clients = [c for c in ([self._async_client] + self._stale_async_clients) if c is not None]
+        self._async_client = None
+        self._async_client_endpoint = None
+        self._stale_async_clients = []
+        for client in clients:
+            try:
+                await client.aclose()
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+    def _close_async_clients_best_effort(self) -> None:
+        """
+        Close the active + stale async clients from a sync context.
+
+        Schedules the async ``aclose`` on the running event loop if there is one;
+        otherwise drops the references (httpx AsyncClient closes itself on GC).
+        """
+        clients = [c for c in ([self._async_client] + self._stale_async_clients) if c is not None]
+        self._async_client = None
+        self._async_client_endpoint = None
+        self._stale_async_clients = []
+        if not clients:
+            return
+
+        async def _close_all() -> None:
+            for client in clients:
+                try:
+                    await client.aclose()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_close_all())
+        except RuntimeError:
+            pass  # no running loop; GC will close the underlying httpx clients
 
     # ---------------------- Utility Helpers ----------------------
     def _save_config(self, config: InferenceConfig) -> None:
-        """Persist current inference config to configs/current_inference_config.json.
+        """
+        Persist current inference config to configs/current_inference_config.json.
         Safe best-effort; logs warning on error instead of raising.
         """
         try:
@@ -55,9 +186,12 @@ class ModelManager:
         except Exception as e:
             logger.warning(f"Failed to persist inference config: {e}")
 
-    def prepare_config(self, config: InferenceConfig):
-        """第一階段：僅檢查與存檔配置，並將 config 設為當前/待載入。
-        不執行 tokenizer / model 權重下載。讓 /inference/status 立即可見設定。
+    def prepare_config(self, config: InferenceConfig) -> bool:
+        """
+        Stage one: validate and persist the config, then mark it current/pending.
+
+        No tokenizer or model weight download happens here, so /inference/status
+        reflects the settings immediately.
         """
         with self._lock:
             if self.is_loaded():
@@ -65,25 +199,25 @@ class ModelManager:
             if self.inference_process.current_status == "loading":
                 raise RuntimeError("Model is already loading.")
 
-            # 保存配置檔案並更新狀態
+            # Persist the config file and update state
             self._save_config(config)
-            self.config = config  # 立即對外回報使用者設定
+            self.config = config  # report the user's settings right away
             self.pending_config = config
         return True
 
-    def start_loading(self, config: InferenceConfig):
-        """外部呼叫：分階段載入，立即設置 config，在獨立進程中執行權重載入。"""
+    def start_loading(self, config: InferenceConfig) -> bool:
+        """Public entry: staged load — set config immediately, load weights in the worker process."""
         self.prepare_config(config)
 
-        # 在獨立進程中加載模型
+        # Load the model in the separate process
         self.inference_process.load_model(config)
 
         return True
 
-    def unload_model(self):
-        """卸載模型"""
+    def unload_model(self) -> dict:
+        """Unload the model."""
         with self._lock:
-            # 檢查是否有模型已加載或正在加載
+            # Check whether a model is loaded or still loading
             status = self.inference_process.get_status()
 
             if not status.get("loaded") and not status.get("is_loading"):
@@ -92,33 +226,60 @@ class ModelManager:
 
             logger.info("Unloading model...")
 
-            # 卸載進程中的模型
+            # Unload the model inside the worker process
             self.inference_process.unload_model()
 
             self.config = None
             self.pending_config = None
+            # Close the cached async client (and any pending stale ones) so the
+            # httpx keep-alive connections are released rather than leaked. This
+            # is sync, so schedule the async close on the running loop when there
+            # is one; otherwise fall back to GC.
+            self._close_async_clients_best_effort()
 
             logger.info("✅ Model unloaded successfully")
             return {"status": "success", "message": "Model unloaded successfully"}
 
-    def stop_generation(self, request_id: Optional[str] = None):
-        """停止当前正在进行的生成"""
-        return self.inference_process.stop_generation(request_id=request_id)
+    def stop_generation(self, request_id: str | None = None) -> dict:
+        """
+        Stop in-flight generation(s).
+
+        Async HTTP path: signal the request's stop event (every registered
+        event when no request_id is given). A request-scoped hit resolves here;
+        otherwise fall through to the worker path so stop-all reaches both.
+        """
+        async_stopped = self._signal_async_stop(request_id)
+        if async_stopped and request_id:
+            return {
+                "status": "success",
+                "message": "Stop signal sent to async generation",
+                "request_id": request_id,
+            }
+        result = self.inference_process.stop_generation(request_id=request_id)
+        if async_stopped and result.get("status") != "success":
+            # Stop-all with nothing stoppable on the worker: the async signal
+            # already succeeded, so don't surface the worker-side error.
+            return {
+                "status": "success",
+                "message": "Stop signal sent to async generation(s)",
+            }
+        return result
 
     def is_loaded(self) -> bool:
-        """檢查模型是否已加載"""
+        """Check whether a model is loaded."""
         return self.inference_process.is_loaded()
 
-    def get_tokenizer(self):
-        """獲取 tokenizer 實例
+    def get_tokenizer(self) -> Any:  # noqa: ANN401 - duck-typed tokenizer proxy from worker process
+        """
+        Get the tokenizer instance.
 
-        注意：由於 tokenizer 在獨立進程中，這裡返回一個代理對象，
-        僅支持 apply_chat_template 等常用方法
+        Note: the tokenizer lives in a separate process, so this returns a proxy
+        object that only supports common methods such as apply_chat_template.
         """
         if not self.is_loaded():
             return None
 
-        # 返回一個代理對象，提供 tokenizer 的常用方法
+        # Return a proxy object exposing the tokenizer's common methods
         return self.inference_process.get_tokenizer_proxy()
 
     def generate(
@@ -129,20 +290,20 @@ class ModelManager:
         top_p: float = 0.9,
         top_k: int = 50,
         repetition_penalty: float = 1.1,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         total_timeout: int = 300,
-        enable_thinking: Optional[bool] = None,
-        images: Optional[List[str]] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[Any] = None,
-        request_id: Optional[str] = None,
+        enable_thinking: bool | None = None,
+        images: list[str] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
+        request_id: str | None = None,
     ) -> dict:
         """
-        生成文本（非串流）
+        Generate text (non-streaming).
 
         Args:
-            total_timeout: 生成總超時時間（秒），預設 300 秒
-            enable_thinking: 是否啟用思考模式
+            total_timeout: Total generation timeout in seconds (default 300)
+            enable_thinking: Whether to enable thinking mode
         """
         if not self.is_loaded():
             raise RuntimeError("Model not loaded. Please load a model first.")
@@ -157,7 +318,7 @@ class ModelManager:
             # If prompt is a list (messages), we assume it's self-contained
             full_prompt = prompt
 
-        # 發送到推理進程
+        # Send to the inference process
         params = {
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
@@ -171,8 +332,9 @@ class ModelManager:
             "tool_choice": tool_choice,
         }
 
-        return self.inference_process.generate(
-            full_prompt, params, request_id=request_id
+        # inference_process.generate is annotated -> str but returns a result dict at runtime.
+        return cast(
+            dict, self.inference_process.generate(full_prompt, params, request_id=request_id)
         )
 
     def generate_stream(
@@ -183,20 +345,20 @@ class ModelManager:
         top_p: float = 0.9,
         top_k: int = 50,
         repetition_penalty: float = 1.1,
-        system_prompt: Optional[str] = None,
+        system_prompt: str | None = None,
         total_timeout: int = 300,
-        enable_thinking: Optional[bool] = None,
-        images: Optional[List[str]] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[Any] = None,
-        request_id: Optional[str] = None,
+        enable_thinking: bool | None = None,
+        images: list[str] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
+        request_id: str | None = None,
     ) -> Iterator[dict]:
         """
-        生成文本（串流模式）
+        Generate text (streaming).
 
         Args:
-            total_timeout: 生成總超時時間（秒），預設 300 秒
-            enable_thinking: 是否啟用思考模式
+            total_timeout: Total generation timeout in seconds (default 300)
+            enable_thinking: Whether to enable thinking mode
         """
         if not self.is_loaded():
             raise RuntimeError("Model not loaded. Please load a model first.")
@@ -211,9 +373,11 @@ class ModelManager:
             # If prompt is a list (messages), we assume it's self-contained
             full_prompt = prompt
 
-        logger.debug(f"Starting generate_stream with prompt: {full_prompt[:100]}...")  # Log first 100 chars of prompt
+        logger.debug(
+            f"Starting generate_stream with prompt: {full_prompt[:100]}..."
+        )  # Log first 100 chars of prompt
 
-        # 發送到推理進程（生成器）
+        # Send to the inference process (generator)
         params = {
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
@@ -227,20 +391,170 @@ class ModelManager:
             "tool_choice": tool_choice,
         }
 
-        for chunk in self.inference_process.generate_stream(
+        yield from self.inference_process.generate_stream(
             full_prompt, params, request_id=request_id
-        ):
-            yield chunk
+        )
+
+    def _build_params(
+        self,
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        repetition_penalty: float,
+        total_timeout: int,
+        enable_thinking: bool | None,
+        images: list[str] | None,
+        tools: list[dict[str, Any]] | None,
+        tool_choice: Any | None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
+    ) -> dict[str, Any]:
+        return {
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "repetition_penalty": repetition_penalty,
+            "total_timeout": total_timeout,
+            "enable_thinking": enable_thinking,
+            "images": images,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        }
+
+    @staticmethod
+    def _as_messages(
+        prompt: str | list[dict[str, Any]], system_prompt: str | None
+    ) -> list[dict[str, Any]]:
+        """Normalise a prompt into OpenAI chat messages for the async path."""
+        if isinstance(prompt, list):
+            messages = list(prompt)
+        else:
+            messages = [{"role": "user", "content": str(prompt)}]
+        if system_prompt:
+            messages = [{"role": "system", "content": system_prompt}, *messages]
+        return messages
+
+    async def agenerate(
+        self,
+        prompt: str | list[dict[str, Any]],
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 50,
+        repetition_penalty: float = 1.1,
+        system_prompt: str | None = None,
+        total_timeout: int = 300,
+        enable_thinking: bool | None = None,
+        images: list[str] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
+        request_id: str | None = None,
+    ) -> dict:
+        """Async non-stream generation via direct HTTP (server engines only)."""
+        if not self.is_loaded():
+            raise RuntimeError("Model not loaded. Please load a model first.")
+
+        params = self._build_params(
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            total_timeout=total_timeout,
+            enable_thinking=enable_thinking,
+            images=images,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        client = await self._acquire_async_client()
+        messages = self._as_messages(prompt, system_prompt)
+        stop_event = self._register_async_stop(request_id)
+        try:
+            if stop_event is None:
+                return await client.generate(messages, params, request_id=request_id)
+            # Race the request against its stop event so stop_generation can
+            # abort a non-stream generation too. Cancelling the task closes
+            # the HTTP request, which makes the server abort generation.
+            gen_task = asyncio.ensure_future(
+                client.generate(messages, params, request_id=request_id)
+            )
+            stop_task = asyncio.ensure_future(stop_event.wait())
+            try:
+                await asyncio.wait({gen_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+                if gen_task.done():
+                    return gen_task.result()
+                gen_task.cancel()
+                try:
+                    await gen_task
+                except (asyncio.CancelledError, RuntimeError):
+                    pass
+                return {
+                    "result": "",
+                    "gen_tokens": 0,
+                    "gen_tps": 0.0,
+                    "prompt_tokens": 0,
+                    "prompt_tps": 0.0,
+                    "total_tokens": 0,
+                    "stopped": True,
+                }
+            finally:
+                stop_task.cancel()
+        finally:
+            self._unregister_async_stop(request_id)
+
+    async def agenerate_stream(
+        self,
+        prompt: str | list[dict[str, Any]],
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 50,
+        repetition_penalty: float = 1.1,
+        system_prompt: str | None = None,
+        total_timeout: int = 300,
+        enable_thinking: bool | None = None,
+        images: list[str] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
+        request_id: str | None = None,
+    ) -> AsyncIterator[dict]:
+        """Async streaming generation via direct HTTP (server engines only)."""
+        if not self.is_loaded():
+            raise RuntimeError("Model not loaded. Please load a model first.")
+
+        params = self._build_params(
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            total_timeout=total_timeout,
+            enable_thinking=enable_thinking,
+            images=images,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+        client = await self._acquire_async_client()
+        messages = self._as_messages(prompt, system_prompt)
+        stop_event = self._register_async_stop(request_id)
+        try:
+            async for item in client.generate_stream(
+                messages, params, request_id=request_id, stop_event=stop_event
+            ):
+                yield item
+        finally:
+            self._unregister_async_stop(request_id)
 
     def get_status(self) -> dict:
-        """獲取當前狀態"""
-        # 從推理進程獲取狀態
+        """Get the current status."""
+        # Fetch status from the inference process
         process_status = self.inference_process.get_status()
 
-        # 如果在載入中，優先回報 pending_config；否則回報已載入的 config
+        # While loading, report pending_config; otherwise report the loaded config
         cfg = self.pending_config if process_status.get("is_loading") else self.config
 
-        # 當模型載入完成，清除 pending_config
+        # Clear pending_config once the model has finished loading
         if process_status.get("loaded") and self.pending_config is not None:
             self.pending_config = None
 
@@ -262,28 +576,22 @@ class ModelManager:
             "process_alive": process_status.get("process_alive", False),
             "device_allocation": process_status.get(
                 "device_allocation"
-            ),  # 新增：設備分配統計資訊
+            ),  # added: device allocation stats
             "n_gpu_layers": cfg.n_gpu_layers if cfg else None,
             "n_ctx": cfg.n_ctx if cfg else None,
             "n_batch": cfg.n_batch if cfg else None,
             "llama_server_extra_args": cfg.llama_server_extra_args if cfg else None,
-            "vllm_gpu_memory_utilization": (
-                cfg.vllm_gpu_memory_utilization if cfg else None
-            ),
+            "vllm_gpu_memory_utilization": (cfg.vllm_gpu_memory_utilization if cfg else None),
             "vllm_max_model_len": cfg.vllm_max_model_len if cfg else None,
             "vllm_dtype": cfg.vllm_dtype if cfg else None,
             "vllm_quantization": cfg.vllm_quantization if cfg else None,
             "vllm_enforce_eager": cfg.vllm_enforce_eager if cfg else None,
             "vllm_kv_cache_dtype": cfg.vllm_kv_cache_dtype if cfg else None,
             "vllm_cpu_offload_gb": cfg.vllm_cpu_offload_gb if cfg else None,
-            "vllm_kv_offloading_size": (
-                cfg.vllm_kv_offloading_size if cfg else None
-            ),
+            "vllm_kv_offloading_size": (cfg.vllm_kv_offloading_size if cfg else None),
             "vllm_tensor_parallel_size": cfg.vllm_tensor_parallel_size if cfg else None,
             "vllm_max_num_seqs": cfg.vllm_max_num_seqs if cfg else None,
-            "vllm_max_num_batched_tokens": (
-                cfg.vllm_max_num_batched_tokens if cfg else None
-            ),
+            "vllm_max_num_batched_tokens": (cfg.vllm_max_num_batched_tokens if cfg else None),
             "vllm_mm_image_limit": cfg.vllm_mm_image_limit if cfg else None,
             "vllm_mm_audio_limit": cfg.vllm_mm_audio_limit if cfg else None,
             "vllm_mm_video_limit": cfg.vllm_mm_video_limit if cfg else None,
@@ -291,66 +599,65 @@ class ModelManager:
             "vllm_chat_template": cfg.vllm_chat_template if cfg else None,
         }
 
-        # GPU 記憶體使用情況：優先使用 worker 進程報告的數據
+        # GPU memory usage: prefer the numbers reported by the worker process
         memory_usage = process_status.get("memory_usage")
         if memory_usage:
-            # Worker 進程已報告 GPU 用量（正確的跨進程數據）
+            # The worker process already reported GPU usage (correct cross-process data)
             status["memory_usage"] = memory_usage
         elif torch.cuda.is_available() and process_status.get("loaded"):
-            # Fallback：嘗試在主進程獲取（注意：這只能看到主進程的用量，通常為 0）
+            # Fallback: read it in the main process (only sees main-process usage, usually 0)
             try:
                 status["memory_usage"] = {
                     "allocated_gb": torch.cuda.memory_allocated() / (1024**3),
                     "reserved_gb": torch.cuda.memory_reserved() / (1024**3),
                 }
-            except:
+            except Exception:
                 pass
 
         return status
 
-    def get_error_details(self) -> Optional[dict]:
-        """獲取詳細的錯誤信息（包括完整的 traceback）"""
+    def get_error_details(self) -> dict | None:
+        """Return detailed error info, including the full traceback."""
         return self.inference_process.get_error_details()
 
-    def cleanup(self):
-        """清理資源（應用關閉時調用）"""
+    def cleanup(self) -> None:
+        """Release resources (called on application shutdown)."""
         logger.info("Cleaning up ModelManager...")
 
         try:
-            # 停止推理進程
+            # Stop the inference process
             if self.inference_process:
                 self.inference_process.stop_process()
                 logger.info("Inference process stopped")
         except Exception as e:
-            logger.error(f"Error stopping inference process: {e}")
+            logger.exception(f"Error stopping inference process: {e}")
 
-        # 清理配置
+        # Clear the config
         self.config = None
         self.pending_config = None
+        self._close_async_clients_best_effort()
 
         logger.info("ModelManager cleanup completed")
 
-    def __del__(self):
-        """析構函數 - 確保資源被清理"""
+    def __del__(self) -> None:
+        """Destructor - make sure resources are released."""
         try:
             if hasattr(self, "inference_process"):
                 self.cleanup()
-        except:
+        except Exception:
             pass
 
-    def force_cleanup_gpu(self):
+    def force_cleanup_gpu(self) -> dict:
         """
-        強制清理 GPU 記憶體
-        當進程因 OOM 崩潰後，強制終止並重啟一個乾淨的進程
+        Force-clean GPU memory.
+
+        After the process crashes with OOM, kill it and restart a clean one.
         """
         logger.warning("Force cleanup GPU - terminating worker process...")
 
         with self._lock:
-            # 強制停止當前進程
-            if (
-                self.inference_process.process
-                and self.inference_process.process.is_alive()
-            ):
+            # Force-stop the current process
+            if self.inference_process.process and self.inference_process.process.is_alive():
                 try:
                     self.inference_process.process.terminate()
                     self.inference_process.process.join(timeout=3)
@@ -358,19 +665,21 @@ class ModelManager:
                         self.inference_process.process.kill()
                         self.inference_process.process.join()
                 except Exception as e:
-                    logger.error(f"Error force terminating process: {e}")
+                    logger.exception(f"Error force terminating process: {e}")
 
-            # 清理狀態
+            # Reset state
             self.inference_process._cleanup_dead_process()
             self.inference_process.current_status = "idle"
             self.config = None
             self.pending_config = None
+            self._close_async_clients_best_effort()
 
             logger.info("✅ GPU force cleanup completed - worker process terminated")
             return {"status": "success", "message": "GPU memory force cleaned"}
 
-    def cleanup_generation_memory(self, slot: Optional[int] = None):
-        """軟性清理生成階段暫存記憶體，不卸載模型。
+    def cleanup_generation_memory(self, slot: int | None = None) -> dict:
+        """
+        Softly release scratch memory from the generation phase without unloading the model.
 
         Returns: dict status payload
         """
@@ -380,7 +689,7 @@ class ModelManager:
             result = self.inference_process.cleanup_generation_memory(slot=slot)
             return result
         except Exception as e:
-            logger.error(f"cleanup_generation_memory failed: {e}")
+            logger.exception(f"cleanup_generation_memory failed: {e}")
             return {"status": "error", "message": str(e)}
 
 

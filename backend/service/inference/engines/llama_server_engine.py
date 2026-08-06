@@ -1,33 +1,32 @@
+"""llama-server engine: manages a llama.cpp OpenAI-compatible server subprocess."""
+
+import glob
+import json
 import os
 import re
-import json
-import hashlib
-import threading
 import subprocess
+import threading
 import time
-import glob
-from pathlib import Path
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 from collections import deque
-from typing import Dict, Any, List, Optional
 from multiprocessing import Queue
 from multiprocessing.synchronize import Event as EventClass
+from pathlib import Path
+from typing import IO, Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from openai import APIError, OpenAI
 
 from ...config_models import InferenceConfig
 from ...settings import (
-    configure_logging,
     HF_HOME,
-    LLAMA_SERVER_URL,
     LLAMA_SERVER_API_KEY,
-    LLAMA_SERVER_TIMEOUT,
     LLAMA_SERVER_BINARY,
+    LLAMA_SERVER_TIMEOUT,
+    LLAMA_SERVER_URL,
+    configure_logging,
 )
 from ..generate.llama_server_runner import (
-    handle_llama_server_generate,
-    handle_llama_server_stream,
     handle_server_log_line,
 )
 from .base_engine import BaseEngine
@@ -35,37 +34,90 @@ from .base_engine import BaseEngine
 logger = configure_logging(__name__)
 
 
-class LlamaServerEngine(BaseEngine):
-    """Llama Server 推理引擎（OpenAI-compatible API）。"""
+def resolve_local_model_path(raw_path: str | None, *, prefer_hf_home: bool = True) -> str:
+    """
+    Resolve a local file path, supporting relative paths and the HF_HOME directory.
 
-    def __init__(self, status_queue: Queue, data_queue: Queue, stop_event: EventClass, stop_generation_flag: EventClass):
+    Module-level so callers that only need the path (such as the GGUF memory pre-flight
+    check) resolve it exactly the way the engine will at launch time.
+    """
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return ""
+
+    normalized_text = os.path.normpath(os.path.expanduser(path_text))
+    candidate_path = Path(normalized_text)
+    candidates: list[Path] = [candidate_path]
+
+    if prefer_hf_home and HF_HOME and not candidate_path.is_absolute():
+        hf_home_path = Path(HF_HOME).expanduser()
+        hf_parts = [part.lower() for part in candidate_path.parts]
+
+        candidates.append(hf_home_path / candidate_path)
+        if hf_parts[:1] == ["hub"]:
+            trimmed_parts = candidate_path.parts[1:]
+            if trimmed_parts:
+                candidates.append(hf_home_path / Path(*trimmed_parts))
+        else:
+            candidates.append(hf_home_path / "hub" / candidate_path)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate_key = str(candidate)
+        if candidate_key in seen:
+            continue
+        seen.add(candidate_key)
+
+        if candidate.exists():
+            # Use os.path.abspath rather than Path.resolve(): resolve() follows
+            # symlinks and flattens the GGUF shard symlinks in the HuggingFace hub
+            # cache into blobs/<hash>, so the filename loses the
+            # "*-00001-of-000NN.gguf" shard pattern and llama.cpp reports
+            # "invalid split file name", failing to load a multi-shard model.
+            # abspath only makes the path absolute and normalizes it (normpath),
+            # preserving the symlink filename; it works on both Linux and Windows.
+            return os.path.abspath(str(candidate))
+
+    return normalized_text
+
+
+class LlamaServerEngine(BaseEngine):
+    """Llama Server inference engine (OpenAI-compatible API)."""
+
+    def __init__(
+        self,
+        status_queue: Queue,
+        data_queue: Queue,
+        stop_event: EventClass,
+        stop_generation_flag: EventClass,
+    ) -> None:
         super().__init__(status_queue, data_queue, stop_event, stop_generation_flag)
         self.base_url: str = LLAMA_SERVER_URL
-        self.api_key: Optional[str] = LLAMA_SERVER_API_KEY
+        self.api_key: str | None = LLAMA_SERVER_API_KEY
         self.timeout_sec: int = LLAMA_SERVER_TIMEOUT
-        self.client: Optional[OpenAI] = None
-        self.served_model_name: Optional[str] = None
-        self.server_process: Optional[subprocess.Popen] = None
+        self.client: OpenAI | None = None
+        self.served_model_name: str | None = None
+        self.server_process: subprocess.Popen | None = None
         self.managed_process: bool = False
-        self.last_start_error: Optional[str] = None
-        self._stdout_pump_thread: Optional[threading.Thread] = None
-        self._stderr_pump_thread: Optional[threading.Thread] = None
+        self.last_start_error: str | None = None
+        self._stdout_pump_thread: threading.Thread | None = None
+        self._stderr_pump_thread: threading.Thread | None = None
         self._stderr_buffer_lock = threading.Lock()
         self._stderr_recent_lines = deque(maxlen=120)
         self._timing_lock = threading.Lock()
-        self._active_timing_slot: Optional[int] = None
-        self._slot_timings: Dict[int, Dict[str, Any]] = {}
+        self._active_timing_slot: int | None = None
+        self._slot_timings: dict[int, dict[str, Any]] = {}
         self._trace_lock = threading.Lock()
         self._pending_request_ids = deque()
-        self._request_trace: Dict[str, Dict[str, Any]] = {}
-        self._task_to_request: Dict[int, str] = {}
-        self._last_runtime_error_signature: Optional[str] = None
-        self._served_model_capabilities: List[str] = []
+        self._request_trace: dict[str, dict[str, Any]] = {}
+        self._task_to_request: dict[int, str] = {}
+        self._last_runtime_error_signature: str | None = None
+        self._served_model_capabilities: list[str] = []
         self._prefill_strategy: str = "cache_prompt"
-        self._detected_mmproj_path: Optional[str] = None
+        self._detected_mmproj_path: str | None = None
 
-    def _pump_server_logs(self, stream, is_stderr: bool = False) -> None:
-        """將 llama-server 子程序輸出轉發到當前 service logger。"""
+    def _pump_server_logs(self, stream: "IO[str] | None", is_stderr: bool = False) -> None:
+        """Forward llama-server subprocess output to the current service logger."""
         if stream is None:
             return
         try:
@@ -74,7 +126,7 @@ class LlamaServerEngine(BaseEngine):
                 if not txt:
                     continue
 
-                # 直接轉發原始行，讓 main/service log 看得到 llama-server 的 timing 與 slot 訊息
+                # Forward the raw line as-is so the main/service log sees llama-server's timing and slot messages
                 if is_stderr:
                     with self._stderr_buffer_lock:
                         self._stderr_recent_lines.append(txt)
@@ -91,14 +143,14 @@ class LlamaServerEngine(BaseEngine):
                 pass
 
     def _build_startup_error_summary(self, rc: int) -> str:
-        """從最近 stderr 內容提取對使用者最有幫助的啟動失敗原因。"""
+        """Extract the most user-helpful startup failure reason from recent stderr content."""
         with self._stderr_buffer_lock:
             lines = list(self._stderr_recent_lines)
 
         if not lines:
             return f"process exited with code {rc}"
 
-        # 優先挑明確錯誤關鍵字
+        # Prefer lines matching explicit error keywords
         keywords = [
             "out of memory",
             "cudamalloc failed",
@@ -111,7 +163,7 @@ class LlamaServerEngine(BaseEngine):
             "failed",
         ]
 
-        picked: List[str] = []
+        picked: list[str] = []
         for line in reversed(lines):
             low = line.lower()
             if any(k in low for k in keywords):
@@ -129,19 +181,19 @@ class LlamaServerEngine(BaseEngine):
         return f"process exited with code {rc}; stderr={compact}"
 
     def _recent_stderr_excerpt(self, max_lines: int = 12, max_chars: int = 2000) -> str:
-        """回傳最近 stderr 摘要，供 runtime error 診斷。"""
+        """Return a summary of recent stderr for runtime error diagnosis."""
         with self._stderr_buffer_lock:
             lines = list(self._stderr_recent_lines)
 
         if not lines:
             return ""
 
-        excerpt = " | ".join(lines[-max(1, max_lines):])
+        excerpt = " | ".join(lines[-max(1, max_lines) :])
         if len(excerpt) > max_chars:
             excerpt = excerpt[-max_chars:]
         return excerpt
 
-    def _is_runtime_oom_text(self, text: Optional[str]) -> bool:
+    def _is_runtime_oom_text(self, text: str | None) -> bool:
         low = (text or "").lower()
         keywords = [
             "out of memory",
@@ -158,8 +210,8 @@ class LlamaServerEngine(BaseEngine):
     def _build_openai_base_url(self) -> str:
         return f"{self.base_url}/v1"
 
-    def _discover_mmproj_file(self, model_file: str, extra_args: List[str]) -> str:
-        """自動尋找對應的多模態 projector 檔案。"""
+    def _discover_mmproj_file(self, model_file: str, extra_args: list[str]) -> str:
+        """Auto-discover the matching multimodal projector file."""
         if self.config is None:
             return ""
 
@@ -168,9 +220,9 @@ class LlamaServerEngine(BaseEngine):
         if mmproj_path or has_mmproj_arg:
             return mmproj_path
 
-        candidate_paths: List[str] = []
+        candidate_paths: list[str] = []
 
-        def _push_candidate(path_value: Optional[str]) -> None:
+        def _push_candidate(path_value: str | None) -> None:
             path_text = str(path_value or "").strip()
             if not path_text:
                 return
@@ -178,7 +230,7 @@ class LlamaServerEngine(BaseEngine):
             if norm_path not in candidate_paths:
                 candidate_paths.append(norm_path)
 
-        def _push_mmproj_files_from_dir(dir_path: Optional[str]) -> None:
+        def _push_mmproj_files_from_dir(dir_path: str | None) -> None:
             dir_text = str(dir_path or "").strip()
             if not dir_text or not os.path.isdir(dir_text):
                 return
@@ -215,11 +267,9 @@ class LlamaServerEngine(BaseEngine):
         model_name = (self.config.model_name or "").strip()
         if "/" in model_name:
             repo_cache_dir_name = f"models--{model_name.replace('/', '--')}"
-            hub_roots: List[Path] = []
-
-            for parent in model_path.parents:
-                if parent.name == "hub":
-                    hub_roots.append(parent)
+            hub_roots: list[Path] = [
+                parent for parent in model_path.parents if parent.name == "hub"
+            ]
 
             hf_home = os.getenv("HF_HOME", "").strip()
             if hf_home:
@@ -245,18 +295,14 @@ class LlamaServerEngine(BaseEngine):
             api_key=self.api_key or "EMPTY",
         )
 
-    def _list_models(self, timeout_sec: float = 5.0) -> List[str]:
+    def _list_models(self, timeout_sec: float = 5.0) -> list[str]:
         if self.client is None:
             self._recreate_client()
         if self.client is None:
             raise RuntimeError("OpenAI client not initialized")
 
         response = self.client.models.list(timeout=max(0.2, float(timeout_sec)))
-        return [
-            str(item.id)
-            for item in getattr(response, "data", [])
-            if getattr(item, "id", None)
-        ]
+        return [str(item.id) for item in getattr(response, "data", []) if getattr(item, "id", None)]
 
     def _probe_server_alive(self, timeout_sec: float = 1.0) -> bool:
         try:
@@ -267,14 +313,14 @@ class LlamaServerEngine(BaseEngine):
 
         return False
 
-    def build_runtime_error_payload(self, exc: Exception) -> Dict[str, Any]:
-        """將 llama-server runtime 例外轉成可跨進程傳遞的結構化錯誤。"""
+    def build_runtime_error_payload(self, exc: Exception) -> dict[str, Any]:
+        """Convert a llama-server runtime exception into a structured, cross-process error."""
         raw_error = str(exc).strip() or exc.__class__.__name__
         stderr_excerpt = self._recent_stderr_excerpt()
         combined_text = f"{raw_error}\n{stderr_excerpt}" if stderr_excerpt else raw_error
         combined_low = combined_text.lower()
 
-        exit_code: Optional[int] = None
+        exit_code: int | None = None
         if self.managed_process and self.server_process is not None:
             try:
                 exit_code = self.server_process.poll()
@@ -304,7 +350,7 @@ class LlamaServerEngine(BaseEngine):
         else:
             error_type = exc.__class__.__name__ or "LlamaServerRuntimeError"
 
-        parts: List[str] = []
+        parts: list[str] = []
         if exit_code is not None:
             parts.append(f"llama-server process exited with code {exit_code}")
         parts.append(raw_error)
@@ -323,8 +369,8 @@ class LlamaServerEngine(BaseEngine):
             "process_alive": server_alive,
         }
 
-    def report_runtime_error(self, error_payload: Dict[str, Any]) -> None:
-        """將 fatal runtime error 同步到 status_queue，讓 /inference/error_details 可讀到。"""
+    def report_runtime_error(self, error_payload: dict[str, Any]) -> None:
+        """Publish a fatal runtime error to status_queue so /inference/error_details can read it."""
         if not isinstance(error_payload, dict) or not error_payload.get("fatal"):
             return
 
@@ -351,7 +397,7 @@ class LlamaServerEngine(BaseEngine):
         except Exception as e:
             logger.debug(f"[LlamaServer] failed to publish runtime error status: {e}")
 
-    def _normalize_base_url(self, raw_url: Optional[str]) -> str:
+    def _normalize_base_url(self, raw_url: str | None) -> str:
         url = (raw_url or "").strip() or LLAMA_SERVER_URL
         normalized = url.rstrip("/")
         if normalized.endswith("/v1"):
@@ -375,39 +421,9 @@ class LlamaServerEngine(BaseEngine):
             return model_ids[0]
         return preferred
 
-    def _resolve_local_path(self, raw_path: Optional[str], *, prefer_hf_home: bool = True) -> str:
-        """解析本地檔案路徑，支援相對路徑與 HF_HOME 目錄。"""
-        path_text = str(raw_path or "").strip()
-        if not path_text:
-            return ""
-
-        normalized_text = os.path.normpath(os.path.expanduser(path_text))
-        candidate_path = Path(normalized_text)
-        candidates: List[Path] = [candidate_path]
-
-        if prefer_hf_home and HF_HOME and not candidate_path.is_absolute():
-            hf_home_path = Path(HF_HOME).expanduser()
-            hf_parts = [part.lower() for part in candidate_path.parts]
-
-            candidates.append(hf_home_path / candidate_path)
-            if hf_parts[:1] == ["hub"]:
-                trimmed_parts = candidate_path.parts[1:]
-                if trimmed_parts:
-                    candidates.append(hf_home_path / Path(*trimmed_parts))
-            else:
-                candidates.append(hf_home_path / "hub" / candidate_path)
-
-        seen: set[str] = set()
-        for candidate in candidates:
-            candidate_key = str(candidate)
-            if candidate_key in seen:
-                continue
-            seen.add(candidate_key)
-
-            if candidate.exists():
-                return str(candidate.resolve())
-
-        return normalized_text
+    def _resolve_local_path(self, raw_path: str | None, *, prefer_hf_home: bool = True) -> str:
+        """Resolve a local file path, supporting relative paths and the HF_HOME directory."""
+        return resolve_local_model_path(raw_path, prefer_hf_home=prefer_hf_home)
 
     def _resolve_model_file(self) -> str:
         if self.config is None:
@@ -415,10 +431,60 @@ class LlamaServerEngine(BaseEngine):
         candidate = (self.config.model_path or self.config.model_name or "").strip()
         if not candidate:
             return ""
-        return self._resolve_local_path(candidate, prefer_hf_home=True)
+        resolved = self._resolve_local_path(candidate, prefer_hf_home=True)
+        # If the resolved path is a directory (e.g. the frontend passes the
+        # "UD-Q2_K_XL" shard folder under a snapshot), auto-select the GGUF
+        # entry-point file to feed to llama-server -m.
+        if resolved and os.path.isdir(resolved):
+            resolved = self._select_gguf_from_dir(resolved)
+        return resolved
+
+    def _select_gguf_from_dir(self, dir_path: str) -> str:
+        """
+        Select the GGUF entry-point file for llama-server from a directory.
+
+        - Multi-shard model: return the "first shard" (``*-00001-of-000NN.gguf``);
+          llama.cpp auto-loads the remaining shards from this filename pattern.
+        - Single-file model: return the sole ``*.gguf``.
+        - When it cannot be determined unambiguously: return the directory as-is
+          so the upstream llama-server surfaces a clear load error.
+
+        Paths are built with os.listdir + os.path.join and extension matching is
+        case-insensitive, so it works on both Linux (case-sensitive) and Windows
+        (case-insensitive).
+        """
+        try:
+            gguf_files = [name for name in os.listdir(dir_path) if name.lower().endswith(".gguf")]
+        except OSError as exc:
+            logger.debug(f"[LlamaServer] Failed to scan gguf files in {dir_path}: {exc}")
+            return dir_path
+
+        if not gguf_files:
+            return dir_path
+
+        # Multi-shard: pick the first shard (-00001-of-000NN.gguf); only shard #1 matches this pattern
+        first_shard_re = re.compile(r"-0*1-of-\d+\.gguf$", re.IGNORECASE)
+        first_shards = sorted(name for name in gguf_files if first_shard_re.search(name))
+        if first_shards:
+            chosen = os.path.join(dir_path, first_shards[0])
+            logger.info(f"[LlamaServer] Directory model path -> first shard: {chosen}")
+            return chosen
+
+        # Single-file GGUF
+        if len(gguf_files) == 1:
+            chosen = os.path.join(dir_path, gguf_files[0])
+            logger.info(f"[LlamaServer] Directory model path -> single gguf: {chosen}")
+            return chosen
+
+        # Multiple .gguf files but no shard pattern; cannot decide safely -> fall back to the directory and let llama-server report a clear error
+        logger.warning(
+            f"[LlamaServer] Multiple non-sharded gguf files in {dir_path}; "
+            "cannot pick unambiguously, leaving directory as-is"
+        )
+        return dir_path
 
     def _resolve_slot_save_path(self, model_file: str) -> str:
-        """回傳 llama-server slot 持久化目錄，預設使用模型所在目錄。"""
+        """Return the llama-server slot persistence directory, defaulting to the model's directory."""
         model_dir = os.path.dirname(model_file or "")
         if model_dir and os.path.isdir(model_dir):
             return model_dir
@@ -427,9 +493,13 @@ class LlamaServerEngine(BaseEngine):
     def _build_server_url(self, path: str) -> str:
         return f"{self.base_url.rstrip('/')}{path}"
 
-    def _request_server_json(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _request_server_json(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         data = None
-        req = urllib_request.Request(self._build_server_url(path), method=method.upper())
+        req = urllib_request.Request(  # noqa: S310 - URL is the local llama server started by this service, not arbitrary input
+            self._build_server_url(path), method=method.upper()
+        )
         req.add_header("Content-Type", "application/json")
         if self.api_key:
             req.add_header("Authorization", f"Bearer {self.api_key}")
@@ -438,7 +508,9 @@ class LlamaServerEngine(BaseEngine):
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
         try:
-            with urllib_request.urlopen(req, data=data, timeout=max(1.0, float(self.timeout_sec))) as resp:
+            with urllib_request.urlopen(  # noqa: S310 - same as above, a controlled local server URL
+                req, data=data, timeout=max(1.0, float(self.timeout_sec))
+            ) as resp:
                 body = resp.read().decode("utf-8", errors="ignore").strip()
         except urllib_error.HTTPError as e:
             body = e.read().decode("utf-8", errors="ignore").strip()
@@ -452,9 +524,9 @@ class LlamaServerEngine(BaseEngine):
         except json.JSONDecodeError:
             return {"raw": body}
 
-    def _refresh_served_model_capabilities(self) -> List[str]:
-        """從 llama-server `/v1/models` 讀取目前模型能力。"""
-        capabilities: List[str] = []
+    def _refresh_served_model_capabilities(self) -> list[str]:
+        """Read the current model capabilities from llama-server `/v1/models`."""
+        capabilities: list[str] = []
 
         try:
             payload = self._request_server_json("GET", "/v1/models")
@@ -463,7 +535,7 @@ class LlamaServerEngine(BaseEngine):
             self._served_model_capabilities = []
             return self._served_model_capabilities
 
-        candidates: List[Dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
         for key in ("data", "models"):
             values = payload.get(key)
             if isinstance(values, list):
@@ -475,7 +547,7 @@ class LlamaServerEngine(BaseEngine):
         }
         preferred_names.discard("")
 
-        chosen: Optional[Dict[str, Any]] = None
+        chosen: dict[str, Any] | None = None
         for item in candidates:
             item_names = {
                 str(item.get("id") or "").strip(),
@@ -492,7 +564,11 @@ class LlamaServerEngine(BaseEngine):
         if isinstance(chosen, dict):
             raw_caps = chosen.get("capabilities")
             if not isinstance(raw_caps, list):
-                raw_caps = chosen.get("meta", {}).get("capabilities") if isinstance(chosen.get("meta"), dict) else None
+                raw_caps = (
+                    chosen.get("meta", {}).get("capabilities")
+                    if isinstance(chosen.get("meta"), dict)
+                    else None
+                )
             if isinstance(raw_caps, list):
                 capabilities = [str(item).strip().lower() for item in raw_caps if str(item).strip()]
 
@@ -512,34 +588,14 @@ class LlamaServerEngine(BaseEngine):
 
         for raw in reversed(lines):
             line = (raw or "").lower()
-            if "loaded multimodal model" in line or "projector:" in line or "vision hparams" in line:
+            if (
+                "loaded multimodal model" in line
+                or "projector:" in line
+                or "vision hparams" in line
+            ):
                 return True
 
         return False
-
-    def _coerce_slot_id(self, value: Any) -> Optional[int]:
-        if isinstance(value, int) and value >= 0:
-            return value
-        if isinstance(value, str) and value.strip().isdigit():
-            return int(value.strip())
-        return None
-
-    def _resolve_request_slot_id(self, request: Optional[Dict[str, Any]] = None) -> int:
-        request = request or {}
-        max_slots = max(1, int(self.config.llama_server_np or 1)) if self.config is not None else 1
-
-        explicit_slot = self._coerce_slot_id(request.get("slot"))
-        if explicit_slot is not None:
-            return explicit_slot % max_slots
-
-        params = request.get("params") if isinstance(request.get("params"), dict) else {}
-        for key in ("session_id", "conversation_id", "thread_id"):
-            raw_value = request.get(key) or params.get(key)
-            if isinstance(raw_value, str) and raw_value.strip():
-                digest = hashlib.sha256(raw_value.strip().encode("utf-8")).hexdigest()
-                return int(digest[:8], 16) % max_slots
-
-        return 0
 
     def _build_slot_cache_filename(self, slot_id: int) -> str:
         model_file = self._resolve_model_file()
@@ -550,68 +606,65 @@ class LlamaServerEngine(BaseEngine):
     def _save_slot_cache(self, slot_id: int) -> bool:
         filename = self._build_slot_cache_filename(slot_id)
         try:
-            payload = self._request_server_json("POST", f"/slots/{slot_id}?action=save", {"filename": filename})
-            logger.info(f"[LlamaServer] saved slot cache: slot={slot_id}, filename={filename}, result={payload}")
+            payload = self._request_server_json(
+                "POST", f"/slots/{slot_id}?action=save", {"filename": filename}
+            )
+            logger.info(
+                f"[LlamaServer] saved slot cache: slot={slot_id}, filename={filename}, result={payload}"
+            )
             return True
         except Exception as e:
-            logger.warning(f"[LlamaServer] save slot cache failed: slot={slot_id}, filename={filename}, error={e}")
+            logger.warning(
+                f"[LlamaServer] save slot cache failed: slot={slot_id}, filename={filename}, error={e}"
+            )
             return False
 
     def _restore_slot_cache(self, slot_id: int) -> bool:
         filename = self._build_slot_cache_filename(slot_id)
         try:
-            payload = self._request_server_json("POST", f"/slots/{slot_id}?action=restore", {"filename": filename})
-            logger.info(f"[LlamaServer] restored slot cache: slot={slot_id}, filename={filename}, result={payload}")
+            payload = self._request_server_json(
+                "POST", f"/slots/{slot_id}?action=restore", {"filename": filename}
+            )
+            logger.info(
+                f"[LlamaServer] restored slot cache: slot={slot_id}, filename={filename}, result={payload}"
+            )
             return True
         except Exception as e:
-            logger.warning(f"[LlamaServer] restore slot cache failed: slot={slot_id}, filename={filename}, error={e}")
+            logger.warning(
+                f"[LlamaServer] restore slot cache failed: slot={slot_id}, filename={filename}, error={e}"
+            )
             return False
 
-    def _restore_slot_caches(self) -> Dict[str, Any]:
-        total_slots = max(1, int(self.config.llama_server_np or 1)) if self.config is not None else 1
-        restored_slots: List[int] = []
-        for slot_id in range(total_slots):
-            if self._restore_slot_cache(slot_id):
-                restored_slots.append(slot_id)
+    def _restore_slot_caches(self) -> dict[str, Any]:
+        total_slots = (
+            max(1, int(self.config.llama_server_np or 1)) if self.config is not None else 1
+        )
+        restored_slots: list[int] = [
+            slot_id for slot_id in range(total_slots) if self._restore_slot_cache(slot_id)
+        ]
         return {
             "restored": len(restored_slots),
             "total": total_slots,
             "slots": restored_slots,
         }
 
-    def _save_slot_caches(self) -> Dict[str, Any]:
-        total_slots = max(1, int(self.config.llama_server_np or 1)) if self.config is not None else 1
-        saved_slots: List[int] = []
-        for slot_id in range(total_slots):
-            if self._save_slot_cache(slot_id):
-                saved_slots.append(slot_id)
+    def _save_slot_caches(self) -> dict[str, Any]:
+        total_slots = (
+            max(1, int(self.config.llama_server_np or 1)) if self.config is not None else 1
+        )
+        saved_slots: list[int] = [
+            slot_id for slot_id in range(total_slots) if self._save_slot_cache(slot_id)
+        ]
         return {
             "saved": len(saved_slots),
             "total": total_slots,
             "slots": saved_slots,
         }
 
-    def prepare_request_for_generation(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        prepared_request = dict(request or {})
-        extra_body = dict(prepared_request.get("extra_body") or {})
-        extra_body["cache_prompt"] = True
-
-        if self._is_multimodal_model():
-            self._prefill_strategy = "cache_prompt"
-            prepared_request.pop("slot", None)
-        else:
-            self._prefill_strategy = "slot"
-            slot_id = self._resolve_request_slot_id(prepared_request)
-            extra_body.setdefault("id_slot", slot_id)
-            prepared_request["slot"] = slot_id
-
-        prepared_request["extra_body"] = extra_body
-        return prepared_request
-
     def _wait_server_ready(self, timeout_sec: int) -> bool:
         deadline = time.time() + max(1, timeout_sec)
         while time.time() < deadline:
-            # 若為托管子程序，先檢查是否提前退出
+            # If it's a managed subprocess, first check whether it exited early
             if self.managed_process and self.server_process is not None:
                 rc = self.server_process.poll()
                 if rc is not None:
@@ -631,28 +684,29 @@ class LlamaServerEngine(BaseEngine):
 
         return False
 
-    def _collect_layer_allocation_from_logs(self) -> Dict[str, Any]:
-        """從 llama-server `load_tensors` 日誌推導 layer allocation。
+    def _collect_layer_allocation_from_logs(self) -> dict[str, Any]:
+        """
+        Derive layer allocation from the llama-server `load_tensors` logs.
 
-        目標是對齊舊本地 GGUF 引擎的輸出格式：
+        The goal is to match the output format of the old local GGUF engine:
         - `device_map_summary`: `GPU: x layers, CPU: y layers`
-        - `total_modules`: 總層數
+        - `total_modules`: total number of layers
         - `layer_lines`: `Layers a-b -> GPU/CPU`
         """
         with self._stderr_buffer_lock:
             lines = list(self._stderr_recent_lines)
 
-        total_layers: Optional[int] = None
-        gpu_layers: Optional[int] = None
-        repeating_gpu_layers: Optional[int] = None
+        total_layers: int | None = None
+        gpu_layers: int | None = None
+        repeating_gpu_layers: int | None = None
         output_layer_on_gpu = False
-        memory_usage: Dict[str, Any] = {}
+        memory_usage: dict[str, Any] = {}
 
         for raw in lines:
             line = (raw or "").strip()
             low = line.lower()
 
-            # 例: load_tensors: offloaded 5/37 layers to GPU
+            # e.g. load_tensors: offloaded 5/37 layers to GPU
             m_offloaded = re.search(r"offloaded\s+(\d+)\s*/\s*(\d+)\s+layers\s+to\s+gpu", low)
             if m_offloaded:
                 try:
@@ -661,7 +715,7 @@ class LlamaServerEngine(BaseEngine):
                 except Exception:
                     pass
 
-            # 例: load_tensors: offloading 4 repeating layers to GPU
+            # e.g. load_tensors: offloading 4 repeating layers to GPU
             m_repeating = re.search(r"offloading\s+(\d+)\s+repeating\s+layers\s+to\s+gpu", low)
             if m_repeating:
                 try:
@@ -669,11 +723,11 @@ class LlamaServerEngine(BaseEngine):
                 except Exception:
                     pass
 
-            # 例: load_tensors: offloading output layer to GPU
+            # e.g. load_tensors: offloading output layer to GPU
             if "offloading output layer to gpu" in low:
                 output_layer_on_gpu = True
 
-            # 例:
+            # e.g.
             # load_tensors:   CPU_Mapped model buffer size = 62328.33 MiB
             # load_tensors:        CUDA0 model buffer size =  7784.52 MiB
             m_buf = re.search(
@@ -688,7 +742,7 @@ class LlamaServerEngine(BaseEngine):
                     "gb": round(mib_val / 1024.0, 2),
                 }
 
-        # 無法解析時，回退到原本資訊
+        # When parsing fails, fall back to the original info
         if total_layers is None or gpu_layers is None:
             return {
                 "device": "llama-server",
@@ -701,11 +755,11 @@ class LlamaServerEngine(BaseEngine):
         total_layers = max(0, total_layers)
         gpu_layers = max(0, min(gpu_layers, total_layers))
 
-        # 與舊本地 GGUF 引擎一致的摘要格式
+        # Summary format consistent with the old local GGUF engine
         if total_layers == 0:
             device_label = "llama-server"
             device_summary = "remote: llama-server"
-            layer_lines: List[str] = []
+            layer_lines: list[str] = []
         elif gpu_layers >= total_layers:
             device_label = "GPU (Full)"
             device_summary = f"GPU: {total_layers}/{total_layers} layers (100%)"
@@ -719,7 +773,7 @@ class LlamaServerEngine(BaseEngine):
             device_label = "Mixed"
             device_summary = f"GPU: {gpu_layers} layers, CPU: {cpu_layers} layers"
 
-            # 若日志顯示「repeating + output」的分佈，優先反映更真實的分配
+            # If the logs show a "repeating + output" distribution, prefer reflecting the more accurate allocation
             if (
                 isinstance(repeating_gpu_layers, int)
                 and repeating_gpu_layers >= 0
@@ -735,7 +789,7 @@ class LlamaServerEngine(BaseEngine):
                     layer_lines.append(f"Layers {rep}-{total_layers - 2} -> CPU")
                 layer_lines.append(f"Layers {total_layers - 1}-{total_layers - 1} -> GPU")
             else:
-                # 回退：使用相同的連續切分表示
+                # Fallback: use the same contiguous-split representation
                 layer_lines = [
                     f"Layers 0-{gpu_layers - 1} -> GPU",
                     f"Layers {gpu_layers}-{total_layers - 1} -> CPU",
@@ -755,12 +809,16 @@ class LlamaServerEngine(BaseEngine):
 
         model_file = self._resolve_model_file()
         if not model_file:
-            raise RuntimeError("llama-server auto-start requires model_path (or model_name as local gguf path)")
+            raise RuntimeError(
+                "llama-server auto-start requires model_path (or model_name as local gguf path)"
+            )
 
         if not os.path.exists(model_file):
             raise RuntimeError(f"llama model file not found: {model_file}")
 
-        binary = (self.config.llama_server_binary or LLAMA_SERVER_BINARY).strip()
+        configured_binary = (self.config.llama_server_binary or "").strip()
+        binary = (configured_binary or LLAMA_SERVER_BINARY).strip()
+
         if not os.path.isfile(binary):
             raise RuntimeError(f"llama-server binary not found: {binary}")
         if not os.access(binary, os.X_OK):
@@ -768,9 +826,9 @@ class LlamaServerEngine(BaseEngine):
 
         binary_dir = os.path.dirname(binary) or "."
 
-        # 某些環境下子程序找不到同目錄/相鄰 lib，補上 LD_LIBRARY_PATH 可提高穩定性
+        # In some environments the subprocess cannot find the sibling/adjacent lib dir; adding LD_LIBRARY_PATH improves stability
         env = os.environ.copy()
-        ld_paths: List[str] = []
+        ld_paths: list[str] = []
         if os.path.isdir(binary_dir):
             ld_paths.append(binary_dir)
             maybe_lib_dir = os.path.abspath(os.path.join(binary_dir, "..", "lib"))
@@ -785,30 +843,42 @@ class LlamaServerEngine(BaseEngine):
         host = self.config.llama_server_host
         port = self.config.llama_server_port
 
-        cmd: List[str] = [
-            binary,
-            "-m", model_file,
-            "--host", str(host),
-            "--port", str(port),
-            "-np", str(self.config.llama_server_np),
-            "-c", str(self.config.n_ctx),
-            "-b", str(self.config.n_batch),
-            "--alias", "trusta-ast-default",
+        # The official prebuilt binary (ggml-org/llama-install.sh) is a unified
+        # `llama` that needs a `serve` subcommand; the source-built `llama-server`
+        # takes its args directly. Detect by filename (all its args are identical).
+        is_unified = "server" not in os.path.basename(binary).lower()
+
+        cmd: list[str] = [binary]
+        if is_unified:
+            cmd.append("serve")
+        cmd += [
+            "-m",
+            model_file,
+            "--host",
+            str(host),
+            "--port",
+            str(port),
+            "-np",
+            str(self.config.llama_server_np),
+            "-c",
+            str(self.config.n_ctx),
+            "-b",
+            str(self.config.n_batch),
+            "--alias",
+            "trusta-ast-default",
         ]
 
         if self.config.n_gpu_layers is not None:
             cmd.extend(["-ngl", str(self.config.n_gpu_layers)])
 
+        # Pin the offload device when configured (e.g. Vulkan1 for the Intel GPU
+        # on a machine that also has an NVIDIA card, which Vulkan would otherwise
+        # pick first). Source-built single-backend binaries can ignore this.
+        if self.config.llama_server_device:
+            cmd.extend(["--device", self.config.llama_server_device])
+
         extra_args = [str(x) for x in (self.config.llama_server_extra_args or []) if str(x).strip()]
-        # has_cache_type_k_arg = any(arg == "--cache-type-k" for arg in extra_args)
-        # has_cache_type_v_arg = any(arg == "--cache-type-v" for arg in extra_args)
         has_slot_save_path_arg = any(arg == "--slot-save-path" for arg in extra_args)
-
-        # if not has_cache_type_k_arg:
-        #     extra_args.extend(["--cache-type-k", "q8_0"])
-
-        # if not has_cache_type_v_arg:
-        #     extra_args.extend(["--cache-type-v", "q8_0"])
 
         if not has_slot_save_path_arg:
             slot_save_path = self._resolve_slot_save_path(model_file)
@@ -824,6 +894,14 @@ class LlamaServerEngine(BaseEngine):
                 raise RuntimeError(f"llama mmproj file not found: {mmproj_path}")
             self._detected_mmproj_path = mmproj_path
             cmd.extend(["--mmproj", mmproj_path])
+
+        # Pin jinja templating: thinking control (chat_template_kwargs.
+        # enable_thinking) and reasoning_content extraction need the GGUF's
+        # jinja chat template. Recent llama-server builds default to --jinja
+        # but older ones do not; pass it explicitly unless the user overrides
+        # via extra_args (a later --no-jinja would win anyway).
+        if not any(arg in ("--jinja", "--no-jinja") for arg in extra_args):
+            cmd.append("--jinja")
 
         if extra_args:
             cmd.extend(extra_args)
@@ -842,7 +920,7 @@ class LlamaServerEngine(BaseEngine):
         )
         self.managed_process = True
 
-        # 啟動日誌轉發執行緒，避免 PIPE 堵塞並將 llama-server log 顯示到 service log
+        # Start log-forwarding threads to avoid PIPE blocking and surface llama-server logs in the service log
         self._stdout_pump_thread = threading.Thread(
             target=self._pump_server_logs,
             args=(self.server_process.stdout, False),
@@ -856,6 +934,29 @@ class LlamaServerEngine(BaseEngine):
         self._stdout_pump_thread.start()
         self._stderr_pump_thread.start()
 
+    def _drain_log_pump_threads(self, timeout: float = 2.0) -> None:
+        for attr_name in ("_stdout_pump_thread", "_stderr_pump_thread"):
+            thread = getattr(self, attr_name, None)
+            if thread is None:
+                continue
+            if thread.is_alive():
+                thread.join(timeout=timeout)
+                if thread.is_alive():
+                    logger.warning(
+                        f"[LlamaServer] log pump thread still alive after join: {attr_name}"
+                    )
+            setattr(self, attr_name, None)
+
+    def _wait_for_server_shutdown(
+        self, timeout_sec: float = 5.0, poll_interval: float = 0.2
+    ) -> bool:
+        deadline = time.time() + max(0.0, timeout_sec)
+        while time.time() < deadline:
+            if not self._probe_server_alive(timeout_sec=0.5):
+                return True
+            time.sleep(poll_interval)
+        return not self._probe_server_alive(timeout_sec=0.5)
+
     def _stop_managed_server(self) -> None:
         if not self.managed_process or self.server_process is None:
             return
@@ -865,6 +966,7 @@ class LlamaServerEngine(BaseEngine):
         self.managed_process = False
 
         if proc.poll() is not None:
+            self._drain_log_pump_threads()
             return
 
         try:
@@ -879,12 +981,24 @@ class LlamaServerEngine(BaseEngine):
             except Exception as e:
                 logger.warning(f"[LlamaServer] failed to stop managed subprocess: {e}")
 
-    def load_model(self, config: InferenceConfig):
+        self._drain_log_pump_threads()
+
+        if not self._wait_for_server_shutdown(timeout_sec=5.0):
+            logger.warning(
+                f"[LlamaServer] server endpoint still reachable after managed subprocess stop: {self.base_url}"
+            )
+        else:
+            logger.info("[LlamaServer] server endpoint is down after managed subprocess stop")
+
+    def load_model(self, config: InferenceConfig) -> None:
+        """Connect to (or auto-start) the llama-server and await readiness."""
         self.config = config
         if config.llama_server_url and config.llama_server_url.strip():
             self.base_url = self._normalize_base_url(config.llama_server_url)
         else:
-            self.base_url = self._normalize_base_url(f"http://{config.llama_server_host}:{config.llama_server_port}")
+            self.base_url = self._normalize_base_url(
+                f"http://{config.llama_server_host}:{config.llama_server_port}"
+            )
         self.api_key = config.llama_server_api_key or LLAMA_SERVER_API_KEY
         self.timeout_sec = config.llama_server_timeout or LLAMA_SERVER_TIMEOUT
         self.served_model_name = None
@@ -892,14 +1006,14 @@ class LlamaServerEngine(BaseEngine):
 
         logger.info(f"[Worker] Initializing llama-server engine: {self.base_url}")
 
-        # 每次 load 先確保沒有遺留子程序
+        # On each load, first ensure there is no leftover subprocess
         self._stop_managed_server()
 
-        # 動態模式：由引擎啟動/管理子程序
+        # Dynamic mode: the engine starts/manages the subprocess
         if config.llama_server_auto_start:
             self._start_managed_server()
 
-        # 等待服務可用（無論是自啟或外部既有服務）
+        # Wait for the service to become available (whether self-started or an external existing service)
         if not self._wait_server_ready(timeout_sec=config.llama_server_health_timeout):
             self._stop_managed_server()
             detail = f"; startup_error={self.last_start_error}" if self.last_start_error else ""
@@ -923,31 +1037,33 @@ class LlamaServerEngine(BaseEngine):
 
         allocation = self._collect_layer_allocation_from_logs()
 
-        self.status_queue.put({
-            "status": "ready",
-            "config": config.model_dump(),
-            "device": allocation.get("device"),
-            "device_map_summary": allocation.get("device_map_summary"),
-            "total_modules": allocation.get("total_modules"),
-            "layer_lines": allocation.get("layer_lines"),
-            "memory_usage": allocation.get("memory_usage"),
-            "llama_capabilities": capabilities,
-            "prefill_strategy": self._prefill_strategy,
-            "slot_restore_summary": slot_restore_summary,
-        })
+        self.status_queue.put(
+            {
+                "status": "ready",
+                "config": config.model_dump(),
+                "device": allocation.get("device"),
+                "device_map_summary": allocation.get("device_map_summary"),
+                "total_modules": allocation.get("total_modules"),
+                "layer_lines": allocation.get("layer_lines"),
+                "memory_usage": allocation.get("memory_usage"),
+                "llama_capabilities": capabilities,
+                "prefill_strategy": self._prefill_strategy,
+                "slot_restore_summary": slot_restore_summary,
+            }
+        )
 
-    def generate(self, request: Dict[str, Any]):
-        handle_llama_server_generate(self.prepare_request_for_generation(request), self)
+    # NOTE: generate() / generate_stream() intentionally removed — llama-server
+    # is served directly over async HTTP from the main process (see
+    # service/inference/async_server_client.py), never through the worker.
+    # The BaseEngine defaults emit a clear error if this is ever misrouted.
 
-    def generate_stream(self, request: Dict[str, Any]):
-        handle_llama_server_stream(self.prepare_request_for_generation(request), self)
-
-    def unload(self):
+    def unload(self) -> None:
+        """Persist slot caches, stop the managed server, and reset state."""
         if not self._is_multimodal_model():
             slot_save_summary = self._save_slot_caches()
             logger.info(f"[LlamaServer] slot save summary before unload: {slot_save_summary}")
 
-        # 若為自啟模式，這裡會停止子程序
+        # If in self-start mode, this stops the subprocess
         self._stop_managed_server()
         self.client = None
         self.served_model_name = None
@@ -956,29 +1072,38 @@ class LlamaServerEngine(BaseEngine):
         self._detected_mmproj_path = None
         self.config = None
         self.stop_generation_flag.clear()
-        self.status_queue.put({
-            "status": "unloaded",
-            "message": "llama-server engine unloaded",
-        })
+        self.status_queue.put(
+            {
+                "status": "unloaded",
+                "message": "llama-server engine unloaded",
+            }
+        )
+        logger.info("[LlamaServer] engine unload completed after managed server shutdown")
 
-    def apply_chat_template(self, request: Dict[str, Any]):
-        # llama-server 直接接收 messages，無需本地 tokenizer template
+    def apply_chat_template(self, request: dict[str, Any]) -> None:
+        """Pass messages through unchanged (llama-server templates them itself)."""
+        # llama-server receives messages directly; no local tokenizer template needed
         request_id = request.get("request_id")
         messages = request.get("messages", [])
         try:
-            self.data_queue.put({
-                "type": "result",
-                "request_id": request_id,
-                "result": messages,
-            })
+            self.data_queue.put(
+                {
+                    "type": "result",
+                    "request_id": request_id,
+                    "result": messages,
+                }
+            )
         except Exception as e:
-            self.data_queue.put({
-                "type": "error",
-                "request_id": request_id,
-                "error": str(e),
-            })
+            self.data_queue.put(
+                {
+                    "type": "error",
+                    "request_id": request_id,
+                    "error": str(e),
+                }
+            )
 
-    def cleanup_generation_memory(self, request: Optional[Dict[str, Any]] = None):
+    def cleanup_generation_memory(self, request: dict[str, Any] | None = None) -> None:
+        """Report cleanup as a no-op (llama-server manages KV cache by slot)."""
         try:
             slot = None
             if isinstance(request, dict):
@@ -996,19 +1121,25 @@ class LlamaServerEngine(BaseEngine):
                     "cleanup skipped: llama-server handles KV cache automatically by slot/prefix matching"
                 ),
             }
-            logger.info("[LlamaServer] cleanup_generation_memory skipped (auto slot/prefix cache management)")
+            logger.info(
+                "[LlamaServer] cleanup_generation_memory skipped (auto slot/prefix cache management)"
+            )
 
-            self.data_queue.put({
-                "type": "cleanup",
-                "result": summary,
-            })
+            self.data_queue.put(
+                {
+                    "type": "cleanup",
+                    "result": summary,
+                }
+            )
         except Exception as e:
-            self.data_queue.put({
-                "type": "cleanup",
-                "result": {
-                    "cleared": 0,
-                    "total": 0,
-                    "slots": [],
-                    "message": f"cleanup failed: {e}",
-                },
-            })
+            self.data_queue.put(
+                {
+                    "type": "cleanup",
+                    "result": {
+                        "cleared": 0,
+                        "total": 0,
+                        "slots": [],
+                        "message": f"cleanup failed: {e}",
+                    },
+                }
+            )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any
 
 from fastapi import HTTPException, Request
 from starlette.datastructures import UploadFile
@@ -38,7 +38,7 @@ _DATA_URL_LOG_PREFIX_LENGTH = 96
 _JSON_ATTACHMENT_KEYS = ("attachments", "attachment", "images", "image", "files", "file")
 
 
-def _parse_json_field(value: Any) -> Any:
+def _parse_json_field(value: Any) -> Any:  # noqa: ANN401 - parses arbitrary JSON form values, so the type is inherently dynamic
     if not isinstance(value, str):
         return value
 
@@ -55,7 +55,7 @@ def _parse_json_field(value: Any) -> Any:
     return value
 
 
-def _coerce_scalar_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _coerce_scalar_fields(payload: dict[str, Any]) -> dict[str, Any]:
     for key in _INT_FIELDS:
         if key in payload and isinstance(payload[key], str) and payload[key].strip():
             payload[key] = int(payload[key])
@@ -71,8 +71,8 @@ def _coerce_scalar_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-async def _extract_uploaded_images(form_items: List[tuple[str, Any]]) -> List[str]:
-    uploaded_image_urls: List[str] = []
+async def _extract_uploaded_images(form_items: list[tuple[str, Any]]) -> list[str]:
+    uploaded_image_urls: list[str] = []
     for key, value in form_items:
         if not isinstance(value, UploadFile):
             continue
@@ -87,7 +87,7 @@ async def _extract_uploaded_images(form_items: List[tuple[str, Any]]) -> List[st
     return uploaded_image_urls
 
 
-async def parse_openai_chat_request_payload(http_request: Request) -> Dict[str, Any]:
+async def parse_openai_chat_request_payload(http_request: Request) -> dict[str, Any]:
     """Parse JSON or multipart/form-data for /v1/chat/completions."""
     content_type = http_request.headers.get("content-type", "").lower()
 
@@ -95,15 +95,19 @@ async def parse_openai_chat_request_payload(http_request: Request) -> Dict[str, 
         form = await http_request.form()
         form_items = list(form.multi_items())
 
-        payload: Dict[str, Any] = {}
+        payload: dict[str, Any] = {}
         payload_field = form.get("payload") or form.get("request")
         if isinstance(payload_field, str) and payload_field.strip():
             try:
                 parsed_payload = json.loads(payload_field)
             except json.JSONDecodeError as exc:
-                raise HTTPException(status_code=400, detail=f"Invalid multipart payload JSON: {exc}") from exc
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid multipart payload JSON: {exc}"
+                ) from exc
             if not isinstance(parsed_payload, dict):
-                raise HTTPException(status_code=400, detail="Multipart payload must be a JSON object")
+                raise HTTPException(
+                    status_code=400, detail="Multipart payload must be a JSON object"
+                )
             payload.update(parsed_payload)
 
         for key, value in form_items:
@@ -140,11 +144,9 @@ async def parse_openai_chat_request_payload(http_request: Request) -> Dict[str, 
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="JSON request body must be an object")
 
-    json_attachment_urls: List[str] = []
+    json_attachment_urls: list[str] = []
     for key in _JSON_ATTACHMENT_KEYS:
-        json_attachment_urls.extend(
-            extract_image_urls_from_attachment_payload(payload.get(key))
-        )
+        json_attachment_urls.extend(extract_image_urls_from_attachment_payload(payload.get(key)))
 
     if isinstance(payload.get("messages"), list):
         payload["messages"] = normalize_openai_messages_images(payload["messages"])
@@ -154,7 +156,7 @@ async def parse_openai_chat_request_payload(http_request: Request) -> Dict[str, 
     return payload
 
 
-def sanitize_openai_request_for_logging(payload: Dict[str, Any]) -> Dict[str, Any]:
+def sanitize_openai_request_for_logging(payload: dict[str, Any]) -> dict[str, Any]:
     """Redact oversized or binary-like values before logging request payloads."""
     try:
         sanitized = json.loads(json.dumps(payload, ensure_ascii=False))
@@ -190,9 +192,7 @@ def sanitize_openai_request_for_logging(payload: Dict[str, Any]) -> Dict[str, An
                 if isinstance(image_url, dict):
                     url = image_url.get("url")
                     if isinstance(url, str) and url.startswith("data:"):
-                        image_url["url"] = (
-                            f"{url[:_DATA_URL_LOG_PREFIX_LENGTH]}...(len={len(url)})"
-                        )
+                        image_url["url"] = f"{url[:_DATA_URL_LOG_PREFIX_LENGTH]}...(len={len(url)})"
                 elif isinstance(image_url, str) and image_url.startswith("data:"):
                     part["image_url"] = (
                         f"{image_url[:_DATA_URL_LOG_PREFIX_LENGTH]}...(len={len(image_url)})"
