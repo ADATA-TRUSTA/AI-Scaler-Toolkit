@@ -265,23 +265,42 @@
 
             <div class="mermaid">
             graph TD
-                Client[Client / Frontend] -- HTTP/OpenAI API --> API[FastAPI Server (service/app.py)]
+                Client["Client / Frontend"] -- "HTTP / OpenAI API" --> API["FastAPI Server<br/>service/app.py"]
+                API --> MM["ModelManager<br/>(單例，主行程)"]
+                MM --> SM["SessionManager"]
+                SM --> Redis[("Redis / Memory")]
+                MM --> MR["ModelRegistry"]
+                MR --> Registry[("models_registry.json")]
+                MM == "Queue IPC：載入 / 卸載" ==> MIP["ModelInferenceProcess<br/>(隔離 worker)"]
+                MIP --> Engine{"Engine<br/>Selector"}
+                Engine -- transformers --> TF["HF Transformers 模型<br/>常駐於 worker"]
+                Engine -- vllm --> VLLM["vLLM server<br/>子行程"]
+                Engine -- llama_server --> LLAMA["llama-server<br/>子行程"]
+            </div>
 
-                subgraph MainProcess [Main Process]
-                    API -- calls --> MM[ModelManager (Singleton)]
-                    SM[SessionManager] -- loads/saves --> Redis[(Redis/Memory)]
-                    MR[ModelRegistry] -- reads/writes --> Registry[(models_registry.json)]
-                end
+            <p><strong>載入</strong>是一致的：三種 engine 都由隔離 worker 負責載入，這也是 OOM 時能靠終止並重啟該行程來復原的原因。
+            <strong>生成</strong>則不然，會依 engine 走兩條不同路徑：</p>
 
-                subgraph WorkerProcess [Isolated Worker Process]
-                    MM -- Queue IPC --> MIP[ModelInferenceProcess]
-                    MIP -- uses --> Engine{Engine Selector}
-                    Engine -- Transformers --> TF[HF Transformer Model]
-                    Engine -- vLLM --> VLLM[vLLM Server subprocess]
-                    Engine -- llama_server --> LLAMA[llama-server subprocess]
-                end
+            <div class="mermaid">
+            graph LR
+                REQ["POST /v1/chat/completions"] --> SW{"uses_async_http()"}
+                SW -- "false — transformers" --> GS["ModelManager<br/>.generate_stream()"]
+                GS --> Q["IPC data queue"]
+                Q --> TFG["worker：model.generate()<br/>+ TextIteratorStreamer"]
+                SW -- "true — vllm / llama_server" --> AGS["ModelManager<br/>.agenerate_stream()"]
+                AGS --> ASC["AsyncServerClient"]
+                ASC --> HTTP["engine 自身的 OpenAI 相容<br/>HTTP endpoint"]
+                TFG --> SSE["SSE：OpenAI chunk<br/>回傳給前端"]
+                HTTP --> SSE
+            </div>
 
-                API -- reads status --> MM
+            <div class="warning">
+                <strong>兩條生成路徑。</strong>worker 行程負責<em>三種</em> engine 的模型載入，但只有
+                <code>transformers</code> 也在那裡生成，並把 token 透過 IPC data queue 串流回來。
+                <code>vllm</code> 與 <code>llama_server</code> 的 worker 只負責啟動 server 子行程；生成改由主行程的
+                <code>AsyncServerClient</code> 走該 engine 自己的 OpenAI 相容 HTTP endpoint 驅動，完全繞過 queue。
+                兩者由 <code>ModelManager.uses_async_http()</code> 決定，而 base engine 的
+                <code>generate()</code> 現在只要被呼叫就會拋錯 —— 代表 server engine 被誤導向了 worker。
             </div>
         </section>
 
@@ -499,26 +518,46 @@ payload = {
                     </tr>
                     <tr>
                         <td><code>service/model_manager.py</code></td>
-                        <td><strong>中介者</strong>。Singleton，協調 API 層與 Worker Process 通訊。提供 <code>start_loading</code>, <code>generate_stream</code>, <code>generate</code>, <code>stop_generation</code> 等方法。</td>
+                        <td><strong>中介者</strong>。Singleton，協調 API 層與 Worker Process。提供 <code>start_loading</code>、<code>stop_generation</code>，走 worker 的 <code>generate</code> / <code>generate_stream</code>，以及走 HTTP 的 <code>agenerate</code> / <code>agenerate_stream</code>。由 <code>uses_async_http()</code> 決定已載入的 engine 適用哪一組。</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/inference/async_server_client.py</code></td>
+                        <td><strong>Server engine 客戶端</strong>。<code>AsyncServerClient</code> 從<em>主行程</em>連向 vLLM / llama-server 的 OpenAI 相容 endpoint。這是兩個 server engine 的生成路徑 —— 不經過 worker，也不經過 IPC queue。</td>
                     </tr>
                     <tr>
                         <td><code>service/inference/model_inference_process.py</code></td>
-                        <td><strong>Process 控制器</strong>。管理 <code>multiprocessing.Process</code>，控制 Worker 生命週期及 IPC Queue 通訊。</td>
+                        <td><strong>Process 控制器</strong>。管理 <code>multiprocessing.Process</code>，控制 Worker 生命週期及 IPC Queue 通訊。Worker 負責載入所有 engine，但只為 in-process 的（transformers）提供生成服務。</td>
                     </tr>
                     <tr>
                         <td><code>service/inference/engines/</code></td>
                         <td><strong>引擎實作</strong>。
                             <ul>
-                                <li><code>base_engine.py</code>: 抽象基類</li>
+                                <li><code>base_engine.py</code>: 抽象基類。其 <code>generate</code> / <code>generate_stream</code> 現在會回報錯誤 —— 走到那裡代表 server engine 被誤導向了 worker。</li>
                                 <li><code>transformers_engine.py</code>: HF Transformers 引擎</li>
-                                <li><code>vllm_engine.py</code>: vLLM 引擎（子程序管理）</li>
-                                <li><code>llama_server_engine.py</code>: llama-server 引擎</li>
+                                <li><code>vllm_engine.py</code>: vLLM 引擎（子程序管理；無 <code>generate()</code>）</li>
+                                <li><code>llama_server_engine.py</code>: llama-server 引擎（子程序管理；無 <code>generate()</code>）</li>
+                                <li><code>vllm_error_classifier.py</code>: 將 vLLM 啟動／執行期失敗轉換成可據以處理的訊息</li>
                             </ul>
                         </td>
                     </tr>
                     <tr>
-                        <td><code>service/inference/generate/generator_worker.py</code></td>
-                        <td><strong>生成邏輯</strong>。包含 <code>handle_generate_request</code> 和 <code>handle_generate_stream_request</code>，調用 <code>model.generate()</code> 並處理 Streamer 輸出。</td>
+                        <td><code>service/inference/generate/</code></td>
+                        <td><strong>Worker 內的生成邏輯</strong>。
+                            <ul>
+                                <li><code>generator_worker.py</code>: <code>handle_generate_request</code> / <code>handle_generate_stream_request</code>，調用 <code>model.generate()</code> 並處理 Streamer 輸出</li>
+                                <li><code>generator_core.py</code>: 共用的取樣／解碼輔助函式</li>
+                                <li><code>gpt_parser.py</code>: GPT-OSS / harmony 輸出解析</li>
+                                <li><code>llama_server_runner.py</code>: llama-server 的行程啟動與參數組裝</li>
+                            </ul>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><code>service/inference/gguf_estimator.py</code><br><code>service/inference/gguf_inspect.py</code></td>
+                        <td><strong>GGUF 記憶體估算</strong>。讀取 GGUF metadata 並估算 VRAM／host 的分配，支撐 <code>/inference/estimate_memory/gguf*</code> 系列 endpoint。</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/utils/openai_request_parser.py</code><br><code>service/utils/image_input_utils.py</code></td>
+                        <td><strong>請求正規化</strong>。解析 OpenAI 相容的 payload，並為多模態請求解碼圖片輸入。</td>
                     </tr>
                     <tr>
                         <td><code>service/inference/load_model/peft_loader.py</code></td>
@@ -578,20 +617,28 @@ payload = {
 
             <h3>Step 2: OpenAI 相容對話流程 (Chat Flow)</h3>
             <div class="note">
-                <strong>注意：</strong> <code>/v1/chat/completions</code> 在主進程中負責 Session 管理和 Prompt 組裝，推理本身在 Worker Process 執行。
+                <strong>注意：</strong> <code>/v1/chat/completions</code> 在主行程負責 Session 管理與 Prompt 組裝。推理本身只有 <code>transformers</code> 在 Worker Process 執行；<code>vllm</code> / <code>llama_server</code> 由主行程直接走 HTTP。
             </div>
             <ol>
                 <li>Client 發送 <code>POST /v1/chat/completions</code>（帶 <code>messages</code>, <code>stream=True</code>, <code>session_id</code>）。</li>
                 <li><code>app.py</code> 執行 Prompt 組裝：
                     <ul>
                         <li>若有 <code>session_id</code>，透過 <code>session_manager</code> 取得歷史（最多 6 則訊息，約 3 輪對話）。</li>
-                        <li>解析 <code>enable_thinking</code> 並套用 Model-aware 生成參數（如 Qwen3.5 自動調整 temperature/top_p/repetition_penalty）。</li>
+                        <li>解析 <code>enable_thinking</code> 並套用 Model-aware 生成參數（如 Qwen3.5 自動調整 temperature/top_p/top_k/repetition_penalty）。</li>
                     </ul>
                 </li>
                 <li>若請求包含 <code>tools</code> 或 <code>tool_calls</code>，走 Tool Passthrough 路徑（繞過 session 管理，直接透傳）。</li>
-                <li><code>app.py</code> 呼叫 <code>model_manager.generate_stream()</code>，取得迭代器。</li>
-                <li><strong>Worker Process</strong> 執行生成，使用 <code>TextIteratorStreamer</code> 逐 Token 推送到 <strong>Data Queue</strong>。</li>
-                <li><code>app.py</code> 透過 SSE 將 Data Queue 內容即時包裝成 OpenAI chunk 格式回傳給前端。</li>
+                <li><code>app.py</code> 依 <code>model_manager.uses_async_http()</code> 分流：
+                    <ul>
+                        <li><strong>transformers</strong> —— 呼叫 <code>model_manager.generate_stream()</code>。
+                            <strong>Worker Process</strong> 執行生成，使用 <code>TextIteratorStreamer</code>
+                            逐 Token 推送到 <strong>Data Queue</strong>。</li>
+                        <li><strong>vllm / llama_server</strong> —— 呼叫 <code>model_manager.agenerate_stream()</code>，
+                            透過 <code>AsyncServerClient</code> 直接從該 engine 的 OpenAI 相容 HTTP endpoint 串流。
+                            不經過 worker，也不經過 data queue。</li>
+                    </ul>
+                </li>
+                <li><code>app.py</code> 透過 SSE 把取得的串流即時包裝成 OpenAI chunk 格式回傳給前端。</li>
                 <li>生成完成後，<code>app.py</code> 將本輪 user/assistant 對話追加到 <code>session_manager</code>。</li>
             </ol>
 
@@ -603,9 +650,11 @@ payload = {
                     <li><code>top_p</code> 強制設為 <code>0.95</code></li>
                     <li><code>top_k</code> 強制設為 <code>20</code></li>
                     <li><code>repetition_penalty</code> 強制設為 <code>1.0</code></li>
-                    <li><code>enable_thinking</code> 強制設為 <code>false</code></li>
                 </ul>
                 這是為了避免 Qwen3.5 MoE 架構在非官方參數下產生多語言亂碼問題。
+                <p><code>enable_thinking</code> 的行為不同：它是被<strong>預設</strong>為
+                <code>false</code>，而非強制。請求中明確帶 <code>"enable_thinking": true</code> 會被尊重 ——
+                <code>_resolve_enable_thinking()</code> 只在該欄位未出現於請求時才套用預設值。</p>
             </div>
         </section>
 
@@ -756,7 +805,7 @@ payload = {
                 <ul>
                     <li>確認 <code>trust_remote_code: true</code> 已啟用。</li>
                     <li>檢查模型是否需要特殊的 chat template（vLLM 可透過 <code>vllm_chat_template</code> 指定自訂 .jinja 檔）。</li>
-                    <li>對於 Qwen3.5，系統已自動禁用 thinking mode，如仍有問題請確認 API 請求中未強制設定 <code>enable_thinking: true</code>。</li>
+                    <li>對於 Qwen3.5，thinking mode 預設關閉，但請求中明確帶 <code>enable_thinking: true</code> 會覆蓋預設值 —— 請確認呼叫端沒有設定它。</li>
                 </ul>
             </div>
 
