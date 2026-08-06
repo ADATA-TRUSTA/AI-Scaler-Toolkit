@@ -247,41 +247,41 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 
 ### 若要使用 llama-server
 
-`llama.cpp` 來源於安裝期抓取（`TRUSTA_SETUP_LLAMA=1 bash backend/scripts/linux/setup_env.sh`,Windows 用 `.\backend\scripts\windows\setup_env.ps1 -SetupLlama`）到 `backend/service/utils/llama.cpp`,再自行編譯：
+安裝流程會取得**官方預編**的 `llama` 執行檔 —— 不需要編譯器，也沒有任何 C++ 建置步驟。此步驟為選配：
 
 #### Linux
 
 ```bash
-cd /home/test/project/AI-Scaler-Toolkit/backend/service/utils/llama.cpp
-cmake -B build
-cmake --build build -j
+TRUSTA_INSTALL_LLAMA=1 bash backend/scripts/linux/setup_env.sh
 ```
 
-若有 CUDA GPU 可加上：
-
-```bash
-cmake -B build -DGGML_CUDA=ON
-cmake --build build -j
-```
-
-#### Windows（PowerShell，需 Visual Studio Build Tools 2022）
+#### Windows（PowerShell）
 
 ```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit\backend\service\utils\llama.cpp
-cmake -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release -j
+.\backend\scripts\windows\setup_env.ps1 -InstallLlama
 ```
 
-若有 CUDA GPU：
+它會做兩件事：
 
-```powershell
-cmake -B build -G "Visual Studio 17 2022" -A x64 -DGGML_CUDA=ON
-cmake --build build --config Release -j
-```
+1. 透過官方的 `ggml-org/llama-install.sh` 安裝整合後的 `llama` 執行檔（以
+   `llama serve` / `llama quantize` 方式使用），Linux 安裝到 `~/.local/bin/llama`，
+   Windows 則是 `%LOCALAPPDATA%\Microsoft\WindowsApps\llama.exe`。可用 `.env` 中的
+   `LLAMA_SERVER_BINARY` 覆寫路徑。
+2. 以 sparse fetch 只取得 GGUF 轉換工具（`convert_hf_to_gguf.py`、
+   `convert_lora_to_gguf.py`、`conversion/`、`gguf-py`）到
+   `backend/service/utils/llama.cpp`，約 1.7 MB 的純 Python —— 因為這些腳本並不隨
+   預編執行檔一起發佈。C++ 原始碼不會被抓取。
 
-編譯完成後，在 `.env` 設定 `LLAMA_SERVER_BINARY` 指向實際輸出路徑。
+llama 的建置版本與 torch 的加速器**互相獨立**，由 `TRUSTA_LLAMA_BACKEND`（Linux）或
+`-LlamaBackend`（Windows）決定：`auto`（預設）在偵測到 NVIDIA 顯卡時選用原生 CUDA 版本，
+否則使用通用的 Vulkan 版本（Intel / AMD / NVIDIA 顯卡都能辨識）。若要在有 NVIDIA 顯卡的機器上
+強制使用通用版本，請傳入 `vulkan`。
 
-官方編譯說明：<https://github.com/ggml-org/llama.cpp#build>
+版本固定在 `b10107`，可用 `TRUSTA_LLAMA_VERSION`（Linux）或 `-LlamaVersion`（Windows）覆寫。
+
+> **已經有自己的 llama？** 沒有加上旗標就不會執行安裝。官方安裝程式會寫入上述固定位置，
+> 因此先前由同一支官方安裝程式裝過的版本會被覆蓋。若要保留自己的建置，請不要加旗標，
+> 改用 `.env` 中的 `LLAMA_SERVER_BINARY` 指向你自己的執行檔。
 
 ### 若要使用 vLLM engine（僅 Linux + CUDA）
 

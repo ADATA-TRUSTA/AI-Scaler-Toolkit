@@ -247,41 +247,45 @@ The script creates the environment in `backend\.venv`; **you do not need to acti
 
 ### If You Want to Use `llama-server`
 
-The `llama.cpp` source is fetched at setup time (`TRUSTA_SETUP_LLAMA=1 bash backend/scripts/linux/setup_env.sh`, or `.\backend\scripts\windows\setup_env.ps1 -SetupLlama` on Windows) into `backend/service/utils/llama.cpp`, then compiled manually:
+Setup installs the **official prebuilt** `llama` binary — no compiler and no
+C++ build are involved. It is opt-in:
 
 #### Linux
 
 ```bash
-cd /home/test/project/AI-Scaler-Toolkit/backend/service/utils/llama.cpp
-cmake -B build
-cmake --build build -j
+TRUSTA_INSTALL_LLAMA=1 bash backend/scripts/linux/setup_env.sh
 ```
 
-If CUDA is available:
-
-```bash
-cmake -B build -DGGML_CUDA=ON
-cmake --build build -j
-```
-
-#### Windows (PowerShell, requires Visual Studio Build Tools 2022)
+#### Windows (PowerShell)
 
 ```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit\backend\service\utils\llama.cpp
-cmake -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release -j
+.\backend\scripts\windows\setup_env.ps1 -InstallLlama
 ```
 
-If CUDA is available:
+This does two things:
 
-```powershell
-cmake -B build -G "Visual Studio 17 2022" -A x64 -DGGML_CUDA=ON
-cmake --build build --config Release -j
-```
+1. Installs the unified `llama` binary (used as `llama serve` / `llama quantize`)
+   via the official `ggml-org/llama-install.sh`, to `~/.local/bin/llama` on Linux
+   or `%LOCALAPPDATA%\Microsoft\WindowsApps\llama.exe` on Windows. Override the
+   location with `LLAMA_SERVER_BINARY` in `.env`.
+2. Sparse-fetches only the GGUF conversion tooling (`convert_hf_to_gguf.py`,
+   `convert_lora_to_gguf.py`, `conversion/`, `gguf-py`) into
+   `backend/service/utils/llama.cpp` — about 1.7 MB of pure Python, since those
+   scripts do not ship with the prebuilt binary. The C++ sources are not fetched.
 
-After compilation, set `LLAMA_SERVER_BINARY` in `.env` to the actual output path.
+The llama build is **decoupled** from the torch accelerator and chosen with
+`TRUSTA_LLAMA_BACKEND` (Linux) or `-LlamaBackend` (Windows): `auto` (default)
+picks the native CUDA build when an NVIDIA card is present, otherwise the generic
+Vulkan build, which sees Intel / AMD / NVIDIA cards alike. Pass `vulkan` to force
+the generic build on an NVIDIA machine.
 
-Official build instructions: <https://github.com/ggml-org/llama.cpp#build>
+The version is pinned to `b10107`; override it with `TRUSTA_LLAMA_VERSION`
+(Linux) or `-LlamaVersion` (Windows).
+
+> **Already have your own llama?** The install never runs without the flag. The
+> official installer writes to the fixed location above, so a copy installed
+> earlier by that same installer is overwritten. To keep your own build, omit the
+> flag and point `LLAMA_SERVER_BINARY` at your binary instead.
 
 ### If You Want to Use the vLLM Engine (Linux + CUDA only)
 
