@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Detect the GPU type and build the Python environment with the matching uv extra
 # (torch cuda / xpu variant).
+# llama (prebuilt binary + GGUF convert tooling) is installed by default, but only
+# what is actually missing — an existing binary or convert checkout is left alone.
 # Usage:
-#   ./setup_env.sh                          # auto-detect
+#   ./setup_env.sh                          # auto-detect; install llama only if missing
 #   TRUSTA_ACCEL=xpu ./setup_env.sh         # force cuda | xpu
 #   TRUSTA_SETUP_VLLM=0 ./setup_env.sh      # skip building the isolated vLLM environment
-#   TRUSTA_INSTALL_LLAMA=1 ./setup_env.sh   # install the prebuilt llama + GGUF convert tooling (no compiler)
+#   TRUSTA_INSTALL_LLAMA=0 ./setup_env.sh   # skip llama entirely
+#   TRUSTA_INSTALL_LLAMA=1 ./setup_env.sh   # force reinstall even if already present
 #   TRUSTA_LLAMA_BACKEND=vulkan ./setup_env.sh  # force the generic Vulkan build (sees every Intel/AMD/NVIDIA card)
 set -euo pipefail
 
@@ -73,20 +76,53 @@ should_setup_vllm() {
     esac
 }
 
-should_install_llama() {
-    local mode="${TRUSTA_INSTALL_LLAMA:-0}"
+# auto (default) = install only what is missing; 1 = force reinstall; 0 = skip entirely
+llama_mode() {
+    local mode="${TRUSTA_INSTALL_LLAMA:-auto}"
     case "$mode" in
-        1|true|TRUE|yes|YES|on|ON)
-            return 0
-            ;;
-        0|false|FALSE|no|NO|off|OFF|"")
-            return 1
-            ;;
+        auto|AUTO|"")            echo "auto" ;;
+        1|true|TRUE|yes|YES|on|ON)   echo "force" ;;
+        0|false|FALSE|no|NO|off|OFF) echo "skip" ;;
         *)
-            echo "[setup_env] unsupported TRUSTA_INSTALL_LLAMA value: $mode (use 1 / 0)" >&2
+            echo "[setup_env] unsupported TRUSTA_INSTALL_LLAMA value: $mode (use auto / 1 / 0)" >&2
             exit 1
             ;;
     esac
+}
+
+# Where the llama binary is expected. An explicit LLAMA_SERVER_BINARY wins; otherwise
+# the location the official installer writes to. .env is consulted too, since that is
+# where the service itself reads the override from.
+llama_binary_path() {
+    if [[ -n "${LLAMA_SERVER_BINARY:-}" ]]; then
+        echo "$LLAMA_SERVER_BINARY"
+        return
+    fi
+    local from_env_file=""
+    if [[ -f "$PROJECT_ROOT/.env" ]]; then
+        from_env_file="$(sed -n 's/^[[:space:]]*LLAMA_SERVER_BINARY[[:space:]]*=[[:space:]]*//p' \
+            "$PROJECT_ROOT/.env" | tail -n 1 | tr -d '"'\''' | sed 's/[[:space:]]*$//')"
+    fi
+    if [[ -n "$from_env_file" ]]; then
+        echo "${from_env_file/#\~/$HOME}"
+    else
+        echo "$HOME/.local/bin/llama"
+    fi
+}
+
+have_llama_binary() {
+    local p
+    p="$(llama_binary_path)"
+    [[ -x "$p" ]] && return 0
+    command -v llama &>/dev/null && return 0
+    return 1
+}
+
+# The sparse checkout is only useful if the scripts the conversion code calls are actually there.
+have_convert_tooling() {
+    [[ -f "$LLAMA_CONVERT_DIR/convert_hf_to_gguf.py" ]] &&
+        [[ -f "$LLAMA_CONVERT_DIR/convert_lora_to_gguf.py" ]] &&
+        [[ -d "$LLAMA_CONVERT_DIR/gguf-py" ]]
 }
 
 # Official prebuilt llama (ggml-org/llama-install.sh): no compiler / CUDA toolkit / Vulkan SDK / CMake.
@@ -160,17 +196,32 @@ else
 fi
 
 LLAMA_BACKEND="$(resolve_llama_backend)"
-if should_install_llama; then
-    if install_llama_prebuilt; then
+LLAMA_MODE="$(llama_mode)"
+
+if [[ "$LLAMA_MODE" == "skip" ]]; then
+    echo "[setup_env] skipping llama (TRUSTA_INSTALL_LLAMA=0)"
+    LLAMA_STATUS="skipped"
+else
+    # Binary
+    if [[ "$LLAMA_MODE" != "force" ]] && have_llama_binary; then
+        echo "[setup_env] llama binary already present at $(llama_binary_path) — leaving it alone (TRUSTA_INSTALL_LLAMA=1 to reinstall)"
+        llama_bin_status="already present"
+    elif install_llama_prebuilt; then
         llama_bin_status="prebuilt ${TRUSTA_LLAMA_VERSION:-b10107} ($LLAMA_BACKEND)"
     else
         llama_bin_status="binary skipped (no compatible prebuilt / install failed)"
     fi
-    get_llama_convert_tooling
-    LLAMA_STATUS="$llama_bin_status + convert tooling"
-else
-    echo "[setup_env] skipping llama (set TRUSTA_INSTALL_LLAMA=1 if you need inference / conversion)"
-    LLAMA_STATUS="skipped"
+
+    # Convert tooling
+    if [[ "$LLAMA_MODE" != "force" ]] && have_convert_tooling; then
+        echo "[setup_env] convert tooling already present at $LLAMA_CONVERT_DIR — leaving it alone"
+        llama_convert_status="already present"
+    else
+        get_llama_convert_tooling
+        llama_convert_status="fetched"
+    fi
+
+    LLAMA_STATUS="binary: $llama_bin_status / convert tooling: $llama_convert_status"
 fi
 
 echo ""

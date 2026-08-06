@@ -247,18 +247,19 @@ cd C:\Users\<user>\project\AI-Scaler-Toolkit
 
 ### 若要使用 llama-server
 
-安裝流程會取得**官方預編**的 `llama` 執行檔 —— 不需要編譯器，也沒有任何 C++ 建置步驟。此步驟為選配：
+安裝流程會取得**官方預編**的 `llama` 執行檔 —— 不需要編譯器，也沒有任何 C++ 建置步驟。
+此步驟**預設就會執行**，而且只補齊實際缺少的部分，所以直接執行 `setup_env` 即可：
 
 #### Linux
 
 ```bash
-TRUSTA_INSTALL_LLAMA=1 bash backend/scripts/linux/setup_env.sh
+bash backend/scripts/linux/setup_env.sh
 ```
 
 #### Windows（PowerShell）
 
 ```powershell
-.\backend\scripts\windows\setup_env.ps1 -InstallLlama
+.\backend\scripts\windows\setup_env.ps1
 ```
 
 它會做兩件事：
@@ -279,9 +280,21 @@ llama 的建置版本與 torch 的加速器**互相獨立**，由 `TRUSTA_LLAMA_
 
 版本固定在 `b10107`，可用 `TRUSTA_LLAMA_VERSION`（Linux）或 `-LlamaVersion`（Windows）覆寫。
 
-> **已經有自己的 llama？** 沒有加上旗標就不會執行安裝。官方安裝程式會寫入上述固定位置，
-> 因此先前由同一支官方安裝程式裝過的版本會被覆蓋。若要保留自己的建置，請不要加旗標，
-> 改用 `.env` 中的 `LLAMA_SERVER_BINARY` 指向你自己的執行檔。
+兩個部分都只在缺少時才安裝，因此重複執行 `setup_env` 成本很低，也不會破壞既有環境：
+
+| 模式 | Linux | Windows | 行為 |
+|---|---|---|---|
+| auto *（預設）* | — | — | 只安裝缺少的部分 |
+| skip | `TRUSTA_INSTALL_LLAMA=0` | `-Llama skip` | 完全不做任何事 |
+| force | `TRUSTA_INSTALL_LLAMA=1` | `-Llama force` | 即使已存在也重新安裝 |
+
+執行檔的偵測會依序參考 `LLAMA_SERVER_BINARY`（環境變數或 `backend/.env`）、預設安裝位置、
+最後是 `PATH` 上的 `llama`。轉換工具則必須 `convert_hf_to_gguf.py`、
+`convert_lora_to_gguf.py` 與 `gguf-py/` 三者齊備才算存在，因此抓取到一半的 checkout 會被修復
+而不是跳過。
+
+> **已經有自己的 llama？** 只要把 `LLAMA_SERVER_BINARY` 指向它，auto 模式就會偵測到並完全不動它。
+> 只有 `force` 會覆蓋，而官方安裝程式寫入的是上述固定位置，所以被取代的是那一份。
 
 ### 若要使用 vLLM engine（僅 Linux + CUDA）
 

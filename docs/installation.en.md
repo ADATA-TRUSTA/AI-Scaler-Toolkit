@@ -248,18 +248,19 @@ The script creates the environment in `backend\.venv`; **you do not need to acti
 ### If You Want to Use `llama-server`
 
 Setup installs the **official prebuilt** `llama` binary — no compiler and no
-C++ build are involved. It is opt-in:
+C++ build are involved. This happens **by default**, and only for the parts that are
+actually missing, so a plain `setup_env` run is enough:
 
 #### Linux
 
 ```bash
-TRUSTA_INSTALL_LLAMA=1 bash backend/scripts/linux/setup_env.sh
+bash backend/scripts/linux/setup_env.sh
 ```
 
 #### Windows (PowerShell)
 
 ```powershell
-.\backend\scripts\windows\setup_env.ps1 -InstallLlama
+.\backend\scripts\windows\setup_env.ps1
 ```
 
 This does two things:
@@ -282,10 +283,24 @@ the generic build on an NVIDIA machine.
 The version is pinned to `b10107`; override it with `TRUSTA_LLAMA_VERSION`
 (Linux) or `-LlamaVersion` (Windows).
 
-> **Already have your own llama?** The install never runs without the flag. The
-> official installer writes to the fixed location above, so a copy installed
-> earlier by that same installer is overwritten. To keep your own build, omit the
-> flag and point `LLAMA_SERVER_BINARY` at your binary instead.
+Each part is installed only when missing, so re-running `setup_env` is cheap and
+non-destructive:
+
+| Mode | Linux | Windows | Behaviour |
+|---|---|---|---|
+| auto *(default)* | — | — | Install only what is absent |
+| skip | `TRUSTA_INSTALL_LLAMA=0` | `-Llama skip` | Do nothing at all |
+| force | `TRUSTA_INSTALL_LLAMA=1` | `-Llama force` | Reinstall even if present |
+
+The binary check honours `LLAMA_SERVER_BINARY` — from the environment or from
+`backend/.env` — then the default install location, then `llama` on `PATH`. The
+convert tooling counts as present only when all of `convert_hf_to_gguf.py`,
+`convert_lora_to_gguf.py` and `gguf-py/` are there, so a half-finished checkout is
+repaired rather than skipped.
+
+> **Already have your own llama?** Point `LLAMA_SERVER_BINARY` at it and auto mode
+> detects it and never touches it. Only `force` overwrites, and the official
+> installer writes to the fixed location above, so that is the copy replaced.
 
 ### If You Want to Use the vLLM Engine (Linux + CUDA only)
 

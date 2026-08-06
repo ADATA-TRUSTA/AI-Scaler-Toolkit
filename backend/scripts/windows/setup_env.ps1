@@ -1,15 +1,22 @@
 ﻿# Detect the GPU type and build the Python environment with the matching uv extra
 # (torch cuda / xpu variant).
+# llama (prebuilt binary + GGUF convert tooling) is installed by default, but only
+# what is actually missing — an existing binary or convert checkout is left alone.
 # Usage:
-#   .\setup_env.ps1                # auto-detect the accelerator
+#   .\setup_env.ps1                # auto-detect the accelerator; install llama only if missing
 #   .\setup_env.ps1 -Accel xpu     # force cuda | xpu
-#   .\setup_env.ps1 -InstallLlama  # also install the prebuilt llama + GGUF convert tooling (no compiler)
-#   .\setup_env.ps1 -InstallLlama -LlamaBackend vulkan  # force the generic Vulkan build (sees every Intel/AMD/NVIDIA card)
+#   .\setup_env.ps1 -Llama skip    # skip llama entirely
+#   .\setup_env.ps1 -Llama force   # reinstall even if already present
+#   .\setup_env.ps1 -LlamaBackend vulkan  # force the generic Vulkan build (sees every Intel/AMD/NVIDIA card)
 param(
     [ValidateSet("cuda", "xpu")]
     [string]$Accel = "",
-    [switch]$InstallLlama,             # Install the official prebuilt llama (server/quantize) + sparse-fetch the convert scripts
-    [string]$LlamaVersion = "b10107",  # Pinned llama version (maps to the installer's LLAMA_VERSION)
+    # auto (default) = install only what is missing; force = reinstall; skip = do nothing.
+    # env TRUSTA_INSTALL_LLAMA (auto / 1 / 0) overrides it, matching setup_env.sh.
+    [ValidateSet("auto", "force", "skip")]
+    [string]$Llama = "auto",
+    [switch]$InstallLlama,             # Deprecated alias for -Llama force; kept so existing invocations keep working
+    [string]$LlamaVersion = "",        # Pinned llama version; defaults to b10107, or env TRUSTA_LLAMA_VERSION
     # llama inference backend, decoupled from the torch accel: auto = cuda when NVIDIA is present,
     # else vulkan (env TRUSTA_LLAMA_BACKEND also overrides it)
     [ValidateSet("auto", "cuda", "vulkan")]
@@ -73,6 +80,36 @@ function Install-LlamaPrebuilt {
     Write-Host "[setup_env] llama installed: $env:LOCALAPPDATA\Microsoft\WindowsApps\llama.exe"
 }
 
+# Where the llama binary is expected. An explicit LLAMA_SERVER_BINARY wins; otherwise
+# the location the official installer writes to. .env is consulted too, since that is
+# where the service itself reads the override from.
+function Get-LlamaBinaryPath {
+    if ($env:LLAMA_SERVER_BINARY) { return $env:LLAMA_SERVER_BINARY }
+    $envFile = Join-Path $ProjectRoot ".env"
+    if (Test-Path $envFile) {
+        $line = Select-String -Path $envFile -Pattern '^\s*LLAMA_SERVER_BINARY\s*=\s*(.+)$' |
+            Select-Object -Last 1
+        if ($line) {
+            $value = $line.Matches[0].Groups[1].Value.Trim().Trim('"').Trim("'")
+            if ($value) { return $value }
+        }
+    }
+    return (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\llama.exe")
+}
+
+function Test-LlamaBinary {
+    if (Test-Path (Get-LlamaBinaryPath)) { return $true }
+    if (Get-Command llama -ErrorAction SilentlyContinue) { return $true }
+    return $false
+}
+
+# The sparse checkout is only useful if the scripts the conversion code calls are actually there.
+function Test-LlamaConvertTooling {
+    return (Test-Path (Join-Path $LlamaConvertDir "convert_hf_to_gguf.py")) -and
+           (Test-Path (Join-Path $LlamaConvertDir "convert_lora_to_gguf.py")) -and
+           (Test-Path (Join-Path $LlamaConvertDir "gguf-py"))
+}
+
 function Get-LlamaConvertTooling {
     if (-not (Test-Path (Join-Path $LlamaConvertDir ".git"))) {
         if (Test-Path $LlamaConvertDir) { Remove-Item -Recurse -Force $LlamaConvertDir }
@@ -119,18 +156,51 @@ if ($LlamaBackendResolved -eq "auto") {
     }
 }
 
-$script:LlamaInstalled = $false
-if ($InstallLlama -or $env:TRUSTA_INSTALL_LLAMA -eq "1") {
-    Install-LlamaPrebuilt
-    Get-LlamaConvertTooling
-    if ($LlamaInstalled) {
-        $LlamaStatus = "prebuilt $LlamaVersion ($LlamaBackendResolved) + convert tooling"
-    } else {
-        $LlamaStatus = "convert tooling only (binary skipped: no compatible prebuilt / install failed)"
+# Pinned version: -LlamaVersion wins, then env TRUSTA_LLAMA_VERSION, then the default
+if (-not $LlamaVersion) {
+    if ($env:TRUSTA_LLAMA_VERSION) { $LlamaVersion = $env:TRUSTA_LLAMA_VERSION } else { $LlamaVersion = "b10107" }
+}
+
+# Resolve the mode: env overrides the parameter, and the deprecated switch means force
+$LlamaMode = $Llama
+if ($InstallLlama) { $LlamaMode = "force" }
+if ($env:TRUSTA_INSTALL_LLAMA) {
+    switch ($env:TRUSTA_INSTALL_LLAMA) {
+        "auto"  { $LlamaMode = "auto" }
+        "1"     { $LlamaMode = "force" }
+        "0"     { $LlamaMode = "skip" }
+        default { throw "[setup_env] unsupported TRUSTA_INSTALL_LLAMA value: $($env:TRUSTA_INSTALL_LLAMA) (use auto / 1 / 0)" }
     }
-} else {
-    Write-Host "[setup_env] skipping llama (add -InstallLlama if you need inference / conversion)"
+}
+
+$script:LlamaInstalled = $false
+if ($LlamaMode -eq "skip") {
+    Write-Host "[setup_env] skipping llama (-Llama skip)"
     $LlamaStatus = "skipped"
+} else {
+    # Binary
+    if ($LlamaMode -ne "force" -and (Test-LlamaBinary)) {
+        Write-Host "[setup_env] llama binary already present at $(Get-LlamaBinaryPath) — leaving it alone (-Llama force to reinstall)"
+        $binStatus = "already present"
+    } else {
+        Install-LlamaPrebuilt
+        if ($LlamaInstalled) {
+            $binStatus = "prebuilt $LlamaVersion ($LlamaBackendResolved)"
+        } else {
+            $binStatus = "binary skipped (no compatible prebuilt / install failed)"
+        }
+    }
+
+    # Convert tooling
+    if ($LlamaMode -ne "force" -and (Test-LlamaConvertTooling)) {
+        Write-Host "[setup_env] convert tooling already present at $LlamaConvertDir — leaving it alone"
+        $convertStatus = "already present"
+    } else {
+        Get-LlamaConvertTooling
+        $convertStatus = "fetched"
+    }
+
+    $LlamaStatus = "binary: $binStatus / convert tooling: $convertStatus"
 }
 
 Write-Host ""
