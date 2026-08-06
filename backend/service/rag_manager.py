@@ -12,17 +12,20 @@ Storage layout (relative to this file by default):
   - rag.db (SQLite database)
   - docs/<doc_id>.txt (plain text copies for transparency/debugging)
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
 import threading
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import Any, cast
 
 
 class RagManager:
-    def __init__(self, base_dir: Optional[str] = None):
+    """Lightweight document store and retrieval manager backed by SQLite/Chroma."""
+
+    def __init__(self, base_dir: str | None = None) -> None:
         self.base_dir = base_dir or os.path.join(os.path.dirname(__file__), "rag_store")
         self.docs_dir = os.path.join(self.base_dir, "docs")
         self.db_path = os.path.join(self.base_dir, "rag.db")
@@ -73,9 +76,7 @@ class RagManager:
                     )
                     """
                 )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)"
-                )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)")
                 # Try to create FTS5 table
                 try:
                     cur.execute(
@@ -125,6 +126,7 @@ class RagManager:
         try:
             import chromadb  # type: ignore
             from chromadb.utils import embedding_functions as ef  # type: ignore
+
             os.makedirs(self._chroma_dir, exist_ok=True)
             self._chroma_client = chromadb.PersistentClient(path=self._chroma_dir)
             # Try to use a sentence-transformer embedding function inside Chroma
@@ -135,8 +137,10 @@ class RagManager:
                 st_embed = None
             self._chroma_collection = self._chroma_client.get_or_create_collection(
                 name="rag_docs",
-                embedding_function=st_embed,
-                metadata={"hnsw:space": "cosine"}
+                # chroma's EmbeddingFunction generic is contravariant; the ST impl is valid
+                # at runtime but pyright rejects the variance, so widen to Any.
+                embedding_function=cast(Any, st_embed),
+                metadata={"hnsw:space": "cosine"},
             )
             self._use_chroma = True
         except Exception:
@@ -144,12 +148,13 @@ class RagManager:
             self._use_chroma = False
 
     # ---------- embeddings setup ----------
-    def _ensure_embedder(self):
+    def _ensure_embedder(self) -> None:
         if self._embedder is not None:
             return
         try:
             # Lazy import to avoid hard dependency if user doesn't need embeddings
             from sentence_transformers import SentenceTransformer  # type: ignore
+
             # Small, widely available model; can be replaced via env if needed
             model_name = os.environ.get("RAG_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
             self._embedder = SentenceTransformer(model_name)
@@ -158,12 +163,13 @@ class RagManager:
             self._embedder = None
             self._embeddings_enabled = False
 
-    def _embed_texts(self, texts: List[str]):
+    def _embed_texts(self, texts: list[str]) -> Any:  # noqa: ANN401 - returns numpy ndarray or None
         self._ensure_embedder()
         if not self._embeddings_enabled or self._embedder is None:
             return None
         try:
             import numpy as np  # type: ignore
+
             vecs = self._embedder.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
             # Ensure float32
             if vecs.dtype != np.float32:
@@ -173,13 +179,13 @@ class RagManager:
             return None
 
     @staticmethod
-    def _split_into_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> List[str]:
+    def _split_into_chunks(text: str, chunk_size: int = 800, overlap: int = 200) -> list[str]:
         text = text.strip()
         if not text:
             return []
         words = text.split()
         chunks = []
-        current = []
+        current: list[str] = []
         current_len = 0
         for w in words:
             current.append(w)
@@ -199,7 +205,8 @@ class RagManager:
         return chunks
 
     # ---------- CRUD ----------
-    def list_documents(self) -> List[Dict]:
+    def list_documents(self) -> list[dict]:
+        """List stored documents with their size and timestamps."""
         with self._lock:
             conn = self._connect()
             try:
@@ -211,7 +218,8 @@ class RagManager:
             finally:
                 conn.close()
 
-    def add_document(self, content: str, doc_id: Optional[str] = None) -> Dict:
+    def add_document(self, content: str, doc_id: str | None = None) -> dict:
+        """Add or update a document and index its chunks."""
         doc_id = doc_id or self._gen_doc_id()
         now = datetime.utcnow().isoformat() + "Z"
         with self._lock:
@@ -219,7 +227,11 @@ class RagManager:
                 # In Chroma, we store chunks as separate documents with metadata doc_id
                 chunks = self._split_into_chunks(content)
                 ids = [f"{doc_id}::{i}" for i in range(len(chunks))]
-                metadatas = [{"doc_id": doc_id, "created_at": now, "chunk": i} for i in range(len(chunks))]
+                # Widen to list[Any]: chroma's Metadata mapping type is invariant vs our
+                # concrete dict literals, so the annotation keeps upsert/add calls typed.
+                metadatas: list[Any] = [
+                    {"doc_id": doc_id, "created_at": now, "chunk": i} for i in range(len(chunks))
+                ]
                 try:
                     # If collection has embedding function, we can upsert directly
                     self._chroma_collection.upsert(ids=ids, metadatas=metadatas, documents=chunks)
@@ -231,7 +243,12 @@ class RagManager:
                         # Try manual embeddings
                         embeddings = self._embed_texts(chunks)
                         if embeddings is not None:
-                            self._chroma_collection.upsert(ids=ids, metadatas=metadatas, documents=chunks, embeddings=embeddings.tolist())
+                            self._chroma_collection.upsert(
+                                ids=ids,
+                                metadatas=metadatas,
+                                documents=chunks,
+                                embeddings=embeddings.tolist(),
+                            )
                         else:
                             raise
                 # Also write copy for transparency
@@ -262,6 +279,7 @@ class RagManager:
                 if embeddings is not None:
                     # Store with embeddings
                     import numpy as np  # type: ignore
+
                     for i, ch in enumerate(chunks):
                         vec: np.ndarray = embeddings[i]
                         cur.execute(
@@ -284,7 +302,8 @@ class RagManager:
             finally:
                 conn.close()
 
-    def delete_document(self, doc_id: str) -> Dict:
+    def delete_document(self, doc_id: str) -> dict:
+        """Delete a document and its chunks from the store."""
         with self._lock:
             if self._use_chroma and self._chroma_collection is not None:
                 try:
@@ -317,19 +336,24 @@ class RagManager:
                 conn.close()
 
     # ---------- Search ----------
-    def search(self, query: str, k: int = 3) -> List[Dict]:
+    def search(self, query: str, k: int = 3) -> list[dict]:
+        """Return the top-k documents relevant to the query."""
         k = max(1, min(k, 50))
         with self._lock:
             # Chroma path
             if self._use_chroma and self._chroma_collection is not None:
                 try:
-                    res = self._chroma_collection.query(query_texts=[query], n_results=k, include=["documents", "metadatas", "distances"])
+                    res = self._chroma_collection.query(
+                        query_texts=[query],
+                        n_results=k,
+                        include=["documents", "metadatas", "distances"],
+                    )
                     docs = (res.get("documents") or [[]])[0]
                     metas = (res.get("metadatas") or [[]])[0]
                     dists = (res.get("distances") or [[]])[0]
                     out = []
-                    for doc, meta, dist in zip(docs, metas, dists):
-                        doc_id = meta.get("doc_id") if isinstance(meta, dict) else None
+                    for doc, meta_entry, dist in zip(docs, metas, dists, strict=False):
+                        doc_id = meta_entry.get("doc_id") if isinstance(meta_entry, dict) else None
                         score = 1.0 - float(dist) if dist is not None else None
                         snippet = (doc or "")[:400]
                         out.append({"doc_id": doc_id, "score": score, "snippet": snippet})
@@ -350,6 +374,7 @@ class RagManager:
                     if qvecs is not None:
                         try:
                             import numpy as np  # type: ignore
+
                             qv = qvecs[0]
                             rows = cur.execute(
                                 "SELECT chunk_id, doc_id, content, embedding FROM chunks WHERE embedding IS NOT NULL"
@@ -359,7 +384,7 @@ class RagManager:
                                 raise RuntimeError("no-embeddings")
                             # Build matrices
                             emb_list = []
-                            meta: List[Tuple[int, str, str]] = []
+                            meta: list[tuple[int, str, str]] = []
                             for r in rows:
                                 emb = np.frombuffer(r["embedding"], dtype=np.float32)
                                 emb_list.append(emb)
@@ -373,12 +398,14 @@ class RagManager:
                                 chunk_id, doc_id, content = meta[idx]
                                 score = float(sims[idx])
                                 snippet = content[:400]
-                                out.append({
-                                    "doc_id": doc_id,
-                                    "chunk_id": chunk_id,
-                                    "score": score,
-                                    "snippet": snippet,
-                                })
+                                out.append(
+                                    {
+                                        "doc_id": doc_id,
+                                        "chunk_id": chunk_id,
+                                        "score": score,
+                                        "snippet": snippet,
+                                    }
+                                )
                             return out
                         except Exception:
                             # Any failure -> fallback to text search
@@ -411,12 +438,14 @@ class RagManager:
                     start = max(idx - 60, 0) if idx != -1 else 0
                     end = min(start + 200, len(content))
                     snippet = content[start:end]
-                    tmp.append({
-                        "doc_id": r["doc_id"],
-                        "score": None,
-                        "snippet": snippet,
-                        "content": None,
-                    })
+                    tmp.append(
+                        {
+                            "doc_id": r["doc_id"],
+                            "score": None,
+                            "snippet": snippet,
+                            "content": None,
+                        }
+                    )
                 return tmp
             finally:
                 conn.close()

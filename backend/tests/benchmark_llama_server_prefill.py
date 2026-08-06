@@ -1,15 +1,21 @@
 """llama-server prefill benchmark via existing backend APIs.
 
-用途：
-1. 透過 `/inference/load_model` 載入指定 GGUF 模型（engine=llama_server）。
-2. 使用 `/v1/chat/completions` 串流量測：模型載入時間、TTFT、TPS。
-3. 同一輪內比較 cold / warm / changed-tail。
-4. 每輪結束呼叫 `/inference/unload_model` 後重新測試，觀察 reload 後差異。
+What it does:
+1. Loads a given GGUF model through `/inference/load_model` (engine=llama_server).
+2. Measures load time, TTFT and TPS over a `/v1/chat/completions` stream.
+3. Compares cold / warm / changed-tail within the same round.
+4. Calls `/inference/unload_model` after each round and re-tests, to observe
+   post-reload differences.
 
-執行：
-    /home/test/project/Trusta_AST_Backend/service/.venv/bin/python tests/benchmark_llama_server_prefill.py
+Run it from the backend project root, with the service already up:
+    .venv/bin/python tests/benchmark_llama_server_prefill.py
 
-可覆蓋環境變數：
+The models under test are not bundled. Point these at your own local GGUF files
+(the benchmark skips any model whose path is unset or missing):
+    GPT_OSS_GGUF_PATH=/path/to/gpt-oss-120b-F16.gguf
+    QWEN_GGUF_PATH=/path/to/Qwen3.5-35B-A3B-Q4_K_M.gguf
+
+Other overridable environment variables:
     BACKEND_URL=http://127.0.0.1:8000
     LLAMA_SERVER_URL=http://127.0.0.1:5001
     BENCH_LLAMA_SERVER_AUTO_START=true
@@ -70,14 +76,16 @@ TOP_K = int(os.getenv("TOP_K", "40"))
 REPETITION_PENALTY = float(os.getenv("REPETITION_PENALTY", "1.05"))
 RESULTS_JSON = os.getenv(
     "RESULTS_JSON",
-    str(Path("/home/test/project/Trusta_AST_Backend/tests/benchmark_llama_server_prefill_results.json")),
+    str(Path(__file__).resolve().parent / "benchmark_llama_server_prefill_results.json"),
 )
 
 
+# The GGUF files are far too large to ship, so their locations come from the
+# environment. Leave one unset to drop that model from the run.
 BASE_MODELS: List[Dict[str, Any]] = [
     {
         "model_name": "unsloth/gpt-oss-120b-GGUF",
-        "model_path": "/media/test/eee156b9-166c-48ab-a252-ee619815c845/home/trusta/.cache/huggingface/hub/models--unsloth--gpt-oss-120b-GGUF/snapshots/ff1a82da6ad466e32284fa3d2b86694db3204789/gpt-oss-120b-F16.gguf",
+        "model_path": os.getenv("GPT_OSS_GGUF_PATH", ""),
         "label": "GPT-OSS 120B F16 (Local)",
         "size": "75GB",
         "max_context_length": 131072,
@@ -86,7 +94,7 @@ BASE_MODELS: List[Dict[str, Any]] = [
     },
     {
         "model_name": "unsloth/Qwen3.5-35B-GGUF",
-        "model_path": "/media/test/eee156b9-166c-48ab-a252-ee619815c845/home/trusta/.cache/huggingface/hub/Qwen3.5-35B-A3B-Q4_K/Qwen3.5-35B-A3B-Q4_K_M.gguf",
+        "model_path": os.getenv("QWEN_GGUF_PATH", ""),
         "label": "Qwen3.5-35B-A3B-Q4_K_M-GGUF",
         "size": "16.7GB",
         "max_context_length": 262144,
@@ -154,6 +162,13 @@ def _parse_ngl_values(raw_value: Optional[str], default_value: int) -> List[int]
 def _expand_model_variants() -> List[Dict[str, Any]]:
     variants: List[Dict[str, Any]] = []
     for model in BASE_MODELS:
+        path = str(model.get("model_path") or "").strip()
+        if not path or not Path(path).exists():
+            print(
+                f"[SKIP] {model['label']}: set {'GPT_OSS_GGUF_PATH' if 'gpt-oss' in model['model_name'] else 'QWEN_GGUF_PATH'} "
+                f"to a local GGUF file to include it"
+            )
+            continue
         env_name = str(model.get("ngl_env") or "").strip()
         ngl_values = _parse_ngl_values(os.getenv(env_name), BENCH_N_GPU_LAYERS)
         for ngl in ngl_values:

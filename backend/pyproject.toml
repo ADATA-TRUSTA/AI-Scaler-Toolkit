@@ -1,0 +1,214 @@
+[project]
+dependencies = [
+  # Web / API
+  "fastapi==0.120.1",
+  "starlette==0.48.0",
+  "uvicorn[standard]==0.38.0",
+  "python-multipart==0.0.20",
+  "pydantic==2.12.0",
+  "orjson==3.11.9", # FastAPI default_response_class=ORJSONResponse (app.py)
+  # Infra / IO
+  "redis==7.0.1",
+  "httpx==0.28.1", # sole HTTP client (sync + async); replaced requests
+  "python-dotenv==1.2.1",
+  "psutil==7.1.0",
+  "nvidia-ml-py==13.580.82", # provides the `pynvml` module
+  "numpy==1.26.4",
+  "pillow==12.1.1", # ML / inference / training
+  # torch (+cu130 / +xpu variants) comes from the cuda/xpu extras below
+  "transformers==5.5.3",
+  "trl==0.26.1",
+  "peft==0.18.0",
+  "accelerate==1.10.1",
+  "datasets==4.8.5",
+  "bitsandbytes==0.48.1",
+  "safetensors==0.7.0",
+  "huggingface-hub==1.10.1",
+  "gguf==0.17.1",
+  "openai==1.108.1",
+  "openai-harmony==0.0.8",
+  "tiktoken==0.12.0", # GPT-OSS / harmony tokenizer (see TIKTOKEN_RS_CACHE_DIR in settings.py)
+  "sentencepiece==0.2.2", # GGUF conversion vocab path (convert_hf_to_gguf.py); see conversion_manager.py
+  # RAG: vector retrieval (lazily imported inside rag_manager.py)
+  "chromadb",
+  "sentence-transformers", # Model backends loaded dynamically by transformers (not imported directly)
+  "deepspeed==0.19.3; sys_platform == 'linux'",
+  "causal-conv1d==1.6.1; sys_platform == 'linux'",
+  "flash-linear-attention==0.4.0",
+  "fla-core==0.4.0",
+]
+description = "Add your description here"
+name = "service"
+readme = "README.md"
+requires-python = ">=3.12"
+version = "0.1.0"
+
+[project.optional-dependencies]
+# CUDA (NVidia): pulls the +cu130 variants from the PyTorch CUDA index
+cuda = [
+  "torch==2.11.0+cu130",
+  "torchvision==0.26.0+cu130",
+  "torchaudio==2.11.0+cu130",
+]
+# Intel XPU (Arc / iGPU): pulls the +xpu variants from the PyTorch XPU index; works on Linux and Windows
+xpu = [
+  "torch==2.11.0+xpu",
+  "torchvision==0.26.0+xpu",
+  "torchaudio==2.11.0+xpu",
+  "triton-xpu==3.7.0",
+]
+
+[dependency-groups]
+dev = [
+  "ruff==0.15.22",
+  "pytest==8.2.1",
+  "pre-commit==4.6.1",
+]
+
+[tool.ruff] # https://docs.astral.sh/ruff/settings/#top-level
+# The project root moved up to the repo root; lint only this project's own source (service/),
+# excluding tests and vendored third-party code.
+exclude = [
+  ".venv",
+  "tests", # repo-root tests keep the "strict service rules do not apply to tests" convention
+  # vendored / isolated third-party Python; must not be scanned by this project's rules
+  "service/utils/llama.cpp",
+  "service/inference/engines/vllm_server",
+]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint] # https://docs.astral.sh/ruff/settings/#lint
+extend-select = [
+  # "ERA001", # commented-out-code
+  "FAST001", # fast-api-redundant-response-model
+  "FAST002", # fast-api-non-annotated-dependency
+  "D100", # missing-module-docstring
+  "D101", # undocumented-public-class
+  "D102", # missing-class-docstring
+  "D103", # undocumented-public-function
+  "D213", # multi-line-summary-second-line
+  "D400", # missing-trailing-period
+]
+select = [
+  "B", # flake8-bugbear
+  "E", # pycodestyle
+  "F", # pyflakes
+  "I", # isort
+  "S", # bandit
+  "W", # pycodestyle
+  "UP", # pyupgrade
+  "C4", # flake8-comprehensions
+  "ANN", # flake8-annotations
+  "TRY", # tryceratops
+  "PERF", # perflint
+  "ASYNC", # flake8-async
+]
+
+# Globally ignore noisy rules
+ignore = [
+  "E402", # module level import not at top of file
+  "E501", # line-too-long — ruff format owns code width; long strings/comments are not hard-wrapped
+  "TRY003", # Avoid specifying long messages outside the exception class
+  "TRY301", # Abstract `raise` to an inner function
+  "TRY300", # Consider-else — too picky about the common try/return/except HTTPException endpoint idiom
+  "TRY401", # Redundant exception in logging.exception msg — keeping {e} aids log grepping
+  # This service does a lot of best-effort hardware/device probing and spawns its own subprocesses
+  # (vLLM / llama server). The rules below have too low a signal-to-noise ratio here, so they are
+  # disabled wholesale (the rarer S rules stay on and are marked with noqa at the call site).
+  "S110", # try-except-pass — skipping a failed probe is normal here
+  "S112", # try-except-continue — same as above
+  "S603", # subprocess-without-shell-equals-true — known high false-positive rate; commands are built in code, not user input
+  "S607", # start-process-with-partial-path — resolving python / uv via PATH is intentional
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI idiom: using Body/Depends/Query/... as parameter defaults is correct, not a B008 error.
+extend-immutable-calls = [
+  "fastapi.Body",
+  "fastapi.Depends",
+  "fastapi.Query",
+  "fastapi.Path",
+  "fastapi.Header",
+  "fastapi.Form",
+  "fastapi.File",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+  "S101", # Allow use of assert statements in tests
+  "S105", # hardcoded-password-string
+  "S106", # hardcoded-password-func-arg
+]
+
+[tool.ruff.format] # https://docs.astral.sh/ruff/settings/#format
+quote-style = "double" # Quote style, double quotes are default
+
+[[tool.uv.index]]
+explicit = true
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu130"
+
+[[tool.uv.index]]
+explicit = true
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+
+[[tool.uv.index]]
+explicit = true
+name = "pytorch-whl"
+url = "https://download.pytorch.org/whl"
+
+[tool.uv.sources]
+torch = [
+  {index = "pytorch-cuda", extra = "cuda"},
+  {index = "pytorch-xpu", extra = "xpu"},
+]
+torchaudio = [
+  {index = "pytorch-cuda", extra = "cuda"},
+  {index = "pytorch-xpu", extra = "xpu"},
+]
+torchvision = [
+  {index = "pytorch-cuda", extra = "cuda"},
+  {index = "pytorch-xpu", extra = "xpu"},
+]
+triton-xpu = {index = "pytorch-whl"}
+
+[tool.uv]
+conflicts = [
+  [{extra = "cuda"}, {extra = "xpu"}],
+]
+environments = [
+  "sys_platform == 'linux'",
+  "sys_platform == 'win32'",
+]
+# causal-conv1d has no prebuilt wheel for newer CUDA toolkits and must build
+# its CUDA extension from source. With normal build isolation, uv resolves a
+# fresh (unpinned) `torch` into the isolated build env, which can mismatch the
+# system's CUDA toolkit version and fail the build. Building against the
+# project's already-installed torch (matching the local CUDA toolkit) avoids
+# the mismatch.
+no-build-isolation-package = ["causal-conv1d"]
+
+[tool.uv.workspace]
+exclude = [
+  "service/inference/engines/vllm_server",
+  "service/utils/llama.cpp",
+]
+
+[tool.pyright]
+exclude = [
+  "**/node_modules",
+  "**/__pycache__",
+  "**/.*",
+  ".venv",
+  ".uv-cache",
+  ".cache",
+  "tests",
+  "examples",
+  "service/utils/llama.cpp",
+  "service/inference/engines/vllm_server",
+]
+typeCheckingMode = "basic"
+venv = ".venv"
+venvPath = "."

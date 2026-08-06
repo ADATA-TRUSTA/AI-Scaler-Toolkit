@@ -1,72 +1,98 @@
-import os
+"""Training strategy implementations for SFT and Causal LM fine-tuning."""
+
 import logging
-import torch
+import os
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, cast
+
+import torch
+from peft import PeftModel
 from transformers import (
     Trainer,
     TrainingArguments,
-    DataCollatorForLanguageModeling,
+    default_data_collator,
 )
-from peft import PeftModel
-from ...config_models import TrainingConfig, TrainingMethod
+
+from ...config_models import TrainingConfig
 from ..sft_runner import run_sft_training
 
+if TYPE_CHECKING:
+    from datasets import Dataset
+    from transformers import PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin
+
 logger = logging.getLogger(__name__)
+
 
 class CustomTrainer(Trainer):
     """
     Custom Trainer to override save_model for DeepSpeed + LoRA compatibility.
     """
-    def save_model(self, output_dir=None, _internal_call=False):
+
+    def save_model(self, output_dir: str | None = None, _internal_call: bool = False) -> None:
         """
         Override save_model to bypass DeepSpeed's full checkpoint saving when using LoRA.
         This prevents OOM (if gather=True) and FileExists errors (if gather=False).
         """
         if output_dir is None:
             output_dir = self.args.output_dir
-        
+        assert output_dir is not None  # TrainingArguments always resolves output_dir  # noqa: S101
+
         # Check if we are using DeepSpeed and LoRA
         is_deepspeed = self.args.deepspeed is not None
-        
+
         # Check if model is PEFT
-        model = self.model
-        while hasattr(model, 'module'):
+        model: Any = self.model
+        while hasattr(model, "module"):
             model = model.module
         is_peft = isinstance(model, PeftModel)
-        
+
         if is_deepspeed and is_peft:
-            logger.info(f"[CustomTrainer] Saving LoRA adapter to {output_dir} (Bypassing DeepSpeed checkpoint)")
+            logger.info(
+                f"[CustomTrainer] Saving LoRA adapter to {output_dir} (Bypassing DeepSpeed checkpoint)"
+            )
             os.makedirs(output_dir, exist_ok=True)
-            
+
             try:
-                import deepspeed
-                # 找出所有 trainable parameters (即 LoRA adapters)
+                import deepspeed  # pyright: ignore[reportMissingImports]  # linux-only optional dep
+
+                from .zero3_utils import drain_zero3_inflight
+
+                # Collect all trainable parameters (i.e. the LoRA adapters)
                 trainable_params = [p for p in model.parameters() if p.requires_grad]
-                
-                # 使用 GatheredParameters 將參數收集到 rank 0
+
+                # Complete any in-flight ZeRO-3 all-gathers before gathering the
+                # adapter, else __exit__'s re-partition hits "param in flight".
+                drain_zero3_inflight(self)
+                # Use GatheredParameters to gather the params onto rank 0
                 with deepspeed.zero.GatheredParameters(trainable_params, modifier_rank=0):
                     if torch.distributed.get_rank() == 0:
                         # Save adapter
                         model.save_pretrained(output_dir)
-                        
+
                         # Save tokenizer
                         # In newer transformers, self.tokenizer was renamed to self.processing_class
-                        _tokenizer = getattr(self, 'processing_class', None) or getattr(self, 'tokenizer', None)
+                        _tokenizer = getattr(self, "processing_class", None) or getattr(
+                            self, "tokenizer", None
+                        )
                         if _tokenizer is not None:
                             _tokenizer.save_pretrained(output_dir)
-                        
+
                         # Save training args
                         try:
-                            self.args.save_to_json(os.path.join(output_dir, "training_args.json"))
+                            _args_path = os.path.join(output_dir, "training_args.json")
+                            # save_to_json exists at runtime but is missing from stubs.
+                            cast(Any, self.args).save_to_json(_args_path)
                         except Exception:
                             pass
-                
-                # 必須同步
+
+                # Synchronization is required
                 torch.distributed.barrier()
 
             except Exception as e:
-                logger.error(f"[CustomTrainer] Failed to save LoRA adapter with DeepSpeed gather: {e}")
-                raise e
+                logger.exception(
+                    f"[CustomTrainer] Failed to save LoRA adapter with DeepSpeed gather: {e}"
+                )
+                raise
         else:
             # Fallback to default behavior
             super().save_model(output_dir, _internal_call)
@@ -74,21 +100,33 @@ class CustomTrainer(Trainer):
 
 class TrainingStrategy(ABC):
     """Abstract base class for training strategies."""
-    
-    def __init__(self, config: TrainingConfig, deepspeed_config=None):
+
+    def __init__(
+        self, config: TrainingConfig, deepspeed_config: dict[str, Any] | str | None = None
+    ) -> None:
         self.config = config
         self.deepspeed_config = deepspeed_config
 
     @abstractmethod
-    def prepare_trainer(self, model, tokenizer, dataset, training_args=None) -> Trainer:
-        pass
+    def prepare_trainer(
+        self,
+        model: "PreTrainedModel | PeftModel",
+        tokenizer: "PreTrainedTokenizerBase | ProcessorMixin",
+        dataset: "Dataset",
+        training_args: TrainingArguments | None = None,
+        eval_dataset: "Dataset | None" = None,
+    ) -> Trainer:
+        """Build and return a configured Trainer for this strategy."""
 
-    def preprocess_dataset(self, dataset, tokenizer):
+    def preprocess_dataset(
+        self, dataset: "Dataset", tokenizer: "PreTrainedTokenizerBase"
+    ) -> "Dataset":
         """Optional preprocessing step before model loading."""
         return dataset
 
     def get_training_args(self) -> TrainingArguments:
-        # 使用 bf16 代替 fp16 以避免梯度衝突
+        """Assemble the TrainingArguments for this run."""
+        # Use bf16 instead of fp16 to avoid gradient conflicts
         use_fp16 = False
         use_bf16 = True
         optim = "adamw_torch"
@@ -106,6 +144,18 @@ class TrainingStrategy(ABC):
         gc_use_reentrant = True if self.deepspeed_config else False
         gc_kwargs = {"use_reentrant": gc_use_reentrant} if use_gc else None
 
+        # Periodic evaluation on the held-out split. Only enabled when a split
+        # ratio is configured; training_process pairs this with an eval_dataset,
+        # so the two must agree (eval_strategy="steps" with no eval_dataset errors).
+        eval_kwargs = {}
+        if getattr(self.config, "eval_split_ratio", None):
+            eval_steps = getattr(self.config, "eval_steps", None) or self.config.logging_steps
+            eval_kwargs = {
+                "eval_strategy": "steps",
+                "eval_steps": eval_steps,
+                "per_device_eval_batch_size": self.config.per_device_train_batch_size,
+            }
+
         return TrainingArguments(
             output_dir=str(self.config.output_dir),
             num_train_epochs=self.config.num_train_epochs,
@@ -115,7 +165,7 @@ class TrainingStrategy(ABC):
             warmup_steps=self.config.warmup_steps,
             logging_steps=self.config.logging_steps,
             save_steps=self.config.save_steps,
-            save_total_limit=self.config.save_total_limit or 2,
+            save_total_limit=self.config.save_total_limit,
             fp16=use_fp16,
             bf16=use_bf16,
             optim=optim,
@@ -126,13 +176,22 @@ class TrainingStrategy(ABC):
             dataloader_num_workers=0,
             dataloader_pin_memory=False,
             remove_unused_columns=False,
+            **eval_kwargs,
         )
 
 
 class SFTStrategy(TrainingStrategy):
     """Strategy for Supervised Fine-Tuning (SFT)."""
-    
-    def prepare_trainer(self, model, tokenizer, dataset, training_args=None) -> Trainer:
+
+    def prepare_trainer(
+        self,
+        model: "PreTrainedModel | PeftModel",
+        tokenizer: "PreTrainedTokenizerBase | ProcessorMixin",
+        dataset: "Dataset",
+        training_args: TrainingArguments | None = None,
+        eval_dataset: "Dataset | None" = None,
+    ) -> Trainer:
+        """Build an SFTTrainer via the shared SFT runner."""
         logger.info("[SFTStrategy] Using SFTTrainer")
         if training_args is None:
             training_args = self.get_training_args()
@@ -142,33 +201,48 @@ class SFTStrategy(TrainingStrategy):
             tokenizer=tokenizer,
             dataset=dataset,
             training_args=training_args,
+            eval_dataset=eval_dataset,
         )
 
 
 class CausalLMStrategy(TrainingStrategy):
     """Strategy for standard Causal Language Modeling (Text Completion)."""
-    
-    def prepare_trainer(self, model, tokenizer, dataset, training_args=None) -> Trainer:
+
+    def prepare_trainer(
+        self,
+        model: "PreTrainedModel | PeftModel",
+        tokenizer: "PreTrainedTokenizerBase | ProcessorMixin",
+        dataset: "Dataset",
+        training_args: TrainingArguments | None = None,
+        eval_dataset: "Dataset | None" = None,
+    ) -> Trainer:
+        """Build a CustomTrainer configured for Causal LM training."""
         logger.info("[CausalLMStrategy] Using CustomTrainer for Causal LM")
-        
-        data_collator = DataCollatorForLanguageModeling(
-            tokenizer=tokenizer,
-            mlm=False,
-        )
+
+        # Use default_data_collator (plain stack) instead of
+        # DataCollatorForLanguageModeling(mlm=False). The latter discards the
+        # precomputed "labels" and regenerates them from input_ids (masking only
+        # pad_token_id), which silently wipes out the prompt/completion masking
+        # done in preprocess_dataset. preprocess_dataset already pads every
+        # sequence to max_seq_length and builds labels with -100 over prompt and
+        # pad positions, so a plain collate preserves that masking exactly.
+        data_collator = default_data_collator
 
         if training_args is None:
             training_args = self.get_training_args()
-        
+
         return CustomTrainer(
             model=model,
             args=training_args,
             train_dataset=dataset,
+            eval_dataset=eval_dataset,
             data_collator=data_collator,
         )
 
-    def preprocess_dataset(self, dataset, tokenizer):
+    def preprocess_dataset(
+        self, dataset: "Dataset", tokenizer: "PreTrainedTokenizerBase"
+    ) -> "Dataset":
         """Tokenize dataset for Causal LM."""
-
         max_len = int(getattr(self.config, "max_seq_length", 1024) or 1024)
         pad_id = tokenizer.pad_token_id
         if pad_id is None:
@@ -189,12 +263,22 @@ class CausalLMStrategy(TrainingStrategy):
                 f"[CausalLMStrategy] Dataset mode=text; Loss mode=full_sequence (labels=input_ids) (text_field='{field_name}')"
             )
 
-        # Keep the same separator behavior as the previous implementation: prompt + "\n" + completion
-        sep_ids = tokenizer("\n", add_special_tokens=False)["input_ids"]
+        def _encode_ids(text: str) -> list[int]:
+            # Tokenizer stubs type ["input_ids"] loosely; it is a list[int] here.
+            return cast(list[int], tokenizer(text, add_special_tokens=False)["input_ids"])
 
-        def _tokenize_fn(examples):
+        # Keep the same separator behavior as the previous implementation: prompt + "\n" + completion
+        sep_ids = _encode_ids("\n")
+
+        def _tokenize_fn(examples: dict[str, Any]) -> dict[str, list[list[int]]]:
             if not isinstance(examples, dict):
-                examples = {k: [v] for k, v in (examples or {}).items()}
+                # datasets passes a LazyBatch (not a dict subclass) for
+                # batched map. Materialize it to a plain dict of columns.
+                # Do NOT wrap each value in an extra list: with batched=True the
+                # value is already the column list for the batch; wrapping it
+                # double-nests the batch and tokenizes each column's repr
+                # (e.g. "['abc']") instead of the actual text.
+                examples = dict(examples) if examples else {}
 
             # Determine batch size
             first_key = next(iter(examples)) if examples else None
@@ -205,6 +289,8 @@ class CausalLMStrategy(TrainingStrategy):
             labels_batch = []
 
             if is_prompt_completion:
+                # is_prompt_completion is only True when both fields are set.
+                assert prompt_col is not None and completion_col is not None  # noqa: S101
                 prompts = examples.get(prompt_col) or [""] * batch_size
                 completions = examples.get(completion_col) or [""] * batch_size
 
@@ -214,8 +300,8 @@ class CausalLMStrategy(TrainingStrategy):
                     prompt_text = str(prompt_text) if prompt_text is not None else ""
                     completion_text = str(completion_text) if completion_text is not None else ""
 
-                    p_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
-                    c_ids = tokenizer(completion_text, add_special_tokens=False)["input_ids"]
+                    p_ids = _encode_ids(prompt_text)
+                    c_ids = _encode_ids(completion_text)
 
                     ids = p_ids + sep_ids + c_ids
                     labels = ([-100] * (len(p_ids) + len(sep_ids))) + c_ids
@@ -254,9 +340,14 @@ class CausalLMStrategy(TrainingStrategy):
                     padding="max_length",
                     return_tensors=None,
                 )
-                input_ids_batch = toks["input_ids"]
-                attention_mask_batch = toks["attention_mask"]
-                labels_batch = [ids.copy() for ids in toks["input_ids"]]
+                input_ids_batch = cast(list[list[int]], toks["input_ids"])
+                attention_mask_batch = cast(list[list[int]], toks["attention_mask"])
+                # Mask padding positions to -100 so loss is not computed over
+                # pad tokens (attention_mask does not exclude tokens from loss).
+                labels_batch = [
+                    [tok if mask == 1 else -100 for tok, mask in zip(ids, attn, strict=True)]
+                    for ids, attn in zip(input_ids_batch, attention_mask_batch, strict=True)
+                ]
 
             return {
                 "input_ids": input_ids_batch,
@@ -266,13 +357,13 @@ class CausalLMStrategy(TrainingStrategy):
 
         logger.info(f"[CausalLMStrategy] Tokenizing {len(dataset)} examples...")
         dataset = dataset.map(
-            _tokenize_fn, 
+            _tokenize_fn,
             batched=True,
             batch_size=1000,
             remove_columns=dataset.column_names,
         )
         logger.info("[CausalLMStrategy] Tokenization completed")
-        
+
         dataset.set_format(
             type="torch",
             columns=["input_ids", "attention_mask", "labels"],
@@ -281,8 +372,13 @@ class CausalLMStrategy(TrainingStrategy):
 
 
 class StrategyFactory:
+    """Factory selecting the training strategy from the config."""
+
     @staticmethod
-    def get_strategy(config: TrainingConfig, deepspeed_config=None) -> TrainingStrategy:
+    def get_strategy(
+        config: TrainingConfig, deepspeed_config: dict[str, Any] | str | None = None
+    ) -> TrainingStrategy:
+        """Return the SFT or Causal LM strategy per config.use_sft_trainer."""
         if getattr(config, "use_sft_trainer", True):
             return SFTStrategy(config, deepspeed_config)
         else:

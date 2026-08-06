@@ -1,5 +1,8 @@
 """Configuration models for inference and training."""
 
+from enum import StrEnum
+from typing import Any, Optional
+
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -8,30 +11,28 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from typing import Optional, List, Dict, Union, Any
-from enum import Enum
 
 
-class InferenceEngine(str, Enum):
-    """推理引擎"""
+class InferenceEngine(StrEnum):
+    """Inference engine."""
 
     TRANSFORMERS = "transformers"
     LLAMA_SERVER = "llama_server"
     VLLM = "vllm"
 
 
-class QuantizationType(str, Enum):
-    """量化類型"""
+class QuantizationType(StrEnum):
+    """Quantization type."""
 
     NONE = "none"
     INT8 = "int8"
     INT4 = "int4"
-    NF4 = "nf4"  # QLoRA 使用的 4-bit normal float
+    NF4 = "nf4"  # 4-bit normal float used by QLoRA
     FP4 = "fp4"  # 4-bit float
 
 
-class TrainingMethod(str, Enum):
-    """訓練方法"""
+class TrainingMethod(StrEnum):
+    """Training method."""
 
     FULL = "full"
     LORA = "lora"
@@ -39,114 +40,124 @@ class TrainingMethod(str, Enum):
 
 
 class InferenceSharedFields(BaseModel):
-    """推理設定與狀態共用欄位。"""
+    """Fields shared by inference config and status."""
 
-    model_name: Optional[str] = Field(default=None, description="模型名稱或路徑")
-    model_path: Optional[str] = Field(
+    model_name: str | None = Field(default=None, description="Model name or path")
+    model_path: str | None = Field(
         default=None,
-        description="本地微調後模型的路徑 = output_dir；若提供，優先於 model_name 用於 from_pretrained",
+        description=(
+            "Path to a locally fine-tuned model = output_dir; when set, it takes "
+            "precedence over model_name for from_pretrained"
+        ),
     )
     engine: InferenceEngine = Field(
         default=InferenceEngine.TRANSFORMERS,
-        description="推理引擎: transformers (預設), llama_server, vllm",
+        description="Inference engine: transformers (default), llama_server, vllm",
     )
-    quantization: Optional[Union[QuantizationType, str]] = Field(
+    quantization: QuantizationType | str | None = Field(
         default=None,
-        description="量化類型: none, int8, int4, nf4, fp4",
+        description="Quantization type: none, int8, int4, nf4, fp4",
     )
-    device_map: Optional[Union[str, Dict]] = Field(
+    device_map: str | dict | None = Field(
         default="auto",
-        description="設備映射策略，例如: 'auto', 'cpu', 'cuda:0' 或 {'': 0, 'cpu': 'cpu'}, 'balanced_low_0'",
+        description=(
+            "Device map strategy, e.g. 'auto', 'cpu', 'cuda:0', "
+            "{'': 0, 'cpu': 'cpu'}, 'balanced_low_0'"
+        ),
     )
-    model_total_memory: Optional[str] = Field(
-        default=None, description="模型總記憶體需求，例如 '15GB'"
+    model_total_memory: str | None = Field(
+        default=None, description="Total memory the model needs, e.g. '15GB'"
     )
-    max_memory: Optional[Dict[Union[int, str], str]] = Field(
-        default=None, description="最大記憶體配置，例如: {0: '20GB', 'cpu': '50GB'}"
+    max_memory: dict[int | str, str] | None = Field(
+        default=None, description="Max memory per device, e.g. {0: '20GB', 'cpu': '50GB'}"
     )
-    offload_folder: Optional[str] = Field(
-        default=None, description="Offload 資料夾路徑，用於將模型權重卸載到磁碟"
+    offload_folder: str | None = Field(
+        default=None, description="Offload folder path, used to offload model weights to disk"
     )
 
-    # GGUF / llama-server 共用快照欄位
-    n_gpu_layers: Optional[int] = Field(
-        default=None, description="[llama_server] GPU 層數，-1 表示全部"
+    # Snapshot fields shared by GGUF / llama-server
+    n_gpu_layers: int | None = Field(
+        default=None, description="[llama_server] GPU layer count; -1 means all"
     )
-    n_ctx: Optional[int] = Field(default=None, description="[llama_server] 上下文長度")
-    n_batch: Optional[int] = Field(default=None, description="[llama_server] 批次處理大小")
-    llama_server_extra_args: Optional[List[str]] = Field(
+    n_ctx: int | None = Field(default=None, description="[llama_server] Context length")
+    n_batch: int | None = Field(default=None, description="[llama_server] Batch size")
+    llama_server_extra_args: list[str] | None = Field(
         default=None,
-        description="[llama_server] 啟動參數附加列表，例如 ['--mlock', '--no-mmap']",
+        description="[llama_server] Extra launch arguments, e.g. ['--mlock', '--no-mmap']",
     )
 
-    # vLLM 共用欄位
-    vllm_gpu_memory_utilization: Optional[float] = Field(
+    # Shared vLLM fields
+    vllm_gpu_memory_utilization: float | None = Field(
         default=None,
         description="[vLLM] --gpu-memory-utilization",
     )
-    vllm_max_model_len: Optional[int] = Field(
+    vllm_max_model_len: int | None = Field(
         default=None,
-        description="[vLLM] --max-model-len，未提供時回退使用 n_ctx",
+        description="[vLLM] --max-model-len; falls back to n_ctx when omitted",
     )
-    vllm_dtype: Optional[str] = Field(default=None, description="[vLLM] --dtype")
-    vllm_quantization: Optional[str] = Field(
+    vllm_dtype: str | None = Field(default=None, description="[vLLM] --dtype")
+    vllm_quantization: str | None = Field(
         default=None,
-        description="[vLLM] --quantization，例如 awq/gptq/fp8",
+        description="[vLLM] --quantization, e.g. awq/gptq/fp8",
     )
-    vllm_enforce_eager: Optional[bool] = Field(
+    vllm_enforce_eager: bool | None = Field(
         default=None,
-        description="[vLLM] 是否啟用 --enforce-eager",
+        description="[vLLM] Whether to pass --enforce-eager",
     )
-    vllm_kv_cache_dtype: Optional[str] = Field(
+    vllm_kv_cache_dtype: str | None = Field(
         default=None,
-        description="[vLLM] --kv-cache-dtype，例如 auto/fp8_e5m2/fp8_e4m3",
+        description="[vLLM] --kv-cache-dtype, e.g. auto/fp8_e5m2/fp8_e4m3",
     )
-    vllm_cpu_offload_gb: Optional[float] = Field(
+    vllm_cpu_offload_gb: float | None = Field(
         default=None,
         description="[vLLM] --cpu-offload-gb",
     )
-    vllm_tensor_parallel_size: Optional[int] = Field(
+    vllm_tensor_parallel_size: int | None = Field(
         default=None,
         description="[vLLM] --tensor-parallel-size",
     )
-    vllm_max_num_seqs: Optional[int] = Field(
+    vllm_max_num_seqs: int | None = Field(
         default=None,
         description="[vLLM] --max-num-seqs",
     )
-    vllm_max_num_batched_tokens: Optional[int] = Field(
+    vllm_max_num_batched_tokens: int | None = Field(
         default=None,
         description="[vLLM] --max-num-batched-tokens",
     )
-    vllm_mm_image_limit: Optional[int] = Field(
+    vllm_mm_image_limit: int | None = Field(
         default=None,
-        description="[vLLM] --limit-mm-per-prompt image 上限",
+        description="[vLLM] --limit-mm-per-prompt image limit",
     )
-    vllm_mm_audio_limit: Optional[int] = Field(
+    vllm_mm_audio_limit: int | None = Field(
         default=None,
-        description="[vLLM] --limit-mm-per-prompt audio 上限",
+        description="[vLLM] --limit-mm-per-prompt audio limit",
     )
-    vllm_mm_video_limit: Optional[int] = Field(
+    vllm_mm_video_limit: int | None = Field(
         default=None,
-        description="[vLLM] --limit-mm-per-prompt video 上限",
+        description="[vLLM] --limit-mm-per-prompt video limit",
     )
-    vllm_kv_offloading_size: Optional[float] = Field(
+    vllm_kv_offloading_size: float | None = Field(
         default=None,
-        description="[vLLM] --kv-offloading-size (單位 GB，多卡 TP 時這個數字是「所有 TP rank 合計」，不是每卡的量)",
+        description=(
+            "[vLLM] --kv-offloading-size (in GB; under multi-GPU TP this is the total "
+            "across all TP ranks, not per GPU)"
+        ),
     )
-    vllm_hf_overrides: Optional[Union[str, Dict[str, Any]]] = Field(
+    vllm_hf_overrides: str | dict[str, Any] | None = Field(
         default=None,
         description="[vLLM] --hf-overrides",
     )
-    vllm_chat_template: Optional[str] = Field(
+    vllm_chat_template: str | None = Field(
         default=None,
         description="[vLLM] --chat-template",
     )
 
 
 class InferenceConfig(InferenceSharedFields):
-    """推理配置 - 直接使用 Hugging Face Transformers 格式
+    """
+    Inference config - uses the Hugging Face Transformers format directly.
 
-    範例:
+    Examples:
     {
         "model_name": "Qwen/Qwen3-4B",
         "quantization": "none",
@@ -155,7 +166,7 @@ class InferenceConfig(InferenceSharedFields):
         "max_memory": {"0": "5GB", "cpu": "5GB"},
         "offload_folder": "./offload"
     }
-    或
+    or
     {
         "model_name": "Qwen/Qwen3-8B",
         "quantization": "none",
@@ -164,172 +175,182 @@ class InferenceConfig(InferenceSharedFields):
     }
     """
 
-    model_name: str = Field(..., description="模型名稱或路徑")
+    # pydantic idiom: narrow the optional parent field (str | None) to required str.
+    model_name: str = Field(..., description="Model name or path")  # pyright: ignore[reportGeneralTypeIssues]
     quantization: QuantizationType = Field(
         default=QuantizationType.NONE,
-        description="量化類型: none, int8, int4, nf4, fp4",
+        description="Quantization type: none, int8, int4, nf4, fp4",
     )
-    torch_dtype: str = Field(default="auto", description="Torch 資料類型")
-    trust_remote_code: bool = Field(default=True, description="信任遠端代碼")
-    use_cache: bool = Field(default=True, description="使用 KV cache")
+    torch_dtype: str = Field(default="auto", description="Torch dtype")
+    trust_remote_code: bool = Field(default=True, description="Trust remote code")
+    use_cache: bool = Field(default=True, description="Use KV cache")
 
-    # GGUF / llama-server 共用配置
+    # Config shared by GGUF / llama-server
     n_gpu_layers: int = Field(
-        default=-1, description="[llama_server] GPU 層數，-1 表示全部"
+        default=-1, description="[llama_server] GPU layer count; -1 means all"
     )
-    n_ctx: int = Field(default=4096, description="[llama_server] 上下文長度")
-    n_batch: int = Field(default=512, description="[llama_server] 批次處理大小")
+    n_ctx: int = Field(default=4096, description="[llama_server] Context length")
+    n_batch: int = Field(default=512, description="[llama_server] Batch size")
 
-    # llama-server 專用配置（OpenAI-compatible API）
-    llama_server_url: Optional[str] = Field(
+    # llama-server specific config (OpenAI-compatible API)
+    llama_server_url: str | None = Field(
         default=None,
-        description="[llama_server] 伺服器基礎 URL，例如 http://127.0.0.1:8080",
+        description="[llama_server] Server base URL, e.g. http://127.0.0.1:8080",
     )
-    llama_server_api_key: Optional[str] = Field(
-        default=None, description="[llama_server] API 金鑰（若服務端需要授權）"
+    llama_server_api_key: str | None = Field(
+        default=None, description="[llama_server] API key (when the server requires auth)"
     )
-    llama_server_model: Optional[str] = Field(
+    llama_server_model: str | None = Field(
         default=None,
-        description="[llama_server] 請求時使用的模型名稱；未提供時預設使用 model_name",
+        description="[llama_server] Model name used in requests; defaults to model_name",
     )
     llama_server_timeout: int = Field(
         default=300,
-        description="[llama_server] 請求逾時秒數",
+        description="[llama_server] Request timeout in seconds",
         ge=10,
     )
     llama_server_auto_start: bool = Field(
         default=True,
-        description="[llama_server] 是否由引擎在 load 時自動啟動 llama-server 子程序",
+        description="[llama_server] Whether the engine starts a llama-server subprocess on load",
     )
-    llama_server_binary: Optional[str] = Field(
+    llama_server_binary: str | None = Field(
         default=None,
-        description="[llama_server] llama-server 可執行檔路徑（未提供則使用環境預設）",
+        description="[llama_server] llama-server binary path (uses the env default when omitted)",
+    )
+    llama_server_device: str | None = Field(
+        default=None,
+        description=(
+            "[llama_server] Target offload device (maps to --device, e.g. 'Vulkan1' / 'CUDA0'); "
+            "llama picks one itself when omitted. Use it to pin the card on multi-GPU hosts "
+            "(e.g. Intel iGPU + NVIDIA)"
+        ),
     )
     llama_server_host: str = Field(
-        default="127.0.0.1", description="[llama_server] 啟動子程序時綁定的 host"
+        default="127.0.0.1", description="[llama_server] Host the subprocess binds to"
     )
     llama_server_port: int = Field(
         default=5001,
-        description="[llama_server] 啟動子程序時使用的 port",
+        description="[llama_server] Port used when starting the subprocess",
         ge=1,
         le=65535,
     )
     llama_server_np: int = Field(
         default=1,
-        description="[llama_server] 平行生成槽位（對應 llama-server -np）",
+        description="[llama_server] Parallel generation slots (llama-server -np)",
         ge=1,
     )
     llama_server_health_timeout: int = Field(
         default=300,
-        description="[llama_server] load 階段等待服務啟動成功的秒數",
+        description="[llama_server] Seconds to wait for the server to come up during load",
         ge=5,
     )
-    llama_server_mmproj: Optional[str] = Field(
+    llama_server_mmproj: str | None = Field(
         default=None,
-        description="[llama_server] 多模態 projector (.gguf) 路徑；提供後會自動加上 --mmproj",
+        description=(
+            "[llama_server] Multimodal projector (.gguf) path; --mmproj is appended "
+            "automatically when set"
+        ),
     )
 
-    # vLLM OpenAI-compatible server 專用配置
+    # vLLM OpenAI-compatible server specific config
     vllm_gpu_memory_utilization: float = Field(
         default=0.8,
         description="[vLLM] --gpu-memory-utilization",
         ge=0.05,
         le=0.99,
     )
-    vllm_max_model_len: Optional[int] = Field(
+    vllm_max_model_len: int | None = Field(
         default=None,
-        description="[vLLM] --max-model-len，未提供時回退使用 n_ctx",
+        description="[vLLM] --max-model-len; falls back to n_ctx when omitted",
         ge=1,
     )
     vllm_dtype: str = Field(default="auto", description="[vLLM] --dtype")
-    vllm_quantization: Optional[str] = Field(
+    vllm_quantization: str | None = Field(
         default=None,
-        description="[vLLM] --quantization，例如 awq/gptq/fp8",
+        description="[vLLM] --quantization, e.g. awq/gptq/fp8",
     )
     vllm_enforce_eager: bool = Field(
         default=False,
-        description="[vLLM] 是否啟用 --enforce-eager",
+        description="[vLLM] Whether to pass --enforce-eager",
     )
-    vllm_kv_cache_dtype: Optional[str] = Field(
+    vllm_kv_cache_dtype: str | None = Field(
         default=None,
-        description="[vLLM] --kv-cache-dtype，例如 auto/fp8_e5m2/fp8_e4m3",
+        description="[vLLM] --kv-cache-dtype, e.g. auto/fp8_e5m2/fp8_e4m3",
     )
     vllm_cpu_offload_gb: float = Field(
         default=0.0,
         ge=0.0,
         description="[vLLM] --cpu-offload-gb",
     )
-    vllm_kv_offloading_size: Optional[float] = Field(
+    vllm_kv_offloading_size: float | None = Field(
         default=None,
         ge=0.0,
         description=(
-            "[vLLM] --kv-offloading-size (單位 GB，多卡 TP 時這個數字是"
-            "「所有 TP rank 合計」，不是每卡的量)"
+            "[vLLM] --kv-offloading-size (in GB; under multi-GPU TP this is the total "
+            "across all TP ranks, not per GPU)"
         ),
-        validation_alias=AliasChoices(
-            "vllm_kv_offloading_size", "vllm_swap_space"
-        ),
+        validation_alias=AliasChoices("vllm_kv_offloading_size", "vllm_swap_space"),
     )
     vllm_tensor_parallel_size: int = Field(
         default=1,
         ge=1,
         description="[vLLM] --tensor-parallel-size",
     )
-    vllm_max_num_seqs: Optional[int] = Field(
+    vllm_max_num_seqs: int | None = Field(
         default=None,
         ge=1,
         description="[vLLM] --max-num-seqs",
     )
-    vllm_max_num_batched_tokens: Optional[int] = Field(
+    vllm_max_num_batched_tokens: int | None = Field(
         default=None,
         ge=1,
         description="[vLLM] --max-num-batched-tokens",
     )
-    # vLLM 多模態 (Vision / Audio / Video) 專用配置
-    # 適用於 Gemma 4、Gemma 3n、Qwen-VL、LLaVA 等 VLM 模型
-    vllm_mm_image_limit: Optional[int] = Field(
+    # vLLM multimodal (Vision / Audio / Video) specific config
+    # Applies to VLM models such as Gemma 4, Gemma 3n, Qwen-VL, LLaVA
+    vllm_mm_image_limit: int | None = Field(
         default=None,
         ge=1,
         description=(
-            "[vLLM] --limit-mm-per-prompt 中的 image 數量上限；"
-            "載入多模態模型（如 gemma-4-E2B-it）若要處理圖片需設定此值，例如 1"
+            "[vLLM] Max image count in --limit-mm-per-prompt; required, e.g. 1, when a "
+            "multimodal model (such as gemma-4-E2B-it) should handle images"
         ),
     )
-    vllm_mm_audio_limit: Optional[int] = Field(
+    vllm_mm_audio_limit: int | None = Field(
         default=None,
         ge=1,
         description=(
-            "[vLLM] --limit-mm-per-prompt 中的 audio 數量上限；"
-            "Gemma 4 E2B/E4B 等支援音訊的模型才需設定"
+            "[vLLM] Max audio count in --limit-mm-per-prompt; only needed for models with "
+            "audio support such as Gemma 4 E2B/E4B"
         ),
     )
-    vllm_mm_video_limit: Optional[int] = Field(
+    vllm_mm_video_limit: int | None = Field(
         default=None,
         ge=1,
-        description="[vLLM] --limit-mm-per-prompt 中的 video 數量上限",
+        description="[vLLM] Max video count in --limit-mm-per-prompt",
     )
-    vllm_hf_overrides: Optional[Union[str, Dict[str, Any]]] = Field(
+    vllm_hf_overrides: str | dict[str, Any] | None = Field(
         default=None,
         description=(
-            "[vLLM] --hf-overrides，用於強制覆寫 HuggingFace config.json 的欄位；"
-            "例如當 gemma-4-E2B-it 被誤識為純文字架構時，可設定 "
-            '{"architectures":["Gemma4ForConditionalGeneration"]} 強制啟用多模態版本。'
-            "可傳入 dict 或 JSON 字串"
+            "[vLLM] --hf-overrides, forces an override of HuggingFace config.json fields; "
+            "e.g. when gemma-4-E2B-it is misdetected as a text-only architecture, set "
+            '{"architectures":["Gemma4ForConditionalGeneration"]} to force the multimodal '
+            "variant. Accepts a dict or a JSON string"
         ),
     )
-    vllm_chat_template: Optional[str] = Field(
+    vllm_chat_template: str | None = Field(
         default=None,
         description=(
-            "[vLLM] --chat-template，指定自訂 chat template 檔案路徑（.jinja）；"
-            "當 tokenizer_config.json 缺少 chat_template 欄位時（例如某些 base 版本或量化版本）"
-            "需提供此參數以支援 /v1/chat/completions"
+            "[vLLM] --chat-template, path to a custom chat template file (.jinja); needed "
+            "to support /v1/chat/completions when tokenizer_config.json has no "
+            "chat_template field (e.g. some base or quantized builds)"
         ),
     )
 
     @field_validator("vllm_chat_template", mode="before")
     @classmethod
-    def _normalize_vllm_chat_template(cls, v):
-        """將空字串 chat_template 統一正規化為 None。"""
+    def _normalize_vllm_chat_template(cls, v: Any) -> Any:  # noqa: ANN401 - pydantic pre-validator accepts arbitrary raw input
+        """Normalize an empty chat_template string to None."""
         if v is None:
             return None
         if isinstance(v, str):
@@ -339,8 +360,8 @@ class InferenceConfig(InferenceSharedFields):
 
     @field_validator("vllm_hf_overrides", mode="before")
     @classmethod
-    def _normalize_vllm_hf_overrides(cls, v):
-        """接受 dict/list 或 JSON 字串；空字串視為未設定。"""
+    def _normalize_vllm_hf_overrides(cls, v: Any) -> Any:  # noqa: ANN401 - pydantic pre-validator accepts arbitrary raw input
+        """Accept a dict/list or a JSON string; an empty string counts as unset."""
         if v is None:
             return None
         if isinstance(v, str):
@@ -348,285 +369,394 @@ class InferenceConfig(InferenceSharedFields):
             return stripped or None
         if isinstance(v, (dict, list)):
             return v
-        raise ValueError("vllm_hf_overrides 必須是 dict、list、JSON 字串或 None")
+        raise ValueError("vllm_hf_overrides must be a dict, list, JSON string, or None")
 
 
 class ChatRequest(BaseModel):
-    """聊天請求"""
+    """Chat request."""
 
-    message: str = Field(..., description="用戶消息")
-    max_new_tokens: int = Field(default=512, description="最大生成 token 數")
-    temperature: float = Field(default=0.7, description="溫度參數", ge=0.0, le=2.0)
-    top_p: float = Field(default=0.9, description="Top-p 採樣", ge=0.0, le=1.0)
-    top_k: int = Field(default=50, description="Top-k 採樣", ge=0)
-    repetition_penalty: float = Field(default=1.1, description="重複懲罰", ge=1.0)
-    stream: bool = Field(default=True, description="是否使用串流")
-    system_prompt: Optional[str] = Field(default=None, description="系統提示詞")
+    message: str = Field(..., description="User message")
+    max_new_tokens: int = Field(default=512, description="Max tokens to generate")
+    temperature: float = Field(default=0.7, description="Temperature", ge=0.0, le=2.0)
+    top_p: float = Field(default=0.9, description="Top-p sampling", ge=0.0, le=1.0)
+    top_k: int = Field(default=50, description="Top-k sampling", ge=0)
+    repetition_penalty: float = Field(default=1.1, description="Repetition penalty", ge=1.0)
+    stream: bool = Field(default=True, description="Whether to stream the response")
+    system_prompt: str | None = Field(default=None, description="System prompt")
 
-    # 超時控制
+    # Timeout control
     total_timeout: int = Field(
-        default=300, description="生成總超時時間（秒），超過此時間將停止生成", ge=10
+        default=300,
+        description="Total generation timeout in seconds; generation stops once exceeded",
+        ge=10,
     )
 
-    # Chat template 控制
-    enable_thinking: Optional[bool] = Field(
+    # Chat template control
+    enable_thinking: bool | None = Field(
         default=True,
-        description="啟用思考模式（適用於支援的模型如 DeepSeek、QwQ）。None=使用模型預設值",
+        description=(
+            "Enable thinking mode (for models that support it, e.g. DeepSeek, QwQ). "
+            "None = use the model default"
+        ),
     )
 
-    # RAG 控制
-    use_rag: bool = Field(default=False, description="是否啟用 RAG 檢索並注入上下文")
-    rag_top_k: int = Field(default=3, description="RAG 檢索返回的文檔數量", ge=1, le=50)
-    rag_query: Optional[str] = Field(
-        default=None, description="覆蓋用戶消息作為 RAG 查詢"
+    # RAG control
+    use_rag: bool = Field(
+        default=False, description="Whether to run RAG retrieval and inject context"
+    )
+    rag_top_k: int = Field(default=3, description="Number of documents RAG returns", ge=1, le=50)
+    rag_query: str | None = Field(
+        default=None, description="Override the user message as the RAG query"
     )
     rag_include_sources: bool = Field(
-        default=True, description="是否在提示中包含來源資訊"
+        default=True, description="Whether to include sources in the prompt"
     )
 
-    # 混合式會話管理
-    session_id: Optional[str] = Field(
-        default=None, description="會話 ID，若提供則可在後端維持歷史"
+    # Hybrid session management
+    session_id: str | None = Field(
+        default=None, description="Session ID; when set, history can be kept on the backend"
     )
     reset_history: bool = Field(
-        default=False, description="是否在本次請求前重置會話歷史（需配合 session_id）"
+        default=False,
+        description="Whether to reset session history before this request (needs session_id)",
     )
-    # 可選：前端直接帶入的歷史（若提供則優先生效）
-    # 結構與 OpenAI 類似：[{role: user|assistant|system, content: str}]
-    history: Optional[List[Dict[str, str]]] = Field(
-        default=None, description="可選的對話歷史，若提供將覆蓋後端保存"
+    # Optional: history passed straight from the frontend (takes precedence when set)
+    # Structure mirrors OpenAI: [{role: user|assistant|system, content: str}]
+    history: list[dict[str, str]] | None = Field(
+        default=None,
+        description="Optional conversation history; overrides the backend copy when set",
     )
-    images: Optional[List[str]] = Field(
+    images: list[str] | None = Field(
         default=None,
         description=(
-            "可選圖片輸入（僅支援多模態模型時生效）。"
-            "每個元素可為本地檔案路徑、http(s) URL，或 data:image/...;base64,..."
+            "Optional image inputs (only effective on multimodal models). "
+            "Each item may be a local file path, an http(s) URL, or data:image/...;base64,..."
         ),
         max_length=8,
     )
-    request_id: Optional[str] = Field(
+    request_id: str | None = Field(
         default=None,
-        description="可選請求 ID。提供後可用於 /inference/stop_generation 精準停止單一請求",
+        description=(
+            "Optional request ID. Once set it can be used with /inference/stop_generation "
+            "to stop exactly this request"
+        ),
     )
 
 
 class OpenAIChatMessage(BaseModel):
-    """OpenAI 相容消息格式"""
+    """OpenAI-compatible message format."""
 
-    role: str = Field(..., description="消息角色，例如 system/user/assistant")
-    content: Optional[Union[str, List[Dict[str, Any]]]] = Field(
+    role: str = Field(..., description="Message role, e.g. system/user/assistant")
+    content: str | list[dict[str, Any]] | None = Field(
         default="",
-        description="消息內容；可為字串，或 OpenAI 多模態 content parts 列表",
+        description="Message content; a string, or an OpenAI multimodal content parts list",
     )
-    name: Optional[str] = Field(
-        default=None, description="可選名稱欄位，常用於 tool/function message"
+    name: str | None = Field(
+        default=None, description="Optional name field, common on tool/function messages"
     )
-    tool_calls: Optional[List[Dict[str, Any]]] = Field(
-        default=None, description="assistant 訊息中的工具呼叫列表"
+    tool_calls: list[dict[str, Any]] | None = Field(
+        default=None, description="Tool call list in an assistant message"
     )
-    tool_call_id: Optional[str] = Field(
-        default=None, description="tool 訊息對應的 tool_call_id"
+    tool_call_id: str | None = Field(
+        default=None, description="The tool_call_id this tool message answers"
     )
 
 
 class OpenAIChatCompletionRequest(BaseModel):
-    """OpenAI 相容 /v1/chat/completions 請求"""
+    """OpenAI-compatible /v1/chat/completions request."""
 
     model_config = ConfigDict(populate_by_name=True)
 
-    model: Optional[str] = Field(default=None, description="模型名稱（相容欄位）")
-    messages: List[OpenAIChatMessage] = Field(
-        ..., min_length=1, description="多輪對話消息"
+    model: str | None = Field(default=None, description="Model name (compatibility field)")
+    messages: list[OpenAIChatMessage] = Field(
+        ..., min_length=1, description="Multi-turn conversation messages"
     )
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     top_k: int = Field(default=50, ge=0)
-    total_timeout: Optional[int] = Field(
-        default=300, ge=10, description="生成總超時時間（秒）"
+    total_timeout: int | None = Field(
+        default=300, ge=10, description="Total generation timeout in seconds"
     )
     max_tokens: int = Field(
         default=512,
         ge=1,
-        description="最大生成 token 數",
+        description="Max tokens to generate",
         validation_alias=AliasChoices("max_tokens", "max_completion_tokens"),
     )
-    presence_penalty: Optional[float] = Field(
+    presence_penalty: float | None = Field(
         default=None,
         ge=-2.0,
         le=2.0,
-        description="OpenAI 相容欄位；若未明確提供 repetition_penalty，將近似映射使用",
+        description=(
+            "OpenAI-compatible field; approximately mapped when repetition_penalty is not "
+            "given explicitly"
+        ),
     )
-    stream: bool = Field(default=False, description="是否以 SSE 串流回傳")
-    stream_options: Optional[Dict[str, Any]] = Field(
+    stream: bool = Field(default=False, description="Whether to stream back over SSE")
+    stream_options: dict[str, Any] | None = Field(
         default=None,
-        description="OpenAI 相容 stream_options，例如 {'include_usage': true}",
+        description="OpenAI-compatible stream_options, e.g. {'include_usage': true}",
     )
-    user: Optional[str] = Field(
-        default=None, description="終端使用者識別（可映射為 session_id）"
+    user: str | None = Field(
+        default=None, description="End-user identifier (can map to session_id)"
     )
 
-    # 以下為後端擴展欄位，保持與 /inference/chat 對齊
+    # Backend extension fields below, kept aligned with /inference/chat
     repetition_penalty: float = Field(default=1.1, ge=1.0)
-    session_id: Optional[str] = Field(default=None)
+    session_id: str | None = Field(default=None)
     reset_history: bool = Field(default=False)
-    enable_thinking: Optional[bool] = Field(default=True)
-    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+    enable_thinking: bool | None = Field(default=True)
+    chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="相容 extra_body.chat_template_kwargs，例如 {'enable_thinking': false}",
+        description=(
+            "Compatible with extra_body.chat_template_kwargs, e.g. {'enable_thinking': false}"
+        ),
     )
     use_rag: bool = Field(default=False)
     rag_top_k: int = Field(default=3, ge=1, le=50)
-    rag_query: Optional[str] = Field(default=None)
+    rag_query: str | None = Field(default=None)
     rag_include_sources: bool = Field(default=True)
-    request_id: Optional[str] = Field(default=None)
-    tools: Optional[List[Dict[str, Any]]] = Field(
-        default=None, description="OpenAI tool 定義列表"
+    request_id: str | None = Field(default=None)
+    tools: list[dict[str, Any]] | None = Field(
+        default=None, description="OpenAI tool definition list"
     )
-    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(
-        default=None, description="OpenAI tool_choice 設定"
+    tool_choice: str | dict[str, Any] | None = Field(
+        default=None, description="OpenAI tool_choice setting"
     )
 
 
 class StopGenerationRequest(BaseModel):
-    """停止生成請求"""
+    """Stop generation request."""
 
-    request_id: Optional[str] = Field(
-        default=None, description="可選 worker 請求 ID。若提供則精準停止該次生成"
-    )
-    session_id: Optional[str] = Field(
+    request_id: str | None = Field(
         default=None,
-        description="可選對話 session ID。若未提供 request_id，後端會以 session_id 查找當前活躍 worker 請求並停止",
+        description="Optional worker request ID. When set, stops exactly that generation",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional conversation session ID. Without request_id, the backend looks up the "
+            "session's currently active worker request and stops it"
+        ),
     )
 
 
 class CleanupGenerationMemoryRequest(BaseModel):
-    """清理生成記憶體請求"""
+    """Cleanup generation memory request."""
 
-    slot: Optional[int] = Field(
+    slot: int | None = Field(
         default=None,
         ge=0,
-        description="可選 slot id。提供時僅清理指定 slot 的 cache；未提供則清理所有可見 slots",
+        description=(
+            "Optional slot id. When set, only that slot's cache is cleared; otherwise all "
+            "visible slots are cleared"
+        ),
     )
 
 
 class RagAddDocument(BaseModel):
-    """新增或更新 RAG 文檔的請求"""
+    """Request to add or update a RAG document."""
 
-    doc_id: Optional[str] = Field(
-        default=None, description="文檔 ID；若不提供將自動生成"
-    )
-    content: str = Field(..., description="純文字內容")
+    doc_id: str | None = Field(default=None, description="Document ID; generated when omitted")
+    content: str = Field(..., description="Plain text content")
 
 
 class TrainingConfig(BaseModel):
-    """訓練配置
+    """
+    Training config.
 
-    支援三種訓練方法：
-    - full: 全參數微調
-    - lora: LoRA 參數高效微調
-    - qlora: QLoRA 量化 + LoRA 微調
+    Supports three training methods:
+    - full: full-parameter fine-tuning
+    - lora: LoRA parameter-efficient fine-tuning
+    - qlora: QLoRA quantization + LoRA fine-tuning
     """
 
     model_name: str = Field(
-        ..., description="模型名稱標籤（從 models registry config 中的 label）"
+        ..., description="Model name label (the label from the models registry config)"
     )
-    method: TrainingMethod = Field(..., description="訓練方法：lora / qlora / full")
+    method: TrainingMethod = Field(..., description="Training method: lora / qlora / full")
     dataset_path: str = Field(
-        ..., description="訓練數據集文件路徑，必須是 JSON 或 JSONL 格式"
+        ...,
+        description=(
+            "Training dataset: a path to a local .json / .jsonl file, or any other value, "
+            "which is treated as a Hugging Face Hub dataset id. A Hub id cannot carry a "
+            "config/subset or split selector, and skips the local-file format sniffing — set "
+            "prompt_field/completion_field/text_field to match its columns"
+        ),
     )
-    output_dir: str = Field(..., description="微調後的模型文件輸出資料夾路徑")
-    offload_folder: Optional[str] = Field(
+    output_dir: str = Field(..., description="Output folder path for the fine-tuned model files")
+    offload_folder: str | None = Field(
         default="./deepspeed_offload",
-        description="Offload 資料夾路徑，會覆蓋 DeepSpeed Json 配置",
+        description="Offload folder path; overrides the DeepSpeed JSON config",
     )
 
     # LoRA/QLoRA specific
     lora_r: int = Field(
         default=8,
-        description="【僅 method = LoRA/QLoRA】LoRA rank（秩），控制可訓練參數量。值越大參數越多，訓練效果可能越好但耗時更長",
+        description=(
+            "[method = LoRA/QLoRA only] LoRA rank, controls the trainable parameter count. "
+            "Higher means more parameters and possibly better results, but slower training"
+        ),
     )
     lora_alpha: int = Field(
         default=16,
-        description="【僅 method = LoRA/QLoRA】LoRA alpha 縮放係數，通常設為 lora_r 的 1-2 倍",
+        description=("[method = LoRA/QLoRA only] LoRA alpha scaling factor, usually 1-2x lora_r"),
     )
     lora_dropout: float = Field(
         default=0.05,
-        description="【僅 method = LoRA/QLoRA】LoRA dropout 比率，用於防止過擬合",
+        description="[method = LoRA/QLoRA only] LoRA dropout rate, guards against overfitting",
     )
-    lora_target_modules: Optional[List[str]] = Field(
+    lora_target_modules: list[str] | None = Field(
         default=None,
-        description="【僅 method = LoRA/QLoRA】LoRA 目標模組列表，指定要應用 LoRA 的層。null 則使用預設值（如 q_proj, k_proj, v_proj, o_proj）",
+        description=(
+            "[method = LoRA/QLoRA only] LoRA target module list, naming the layers LoRA is "
+            "applied to. null uses the defaults (e.g. q_proj, k_proj, v_proj, o_proj)"
+        ),
     )
 
     # Training hyperparameters
-    num_train_epochs: int = Field(default=3, description="訓練幾輪（epochs）")
+    num_train_epochs: int = Field(default=3, description="Number of training epochs")
     per_device_train_batch_size: int = Field(
-        default=1, description="每次訓練取幾筆資料（batch size）"
+        default=1, description="Samples taken per training step (batch size)"
     )
     gradient_accumulation_steps: int = Field(
-        default=8, description="累積幾次梯度後才更新一次模型參數"
+        default=8, description="Gradients accumulated before each parameter update"
     )
     learning_rate: float = Field(
-        default=2e-4, description="學習率，控制每次參數更新的幅度"
+        default=2e-4, description="Learning rate, controls the size of each parameter update"
     )
-    warmup_steps: int = Field(default=100, description="前幾步使用較小學習率進行預熱")
+    warmup_steps: int = Field(
+        default=100, description="Steps to warm up with a smaller learning rate"
+    )
     logging_steps: int = Field(
-        default=10, description="每幾步回傳一次訓練進度（loss、step 等）"
+        default=10, description="Steps between training progress reports (loss, step, ...)"
     )
-    save_steps: int = Field(default=500, description="每幾步儲存一次 checkpoint")
-    save_total_limit: Optional[int] = Field(
-        default=2, description="最多儲存幾個 checkpoint，超過會自動刪除最舊的"
+    save_steps: int = Field(default=500, description="Steps between checkpoint saves")
+    save_total_limit: int | None = Field(
+        default=2, description="Max checkpoints to keep; the oldest are deleted beyond this"
     )
     max_seq_length: int = Field(
-        default=2048, description="訓練時的最大 token 長度，超過會被截斷"
+        default=2048, description="Max token length during training; longer inputs are truncated"
     )
 
-    # Dataset field configuration - 三種訓練模式三擇一
-    text_field: Optional[str] = Field(
+    # Dataset field configuration - pick one of the three training modes
+    text_field: str | None = Field(
         default="text",
-        description="【訓練模式一】單欄位模式：用前面對話預測後面對話。指定 dataset 中的欄位名稱，例如 'text'。與其他模式三擇一",
+        description=(
+            "[Training mode 1] Single-field mode: predict later turns from earlier ones. "
+            "Names the dataset field, e.g. 'text'. Mutually exclusive with the other modes"
+        ),
     )
-    prompt_field: Optional[str] = Field(
+    prompt_field: str | None = Field(
         default=None,
-        description="【訓練模式二】雙欄位模式：區分提問與回答。指定 dataset 中 prompt 欄位名稱，例如 'prompt'。需搭配 completion_field 使用",
+        description=(
+            "[Training mode 2] Two-field mode: separates question from answer. Names the "
+            "dataset prompt field, e.g. 'prompt'. Must be used with completion_field"
+        ),
     )
-    completion_field: Optional[str] = Field(
+    completion_field: str | None = Field(
         default=None,
-        description="【訓練模式二】雙欄位模式：區分提問與回答。指定 dataset 中 completion 欄位名稱，例如 'completion'。需搭配 prompt_field 使用",
+        description=(
+            "[Training mode 2] Two-field mode: separates question from answer. Names the "
+            "dataset completion field, e.g. 'completion'. Must be used with prompt_field"
+        ),
     )
-    messages_field: Optional[str] = Field(
+    messages_field: str | None = Field(
         default=None,
-        description="【訓練模式三】OpenAI chat format 模式：dataset 中含有 messages 欄位（list of {role, content}）。TRL 會自動套用模型的 chat template，並只對 assistant tokens 計算 loss。留空時若 dataset 有 messages 欄位會自動偵測",
+        description=(
+            "[Training mode 3] OpenAI chat format mode: the dataset has a messages field "
+            "(list of {role, content}). TRL applies the model's chat template automatically "
+            "and computes loss on assistant tokens only. Left empty, a messages field in the "
+            "dataset is detected automatically"
+        ),
+    )
+    # Evaluation / held-out test set
+    eval_split_ratio: float | None = Field(
+        default=None,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "Fraction of the training set held out as a test set (0~1, e.g. 0.1 means 10%). "
+            "Empty or 0 skips evaluation. The held-out data is evaluated periodically during "
+            "training and once more after training ends"
+        ),
+    )
+    eval_steps: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Steps between test-set evaluations. Defaults to logging_steps when empty. Only "
+            "effective when eval_split_ratio is set"
+        ),
+    )
+    eval_split_seed: int = Field(
+        default=42,
+        description=(
+            "Random seed for the test-set split, so the same data always yields the same split"
+        ),
     )
     save_tokenizer: bool = Field(
-        default=True, description="訓練完成後是否保存 tokenizer 到輸出目錄"
+        default=True, description="Whether to save the tokenizer to the output dir after training"
     )
 
     # DeepSpeed settings
     use_deepspeed: bool = Field(
         default=False,
-        description="是否使用 DeepSpeed offload 訓練（啟用後需搭配 deepspeed_config 或 deepspeed_profile）",
+        description=(
+            "Whether to train with DeepSpeed offload (needs deepspeed_config or "
+            "deepspeed_profile when enabled)"
+        ),
     )
-    deepspeed_config: Optional[str] = Field(
+    deepspeed_config: str | None = Field(
         default=None,
-        description="【方式一】DeepSpeed 詳細配置文件的完整路徑，例如 './my_deepspeed.json'。與 deepspeed_profile 二擇一",
+        description=(
+            "[Option 1] Full path to a detailed DeepSpeed config file, e.g. "
+            "'./my_deepspeed.json'. Use either this or deepspeed_profile"
+        ),
     )
-    deepspeed_profile: Optional[str] = Field(
+    deepspeed_profile: str | None = Field(
         default=None,
-        description="【方式二】DeepSpeed 配置 profile 名稱，會自動從 service/configs/deepspeed/<profile>.json 載入。與 deepspeed_config 二擇一",
+        description=(
+            "[Option 2] DeepSpeed config profile name, loaded automatically from "
+            "service/configs/deepspeed/<profile>.json. Use either this or deepspeed_config"
+        ),
     )
     # SFTTrainer specific
     use_sft_trainer: bool = Field(
         default=True,
-        description="是否使用 TRL 的 SFTTrainer 進行訓練（推薦用於指令微調）",
+        description="Whether to train with TRL's SFTTrainer (recommended for instruction tuning)",
     )
     packing: bool = Field(
         default=False,
-        description="【僅 use_sft_trainer=True】是否啟用 packing（將多個短序列打包成一個長序列以提高訓練效率）",
+        description=(
+            "[use_sft_trainer=True only] Whether to enable packing (pack several short "
+            "sequences into one long sequence for better training throughput)"
+        ),
     )
     gradient_checkpointing: bool = Field(
         default=True,
-        description="是否啟用 gradient checkpointing（用計算時間換記憶體空間，對大模型訓練至關重要）",
+        description=(
+            "Whether to enable gradient checkpointing (trades compute time for memory; "
+            "essential for large-model training)"
+        ),
+    )
+    use_flash_attention: bool = Field(
+        default=False,
+        description=(
+            "Whether to enable Triton-accelerated attention: tries flash_attention_2 first "
+            "(needs the flash-attn package), falling back to PyTorch's built-in sdpa (also a "
+            "Triton kernel) when unavailable. Speeds up attention and lowers VRAM usage"
+        ),
+    )
+    num_gpus: int = Field(
+        default=1,
+        ge=1,
+        validation_alias=AliasChoices("num_gpus", "num_gpu"),
+        description=(
+            "GPU count used for fine-tuning. 1 = single GPU (default); >1 launches multi-GPU "
+            "distributed training via deepspeed --num_gpus and lifts the "
+            "CUDA_VISIBLE_DEVICES restriction automatically"
+        ),
     )
 
     @field_validator(
@@ -639,11 +769,12 @@ class TrainingConfig(BaseModel):
         mode="before",
     )
     @classmethod
-    def _normalize_optional_str(cls, v):
-        """Normalize optional string fields.
+    def _normalize_optional_str(cls, v: Any) -> Any:  # noqa: ANN401 - pydantic pre-validator accepts arbitrary raw input
+        """
+        Normalize optional string fields.
 
-        前端/其他執行檔常用空字串 "" 表示未填；為避免判斷歧義，統一轉為 None。
-        同時會對字串做 strip。
+        The frontend and other callers often use an empty string "" for "not set"; convert it
+        to None to remove the ambiguity. Strings are also stripped.
         """
         if v is None:
             return None
@@ -653,12 +784,13 @@ class TrainingConfig(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_dataset_fields(self):
-        """Validate dataset field configuration.
+    def _validate_dataset_fields(self) -> "TrainingConfig":
+        """
+        Validate dataset field configuration.
 
-        - prompt_field 與 completion_field 必須同時提供或同時不提供。
-        - messages_field 不可與 prompt_field/completion_field 同時設定。
-        - 三種模式互斥（但若都未設定，dataset_loader 會自動偵測）。
+        - prompt_field and completion_field must both be set or both be omitted.
+        - messages_field cannot be combined with prompt_field/completion_field.
+        - The three modes are mutually exclusive (if none is set, dataset_loader auto-detects).
         """
         has_prompt = bool(self.prompt_field)
         has_completion = bool(self.completion_field)
@@ -666,243 +798,628 @@ class TrainingConfig(BaseModel):
 
         if has_prompt != has_completion:
             raise ValueError(
-                "prompt_field 與 completion_field 必須同時設定或同時為空/None。"
+                "prompt_field and completion_field must both be set or both be empty/None."
             )
         if has_messages and (has_prompt or has_completion):
             raise ValueError(
-                "messages_field 不可與 prompt_field/completion_field 同時設定，三種訓練模式互斥。"
+                "messages_field cannot be combined with prompt_field/completion_field; "
+                "the three training modes are mutually exclusive."
             )
         return self
 
 
 class DeviceAllocation(BaseModel):
-    """設備分配統計資訊"""
+    """Device allocation statistics."""
 
-    summary: Optional[str] = Field(
-        default=None, description="各設備的模組數統計摘要，例如: 'cuda:0:30, cpu:10'"
+    summary: str | None = Field(
+        default=None, description="Module count per device, e.g. 'cuda:0:30, cpu:10'"
     )
-    total_modules: Optional[int] = Field(default=None, description="模型的總模組數")
-    layer_lines: Optional[List[str]] = Field(
-        default=None, description="層級分配，例如: ['model.layers.0 -> cuda:0', ...]"
+    total_modules: int | None = Field(default=None, description="Total module count of the model")
+    layer_lines: list[str] | None = Field(
+        default=None, description="Per-layer allocation, e.g. ['model.layers.0 -> cuda:0', ...]"
     )
 
 
 class ModelStatus(InferenceSharedFields):
-    """模型狀態"""
+    """Model status."""
 
-    loaded: bool = Field(default=False, description="是否已加載")
-    is_loading: bool = Field(default=False, description="是否正在載入")
-    loading_error: Optional[str] = Field(default=None, description="載入錯誤訊息")
-    quantization: Optional[str] = Field(default=None, description="量化類型")
-    device: Optional[str] = Field(default=None, description="設備")
-    memory_usage: Optional[Dict] = Field(default=None, description="記憶體使用情況")
-    device_allocation: Optional[DeviceAllocation] = Field(
-        default=None, description="實際設備分配統計資訊（僅在模型載入後可用）"
+    loaded: bool = Field(default=False, description="Whether the model is loaded")
+    is_loading: bool = Field(default=False, description="Whether the model is loading")
+    loading_error: str | None = Field(default=None, description="Load error message")
+    quantization: str | None = Field(default=None, description="Quantization type")
+    device: str | None = Field(default=None, description="Device")
+    memory_usage: dict | None = Field(default=None, description="Memory usage")
+    device_allocation: DeviceAllocation | None = Field(
+        default=None, description="Actual device allocation stats (only available once loaded)"
     )
-    prefill_strategy: Optional[str] = Field(
-        default=None, description="[llama_server] 預填策略，例如 slot 或 cache_prompt"
+    prefill_strategy: str | None = Field(
+        default=None, description="[llama_server] Prefill strategy, e.g. slot or cache_prompt"
     )
-    llama_capabilities: Optional[List[str]] = Field(
-        default=None, description="[llama_server] /v1/models 回報的 capabilities"
+    llama_capabilities: list[str] | None = Field(
+        default=None, description="[llama_server] Capabilities reported by /v1/models"
     )
-    slot_restore_summary: Optional[Dict[str, Any]] = Field(
-        default=None, description="[llama_server] slot restore 結果摘要"
+    slot_restore_summary: dict[str, Any] | None = Field(
+        default=None, description="[llama_server] Summary of the slot restore result"
     )
 
 
 class TrainingLog(BaseModel):
-    """訓練過程日誌"""
+    """Training progress log."""
 
-    timestamp: float = Field(..., description="時間戳")
+    timestamp: float = Field(..., description="Timestamp")
     step: int = Field(..., description="Step")
     loss: float = Field(..., description="Loss")
-    learning_rate: Optional[float] = Field(None, description="Learning Rate")
-    epoch: Optional[float] = Field(None, description="Epoch")
-    accuracy: Optional[float] = Field(None, description="Accuracy or Eval Accuracy")
+    learning_rate: float | None = Field(None, description="Learning Rate")
+    epoch: float | None = Field(None, description="Epoch")
+    accuracy: float | None = Field(None, description="Accuracy or Eval Accuracy")
+    split: str = Field(
+        default="train",
+        description="Whether this metric comes from the training set (train) or test set (eval)",
+    )
 
 
 class GPULog(BaseModel):
-    """個別 GPU 日誌"""
+    """Per-GPU log."""
 
     index: int = Field(..., description="GPU Index")
     name: str = Field(..., description="GPU Name")
     gpu_util_percent: float = Field(..., description="GPU Util %")
     gpu_memory_used_gb: float = Field(..., description="Used Memory (GB)")
     gpu_memory_total_gb: float = Field(..., description="Total Memory (GB)")
-    temperature: Optional[float] = Field(None, description="Temperature (C)")
+    temperature: float | None = Field(None, description="Temperature (C)")
 
 
 class ResourceLog(BaseModel):
-    """系統資源日誌（欄位結構與 /system/resources 一致）"""
+    """System resource log (field structure matches /system/resources)."""
 
-    timestamp: float = Field(..., description="時間戳")
-    cpu: Optional["CPUInfo"] = Field(default=None, description="CPU/RAM 資源資訊")
-    gpu: Optional["GPUResource"] = Field(default=None, description="GPU 資源資訊")
-    disk: Optional["DiskResource"] = Field(default=None, description="Disk 資源資訊")
+    timestamp: float = Field(..., description="Timestamp")
+    cpu: Optional["CPUInfo"] = Field(default=None, description="CPU/RAM resource info")
+    gpu: Optional["GPUResource"] = Field(default=None, description="GPU resource info")
+    disk: Optional["DiskResource"] = Field(default=None, description="Disk resource info")
 
 
 class TrainingHistoryResponse(BaseModel):
-    """訓練歷史紀錄回應"""
+    """Training history response."""
 
     session_id: str
-    logs: List[TrainingLog]
+    logs: list[TrainingLog]
+    eval_logs: list[TrainingLog] = Field(
+        default_factory=list,
+        description=(
+            "Held-out test set evaluation metrics, kept separate from training metrics; "
+            "empty when evaluation is disabled"
+        ),
+    )
 
 
 class SystemResourceHistoryResponse(BaseModel):
-    """系統資源歷史紀錄回應"""
+    """System resource history response."""
 
     session_id: str
-    resources: List[ResourceLog]
+    resources: list[ResourceLog]
 
 
 class TrainingStatus(BaseModel):
-    """訓練狀態"""
+    """Training status."""
 
-    is_training: bool = Field(default=False, description="是否正在訓練")
-    progress: float = Field(default=0.0, description="訓練進度 (0-1)")
-    current_step: int = Field(default=0, description="當前步數")
-    total_steps: int = Field(default=0, description="總步數")
-    loss: Optional[float] = Field(default=None, description="當前損失")
-    current_epoch: Optional[float] = Field(default=0.0, description="當前 epoch")
-    total_epochs: Optional[int] = Field(default=None, description="總 Epoch 數")
-    status: Optional[str] = Field(default=None, description="狀態消息")
-    session_id: Optional[str] = Field(default=None, description="當前訓練的 Session ID")
-    error: Optional[str] = Field(default=None, description="錯誤訊息（簡短描述）")
-    config: Optional[TrainingConfig] = Field(
-        default=None, description="當前或最後一次的訓練配置"
+    is_training: bool = Field(default=False, description="Whether training is in progress")
+    progress: float = Field(default=0.0, description="Training progress (0-1)")
+    current_step: int = Field(default=0, description="Current step")
+    total_steps: int = Field(default=0, description="Total steps")
+    loss: float | None = Field(default=None, description="Current loss")
+    current_epoch: float | None = Field(default=0.0, description="Current epoch")
+    total_epochs: int | None = Field(default=None, description="Total epochs")
+    status: str | None = Field(default=None, description="Coarse status string")
+    phase: str | None = Field(
+        default=None, description="Fine-grained lifecycle phase (see core.Phase)"
     )
+    phase_detail: str | None = Field(
+        default=None, description="Human-readable detail for the current phase"
+    )
+    session_id: str | None = Field(default=None, description="Current session ID")
+    job_id: str | None = Field(
+        default=None, description="Job ID (alias of session_id; universal key for logs)"
+    )
+    error: str | None = Field(
+        default=None, description="Real error message only (progress lives in `phase`)"
+    )
+    config: TrainingConfig | None = Field(
+        default=None, description="Current or last training config"
+    )
+
+
+class TrainingLogEventsResponse(BaseModel):
+    """Structured training-log events for a job (SSE backlog / polling)."""
+
+    job_id: str
+    cursor: int = Field(
+        default=0, description="Highest event seq returned; pass as `since` next time"
+    )
+    events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MemoryEstimateRequest(BaseModel):
-    """記憶體估計請求"""
+    """Memory estimate request."""
 
-    model_name: str = Field(..., description="模型名稱或路徑")
+    model_name: str = Field(..., description="Model name or path")
     quantization: QuantizationType = Field(
         default=QuantizationType.NONE,
-        description="量化類型: none, int8, int4, nf4, fp4",
+        description="Quantization type: none, int8, int4, nf4, fp4",
     )
-    batch_size: int = Field(default=1, description="批次大小", ge=1, le=32)
-    sequence_length: int = Field(default=2048, description="序列長度", ge=512, le=32768)
+    batch_size: int = Field(default=1, description="Batch size", ge=1, le=32)
+    sequence_length: int = Field(default=2048, description="Sequence length", ge=512, le=32768)
     include_activations: bool = Field(
-        default=True, description="是否包含激活值記憶體估計"
+        default=True, description="Whether to include activation memory in the estimate"
     )
 
 
 class MemoryEstimateResponse(BaseModel):
-    """記憶體估計響應"""
+    """Memory estimate response."""
 
     model_name: str
     model_size_billions: float
     quantization: str
-    memory_breakdown_gb: Dict[str, float]
-    overhead_details_gb: Optional[Dict[str, float]] = None
-    recommendations: Dict[str, float]
-    offload_strategies: List[Dict]
-    notes: List[str]
+    memory_breakdown_gb: dict[str, float]
+    overhead_details_gb: dict[str, float] | None = None
+    recommendations: dict[str, float]
+    offload_strategies: list[dict]
+    notes: list[str]
+
+
+class KvCacheType(StrEnum):
+    """llama.cpp KV cache data types accepted by -ctk / -ctv."""
+
+    F32 = "f32"
+    F16 = "f16"
+    BF16 = "bf16"
+    Q8_0 = "q8_0"
+    Q5_1 = "q5_1"
+    Q5_0 = "q5_0"
+    Q4_1 = "q4_1"
+    Q4_0 = "q4_0"
+    IQ4_NL = "iq4_nl"
+
+
+class GgufEstimateBase(BaseModel):
+    """llama.cpp runtime settings shared by all GGUF memory estimation requests."""
+
+    model_path: str = Field(
+        default="",
+        description=(
+            "Path to the GGUF file; for a sharded model the first shard is enough. "
+            "May also be supplied as -m inside args."
+        ),
+    )
+    args: str | list[str] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("args", "llama_server_extra_args"),
+        description=(
+            "Extra llama-server arguments, taken verbatim from the frontend's "
+            'InferenceConfig.llama_server_extra_args, e.g. ["-ncmoe","24","-ctk","q8_0"]. '
+            'A single string such as "-ngl 20 -c 32768" is accepted too. Every alias is '
+            "supported (-ngl/--gpu-layers/--n-gpu-layers), as is --flag=value form and "
+            "-ot/--override-tensor. Values given here override the other fields of this "
+            "JSON body, matching how llama-server appends these arguments last."
+        ),
+    )
+    n_batch: int = Field(default=2048, description="Logical batch size (-b)", ge=1, le=1048576)
+    n_ubatch: int = Field(default=512, description="Physical batch size (-ub)", ge=1, le=1048576)
+    n_parallel: int = Field(default=1, description="Parallel sequence count (-np)", ge=1, le=256)
+    flash_attn: bool = Field(default=True, description="Whether flash attention is on (-fa)")
+    n_gpu: int = Field(default=1, description="Number of GPUs taking part in offload", ge=0, le=16)
+    tensor_split: list[float] | None = Field(
+        default=None, description="Multi-GPU split ratio (-ts); split evenly when omitted"
+    )
+
+
+class GgufEstimateRequest(GgufEstimateBase):
+    """Request for a single-point GGUF memory estimate."""
+
+    n_gpu_layers: int = Field(
+        default=-1, description="Layers to offload to the GPU (-ngl); -1 means all"
+    )
+    n_ctx: int = Field(
+        default=0,
+        description="Context length (-c); 0 uses the model's trained context length",
+        ge=0,
+    )
+    cache_type_k: KvCacheType = Field(default=KvCacheType.F16, description="K cache type (-ctk)")
+    cache_type_v: KvCacheType = Field(default=KvCacheType.F16, description="V cache type (-ctv)")
+    n_cpu_moe: int = Field(
+        default=0,
+        description="Keep the MoE expert weights of the first N layers on the CPU (-ncmoe)",
+        ge=0,
+    )
+    cpu_moe: bool = Field(
+        default=False, description="Keep MoE expert weights of every layer on the CPU (--cpu-moe)"
+    )
+    no_kv_offload: bool = Field(default=False, description="Hold the whole KV cache in host memory")
+    swa_full: bool = Field(
+        default=False, description="Use a full-size cache on sliding-window models"
+    )
+    include_per_layer: bool = Field(
+        default=True, description="Whether to return the per-layer memory table"
+    )
+    verify: bool = Field(
+        default=False,
+        description=(
+            "Also call llama-fit-params for exact figures; requires that binary and adds "
+            "roughly a second"
+        ),
+    )
+
+
+class GgufSweepRequest(GgufEstimateBase):
+    """Request for a GGUF feasibility sweep."""
+
+    n_gpu_layers_grid: list[int] | None = Field(
+        default=None, description="-ngl values to sweep; a ladder is generated when omitted"
+    )
+    n_ctx_grid: list[int] | None = Field(
+        default=None, description="Context lengths to sweep; common values are used when omitted"
+    )
+    kv_quant_grid: list[KvCacheType] | None = Field(
+        default=None, description="KV cache types to sweep; defaults to [f16, q8_0]"
+    )
+    gpu_budget_mib: float | None = Field(
+        default=None,
+        description="GPU memory budget in MiB; currently free VRAM is read when omitted",
+        ge=0,
+    )
+    host_budget_mib: float | None = Field(
+        default=None,
+        description="Host memory budget in MiB; currently free DRAM is read when omitted",
+        ge=0,
+    )
+    margin_mib: float = Field(
+        default=1024, description="Memory to leave free on each device, in MiB", ge=0
+    )
+
+
+class GgufRecommendRequest(GgufEstimateBase):
+    """Request for a recommended GGUF configuration."""
+
+    n_ctx: int = Field(
+        default=0,
+        description="Target context length; 0 uses the model's trained context length",
+        ge=0,
+    )
+    n_ctx_min: int = Field(
+        default=4096, description="Lowest context length the search may fall back to", ge=256
+    )
+    n_ctx_max: int = Field(
+        default=0,
+        description=(
+            "Highest context the search may grow to when spending leftover budget; "
+            "0 uses the model's trained context length"
+        ),
+        ge=0,
+    )
+    target_utilization: float = Field(
+        default=0.9,
+        description=(
+            "Fraction of the usable budget the result should reach. Does not constrain the "
+            "search, only whether the response reports unexplained headroom and why"
+        ),
+        ge=0.0,
+        le=1.0,
+    )
+    gpu_budget_mib: float | None = Field(
+        default=None,
+        description="GPU memory budget in MiB; currently free VRAM is read when omitted",
+        ge=0,
+    )
+    host_budget_mib: float | None = Field(
+        default=None,
+        description="Host memory budget in MiB; currently free DRAM is read when omitted",
+        ge=0,
+    )
+    margin_mib: float = Field(
+        default=1024, description="Memory to leave free on each device, in MiB", ge=0
+    )
+    allow_kv_quant: bool = Field(
+        default=True, description="Whether the KV cache may be quantized to make it fit"
+    )
+    allow_ctx_reduction: bool = Field(
+        default=True, description="Whether the context may be shortened to make it fit"
+    )
+    kv_cache_types: list[KvCacheType] | None = Field(
+        default=None,
+        description=(
+            "KV cache ladder the search walks, first fit wins; overrides allow_kv_quant. "
+            "Pass a single type to pin it"
+        ),
+    )
+    verify: bool = Field(
+        default=True,
+        description=(
+            "Cross-check the final recommendation with llama-fit-params; skipped when the "
+            "binary is absent"
+        ),
+    )
+
+
+class GgufPlanRequest(GgufEstimateBase):
+    """Request for a menu of GGUF configurations across GPU budgets and KV cache types."""
+
+    gpu_budgets_mib: list[float] | None = Field(
+        default=None,
+        description=(
+            "GPU budgets in MiB to solve for, one plan each; currently free VRAM is used "
+            "when omitted"
+        ),
+    )
+    kv_cache_types: list[KvCacheType] | None = Field(
+        default=None,
+        description="KV cache types to offer per budget; defaults to [f16, q8_0, q4_0]",
+    )
+    n_ctx: int = Field(
+        default=0,
+        description="Pin the context length; 0 lets each candidate grow into its budget",
+        ge=0,
+    )
+    n_ctx_min: int = Field(
+        default=4096, description="Lowest context length a candidate may fall back to", ge=256
+    )
+    n_ctx_max: int = Field(
+        default=0,
+        description=(
+            "Highest context a candidate may grow to; 0 uses the model's trained context length"
+        ),
+        ge=0,
+    )
+    host_budget_mib: float | None = Field(
+        default=None,
+        description="Host memory budget in MiB; currently free DRAM is read when omitted",
+        ge=0,
+    )
+    margin_mib: float = Field(
+        default=1024, description="Memory to leave free on each device, in MiB", ge=0
+    )
+    target_utilization: float = Field(
+        default=0.9,
+        description="Fraction of each budget a candidate should reach before it is called full",
+        ge=0.0,
+        le=1.0,
+    )
+    verify: bool = Field(
+        default=True,
+        description=(
+            "Cross-check every candidate with llama-fit-params; skipped when the binary is "
+            "absent. Costs roughly a second per candidate"
+        ),
+    )
+
+
+class GgufEstimateResponse(BaseModel):
+    """Response for a single-point GGUF memory estimate."""
+
+    source: str
+    model_path: str
+    settings: dict[str, Any]
+    model_info: dict[str, Any]
+    memory_breakdown_mib: dict[str, Any]
+    placement: dict[str, Any]
+    per_layer_mib: list[dict[str, Any]] | None = None
+    parsed_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Parsed args: the settings applied, the flags skipped, and any warnings",
+    )
+    verification: dict[str, Any] | None = None
+    notes: list[str]
+
+
+class GgufSweepResponse(BaseModel):
+    """Response for a GGUF feasibility sweep."""
+
+    source: str
+    model_path: str
+    model_info: dict[str, Any]
+    grid: dict[str, Any]
+    budgets_mib: dict[str, Any]
+    margin_mib: float
+    rows: list[dict[str, Any]]
+    truncated: bool
+    parsed_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Parsed args: the settings applied, the flags skipped, and any warnings",
+    )
+
+
+class GgufConfigCheckResponse(BaseModel):
+    """Response for a GGUF pre-flight check: does this llama-server configuration fit."""
+
+    fits: bool = Field(
+        ..., description="Whether the configuration fits current VRAM, margin included"
+    )
+    verdict: str = Field(..., description="One of ok / gpu_short / host_short / unknown_budget")
+    summary: str = Field(..., description="One-line conclusion, ready to show in the frontend")
+    model_path: str
+    resolved_settings: dict[str, Any] = Field(
+        ...,
+        description=(
+            "The llama.cpp settings actually in effect, derived from the config plus "
+            "llama_server_extra_args"
+        ),
+    )
+    parsed_args: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Parsed llama_server_extra_args: the settings applied, the flags skipped, and "
+            "any warnings"
+        ),
+    )
+    model_info: dict[str, Any]
+    budgets_mib: dict[str, Any]
+    memory_breakdown_mib: dict[str, Any]
+    placement: dict[str, Any]
+    per_layer_mib: list[dict[str, Any]] | None = None
+    suggestion: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "A workable configuration and llama-server argument string, returned when the "
+            "requested one does not fit"
+        ),
+    )
+    verification: dict[str, Any] | None = None
+    notes: list[str]
+
+
+class GgufRecommendResponse(BaseModel):
+    """Response for a recommended GGUF configuration."""
+
+    source: str
+    model_path: str
+    model_info: dict[str, Any]
+    budgets_mib: dict[str, Any]
+    margin_mib: float
+    recommended: dict[str, Any]
+    utilization: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "How fully the budget is used: usable_budget_mib, allocated_mib, headroom_mib, "
+            "utilization_pct, within_budget, and the correction applied after verification"
+        ),
+    )
+    memory_breakdown_mib: dict[str, Any]
+    placement: dict[str, Any]
+    host_fits: bool
+    llama_server_args: str
+    parsed_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Parsed args: the settings applied, the flags skipped, and any warnings",
+    )
+    verification: dict[str, Any] | None = None
+    notes: list[str]
+
+
+class GgufPlanResponse(BaseModel):
+    """Response holding one plan per GPU budget, each with several candidate settings."""
+
+    source: str
+    model_path: str
+    model_info: dict[str, Any]
+    margin_mib: float
+    host_budget_mib: float | None = None
+    kv_cache_types: list[str]
+    verified: bool = Field(
+        default=False, description="Whether the figures were confirmed with llama-fit-params"
+    )
+    plans: list[dict[str, Any]] = Field(
+        description=(
+            "One entry per GPU budget: usable_budget_mib, the ranked candidates (best "
+            "offload first, then longest context), and the recommended argument string"
+        )
+    )
+    parsed_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Parsed args: the settings applied, the flags skipped, and any warnings",
+    )
+    notes: list[str]
 
 
 # ==================== System Resource Models ====================
 
 
 class MemoryModule(BaseModel):
-    """記憶體模組資訊"""
+    """Memory module info."""
 
-    size: Optional[str] = None
-    type: Optional[str] = None
-    speed_mhz: Optional[int] = None
-    manufacturer: Optional[str] = None
+    size: str | None = None
+    type: str | None = None
+    speed_mhz: int | None = None
+    manufacturer: str | None = None
 
 
 class MemoryInfo(BaseModel):
-    """記憶體完整資訊 (整合 Spec 與 Usage)"""
+    """Full memory info (spec and usage combined)."""
 
     # Spec
-    total_gb: Optional[float] = None
-    type: Optional[str] = None
-    speed_mhz: Optional[int] = None
-    modules: List[MemoryModule] = Field(default_factory=list)
+    total_gb: float | None = None
+    type: str | None = None
+    speed_mhz: int | None = None
+    modules: list[MemoryModule] = Field(default_factory=list)
     # Usage
-    used_gb: Optional[float] = None  # System DRAM used
-    cached_gb: Optional[float] = None  # OS Cache / Buffers (often contains mmap models)
-    other_used_gb: Optional[float] = None  # Reserved for breakdown / compatibility
-    free_gb: Optional[float] = None
-    percent: Optional[float] = None  # System DRAM used percent
-    system_used_gb: Optional[float] = None  # Total system used
+    used_gb: float | None = None  # System DRAM used
+    cached_gb: float | None = None  # OS Cache / Buffers (often contains mmap models)
+    other_used_gb: float | None = None  # Reserved for breakdown / compatibility
+    free_gb: float | None = None
+    percent: float | None = None  # System DRAM used percent
+    system_used_gb: float | None = None  # Total system used
 
-    note: Optional[str] = None
+    note: str | None = None
 
 
 class CPUInfo(BaseModel):
-    """CPU 整合資訊"""
+    """Combined CPU info."""
 
     # Spec
-    model: Optional[str] = None
-    cores: Optional[int] = None
-    threads: Optional[int] = None
-    architecture: Optional[str] = None
-    max_frequency_mhz: Optional[float] = None
+    model: str | None = None
+    cores: int | None = None
+    threads: int | None = None
+    architecture: str | None = None
+    max_frequency_mhz: float | None = None
 
     # Usage
-    cpu_util_percent: Optional[float] = None
+    cpu_util_percent: float | None = None
 
     # Sub-resources
-    dram: Optional[MemoryInfo] = None
+    dram: MemoryInfo | None = None
 
 
 class GPUInfo(BaseModel):
-    """GPU 資訊 (整合 Spec 與 Usage)"""
+    """GPU info (spec and usage combined)."""
 
     index: int
     name: str
     total_gb: float
-    used_gb: Optional[float] = None
-    free_gb: Optional[float] = None
-    percent: Optional[float] = None
-    gpu_util: Optional[float] = None  # GPU Compute Usage %
-    temperature: Optional[float] = None
+    used_gb: float | None = None
+    free_gb: float | None = None
+    percent: float | None = None
+    gpu_util: float | None = None  # GPU Compute Usage %
+    temperature: float | None = None
 
 
 class DiskDevice(BaseModel):
-    """實體磁碟裝置 (lsblk)"""
+    """Physical disk device (lsblk)."""
 
     name: str
-    size: Optional[str] = None
-    model: Optional[str] = None
-    type: Optional[str] = None
+    size: str | None = None
+    model: str | None = None
+    type: str | None = None
 
 
 class DiskMount(BaseModel):
-    """邏輯掛載點 (df)"""
+    """Logical mount point (df)."""
 
     path: str
-    total_gb: Optional[float] = None
-    used_gb: Optional[float] = None
-    free_gb: Optional[float] = None
-    percent: Optional[float] = None
-    fstype: Optional[str] = None
-    folder_size_gb: Optional[float] = None
-    read_speed_mbps: Optional[float] = None
-    write_speed_mbps: Optional[float] = None
-    error: Optional[str] = None
+    total_gb: float | None = None
+    used_gb: float | None = None
+    free_gb: float | None = None
+    percent: float | None = None
+    fstype: str | None = None
+    folder_size_gb: float | None = None
+    read_speed_mbps: float | None = None
+    write_speed_mbps: float | None = None
+    error: str | None = None
 
 
 class GPUResource(BaseModel):
-    """GPU 資源整合模型"""
+    """Combined GPU resource model."""
 
     available: bool
-    gpus: List[GPUInfo]
+    gpus: list[GPUInfo]
 
 
 class DiskResource(BaseModel):
-    """磁碟資源整合模型"""
+    """Combined disk resource model."""
 
-    devices: Optional[List[DiskDevice]] = None
-    mounts: List[DiskMount]
-    main: Optional[DiskMount] = None
+    devices: list[DiskDevice] | None = None
+    mounts: list[DiskMount]
+    main: DiskMount | None = None
 
 
 class SystemResourcesResponse(BaseModel):
-    """系統資源 API 回應"""
+    """System resources API response."""
 
     mode: str  # "spec" or "usage"
     timestamp: str
@@ -912,19 +1429,19 @@ class SystemResourcesResponse(BaseModel):
 
 
 class ModelConversionRequest(BaseModel):
-    """模型轉換請求"""
+    """Model conversion request."""
 
-    model_path: str = Field(..., description="HF模型路徑或ID")
-    output_path: Optional[str] = Field(
-        default=None, description="輸出GGUF檔案路徑，預設與model_path同目錄"
+    model_path: str = Field(..., description="HF model path or ID")
+    output_path: str | None = Field(
+        default=None, description="Output GGUF file path; defaults to the model_path directory"
     )
     outtype: str = Field(
-        default="f16", description="輸出類型，直接傳給 llama.cpp 轉換腳本"
+        default="f16", description="Output type, passed straight to the llama.cpp convert script"
     )
 
 
 class ConversionResponse(BaseModel):
-    """轉換回應"""
+    """Conversion response."""
 
     job_id: str
     status: str

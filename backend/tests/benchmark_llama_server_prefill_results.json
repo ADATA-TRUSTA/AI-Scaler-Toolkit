@@ -10,7 +10,7 @@
     {
       "model": {
         "model_name": "unsloth/gpt-oss-120b-GGUF",
-        "model_path": "/media/test/eee156b9-166c-48ab-a252-ee619815c845/home/trusta/.cache/huggingface/hub/models--unsloth--gpt-oss-120b-GGUF/snapshots/ff1a82da6ad466e32284fa3d2b86694db3204789/gpt-oss-120b-F16.gguf",
+        "model_path": "gpt-oss-120b-F16.gguf",
         "label": "GPT-OSS 120B F16 (Local)",
         "variant_label": "GPT-OSS 120B F16 (Local) | ngl=-1",
         "size": "75GB",
@@ -158,7 +158,7 @@
     {
       "model": {
         "model_name": "unsloth/Qwen3.5-35B-GGUF",
-        "model_path": "/media/test/eee156b9-166c-48ab-a252-ee619815c845/home/trusta/.cache/huggingface/hub/Qwen3.5-35B-A3B-Q4_K/Qwen3.5-35B-A3B-Q4_K_M.gguf",
+        "model_path": "Qwen3.5-35B-A3B-Q4_K_M.gguf",
         "label": "Qwen3.5-35B-A3B-Q4_K_M-GGUF",
         "variant_label": "Qwen3.5-35B-A3B-Q4_K_M-GGUF | ngl=-1",
         "size": "16.7GB",

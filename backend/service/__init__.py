@@ -1,6 +1,8 @@
 """
-Service package for LLM inference and training
+Service package for LLM inference and training.
 """
+
+from typing import Any
 
 # NOTE:
 # Do NOT import `service.app` at package import time.
@@ -11,7 +13,7 @@ Service package for LLM inference and training
 __all__ = []
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:  # noqa: ANN401 - returns heterogeneous lazily-imported objects
     """Lazy exports for optional convenience imports."""
     if name == "app":
         from .app import app as _app

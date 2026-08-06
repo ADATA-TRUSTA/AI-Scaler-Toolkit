@@ -266,23 +266,46 @@
 
             <div class="mermaid">
             graph TD
-                Client[Client / Frontend] -- HTTP/OpenAI API --> API[FastAPI Server (service/app.py)]
+                Client["Client / Frontend"] -- "HTTP / OpenAI API" --> API["FastAPI Server<br/>service/app.py"]
+                API --> MM["ModelManager<br/>(singleton, main process)"]
+                MM --> SM["SessionManager"]
+                SM --> Redis[("Redis / Memory")]
+                MM --> MR["ModelRegistry"]
+                MR --> Registry[("models_registry.json")]
+                MM == "Queue IPC: load / unload" ==> MIP["ModelInferenceProcess<br/>(isolated worker)"]
+                MIP --> Engine{"Engine<br/>Selector"}
+                Engine -- transformers --> TF["HF Transformers model<br/>held in the worker"]
+                Engine -- vllm --> VLLM["vLLM server<br/>subprocess"]
+                Engine -- llama_server --> LLAMA["llama-server<br/>subprocess"]
+            </div>
 
-                subgraph MainProcess [Main Process]
-                    API -- calls --> MM[ModelManager (Singleton)]
-                    SM[SessionManager] -- loads/saves --> Redis[(Redis/Memory)]
-                    MR[ModelRegistry] -- reads/writes --> Registry[(models_registry.json)]
-                end
+            <p><strong>Loading</strong> is uniform: every engine is loaded by the isolated worker,
+            which is what makes an OOM recoverable by killing and restarting that process.
+            <strong>Generation</strong> is not — it takes one of two paths depending on the engine:</p>
 
-                subgraph WorkerProcess [Isolated Worker Process]
-                    MM -- Queue IPC --> MIP[ModelInferenceProcess]
-                    MIP -- uses --> Engine{Engine Selector}
-                    Engine -- Transformers --> TF[HF Transformer Model]
-                    Engine -- vLLM --> VLLM[vLLM Server subprocess]
-                    Engine -- llama_server --> LLAMA[llama-server subprocess]
-                end
+            <div class="mermaid">
+            graph LR
+                REQ["POST /v1/chat/completions"] --> SW{"uses_async_http()"}
+                SW -- "false — transformers" --> GS["ModelManager<br/>.generate_stream()"]
+                GS --> Q["IPC data queue"]
+                Q --> TFG["worker: model.generate()<br/>+ TextIteratorStreamer"]
+                SW -- "true — vllm / llama_server" --> AGS["ModelManager<br/>.agenerate_stream()"]
+                AGS --> ASC["AsyncServerClient"]
+                ASC --> HTTP["engine's own OpenAI-compatible<br/>HTTP endpoint"]
+                TFG --> SSE["SSE: OpenAI chunks<br/>back to the client"]
+                HTTP --> SSE
+            </div>
 
-                API -- reads status --> MM
+            <div class="warning">
+                <strong>Two generation paths.</strong> The worker process loads the model for
+                <em>all three</em> engines, but only <code>transformers</code> also generates
+                there, streaming tokens back over the IPC data queue. For <code>vllm</code> and
+                <code>llama_server</code> the worker only starts the server subprocess; generation
+                is then driven from the main process by <code>AsyncServerClient</code> over the
+                engine's own OpenAI-compatible HTTP endpoint, bypassing the queue entirely.
+                <code>ModelManager.uses_async_http()</code> is what selects between the two, and
+                the base engine's <code>generate()</code> now raises if a server engine is ever
+                routed through the worker.
             </div>
         </section>
 
@@ -500,26 +523,46 @@ payload = {
                     </tr>
                     <tr>
                         <td><code>service/model_manager.py</code></td>
-                        <td><strong>Mediator</strong>. A singleton that coordinates communication between the API layer and the Worker Process. Provides methods such as <code>start_loading</code>, <code>generate_stream</code>, <code>generate</code>, and <code>stop_generation</code>.</td>
+                        <td><strong>Mediator</strong>. A singleton that coordinates the API layer with the Worker Process. Provides <code>start_loading</code> and <code>stop_generation</code>, the worker-backed <code>generate</code> / <code>generate_stream</code>, and the HTTP-backed <code>agenerate</code> / <code>agenerate_stream</code>. <code>uses_async_http()</code> decides which pair applies to the loaded engine.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/inference/async_server_client.py</code></td>
+                        <td><strong>Server-engine client</strong>. <code>AsyncServerClient</code> talks to the vLLM / llama-server OpenAI-compatible endpoint from the <em>main</em> process. This is the generation path for both server engines — it does not go through the worker or the IPC queue.</td>
                     </tr>
                     <tr>
                         <td><code>service/inference/model_inference_process.py</code></td>
-                        <td><strong>Process controller</strong>. Manages the <code>multiprocessing.Process</code>, controlling the Worker lifecycle and IPC Queue communication.</td>
+                        <td><strong>Process controller</strong>. Manages the <code>multiprocessing.Process</code>, controlling the Worker lifecycle and IPC Queue communication. The worker loads every engine, but only serves generation for in-process ones (transformers).</td>
                     </tr>
                     <tr>
                         <td><code>service/inference/engines/</code></td>
                         <td><strong>Engine implementations</strong>.
                             <ul>
-                                <li><code>base_engine.py</code>: Abstract base class</li>
+                                <li><code>base_engine.py</code>: Abstract base class. Its <code>generate</code> / <code>generate_stream</code> now signal an error — reaching them means a server engine was misrouted through the worker.</li>
                                 <li><code>transformers_engine.py</code>: HF Transformers engine</li>
-                                <li><code>vllm_engine.py</code>: vLLM engine (subprocess management)</li>
-                                <li><code>llama_server_engine.py</code>: llama-server engine</li>
+                                <li><code>vllm_engine.py</code>: vLLM engine (subprocess management; no <code>generate()</code>)</li>
+                                <li><code>llama_server_engine.py</code>: llama-server engine (subprocess management; no <code>generate()</code>)</li>
+                                <li><code>vllm_error_classifier.py</code>: maps vLLM startup / runtime failures to actionable messages</li>
                             </ul>
                         </td>
                     </tr>
                     <tr>
-                        <td><code>service/inference/generate/generator_worker.py</code></td>
-                        <td><strong>Generation logic</strong>. Contains <code>handle_generate_request</code> and <code>handle_generate_stream_request</code>, which call <code>model.generate()</code> and handle the Streamer output.</td>
+                        <td><code>service/inference/generate/</code></td>
+                        <td><strong>In-worker generation logic</strong>.
+                            <ul>
+                                <li><code>generator_worker.py</code>: <code>handle_generate_request</code> / <code>handle_generate_stream_request</code>, calling <code>model.generate()</code> and handling Streamer output</li>
+                                <li><code>generator_core.py</code>: shared sampling / decoding helpers</li>
+                                <li><code>gpt_parser.py</code>: GPT-OSS / harmony output parsing</li>
+                                <li><code>llama_server_runner.py</code>: llama-server process launch and argument assembly</li>
+                            </ul>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><code>service/inference/gguf_estimator.py</code><br><code>service/inference/gguf_inspect.py</code></td>
+                        <td><strong>GGUF sizing</strong>. Reads GGUF metadata and estimates VRAM/host split, backing the <code>/inference/estimate_memory/gguf*</code> endpoints. See <code>docs/gguf_memory_estimation.md</code>.</td>
+                    </tr>
+                    <tr>
+                        <td><code>service/utils/openai_request_parser.py</code><br><code>service/utils/image_input_utils.py</code></td>
+                        <td><strong>Request normalisation</strong>. Parses OpenAI-compatible payloads and decodes image inputs for multimodal requests.</td>
                     </tr>
                     <tr>
                         <td><code>service/inference/load_model/peft_loader.py</code></td>
@@ -586,13 +629,21 @@ payload = {
                 <li><code>app.py</code> performs prompt assembly:
                     <ul>
                         <li>If a <code>session_id</code> is present, it retrieves the history via <code>session_manager</code> (up to 6 messages, roughly 3 turns of conversation).</li>
-                        <li>It parses <code>enable_thinking</code> and applies model-aware generation parameters (for example, Qwen3.5 automatically adjusts temperature/top_p/repetition_penalty).</li>
+                        <li>It parses <code>enable_thinking</code> and applies model-aware generation parameters (for example, Qwen3.5 automatically adjusts temperature/top_p/top_k/repetition_penalty).</li>
                     </ul>
                 </li>
                 <li>If the request contains <code>tools</code> or <code>tool_calls</code>, it takes the tool passthrough path (bypassing session management and passing through directly).</li>
-                <li><code>app.py</code> calls <code>model_manager.generate_stream()</code> to obtain an iterator.</li>
-                <li>The <strong>Worker Process</strong> runs the generation, using <code>TextIteratorStreamer</code> to push tokens one by one onto the <strong>Data Queue</strong>.</li>
-                <li>Through SSE, <code>app.py</code> wraps the Data Queue content into the OpenAI chunk format in real time and returns it to the frontend.</li>
+                <li><code>app.py</code> branches on <code>model_manager.uses_async_http()</code>:
+                    <ul>
+                        <li><strong>transformers</strong> — calls <code>model_manager.generate_stream()</code>. The
+                            <strong>Worker Process</strong> runs the generation, using <code>TextIteratorStreamer</code>
+                            to push tokens one by one onto the <strong>Data Queue</strong>.</li>
+                        <li><strong>vllm / llama_server</strong> — calls <code>model_manager.agenerate_stream()</code>, which
+                            streams straight from the engine's OpenAI-compatible HTTP endpoint via
+                            <code>AsyncServerClient</code>. No worker involvement and no data queue.</li>
+                    </ul>
+                </li>
+                <li>Through SSE, <code>app.py</code> wraps whichever stream it got into the OpenAI chunk format in real time and returns it to the frontend.</li>
                 <li>After generation completes, <code>app.py</code> appends this turn's user/assistant exchange to <code>session_manager</code>.</li>
             </ol>
 
@@ -604,9 +655,12 @@ payload = {
                     <li><code>top_p</code> is forced to <code>0.95</code></li>
                     <li><code>top_k</code> is forced to <code>20</code></li>
                     <li><code>repetition_penalty</code> is forced to <code>1.0</code></li>
-                    <li><code>enable_thinking</code> is forced to <code>false</code></li>
                 </ul>
                 This is done to prevent the Qwen3.5 MoE architecture from producing multilingual garbled output under non-official parameters.
+                <p><code>enable_thinking</code> behaves differently: it is <strong>defaulted</strong> to
+                <code>false</code>, not forced. An explicit <code>"enable_thinking": true</code> in the
+                request is honoured — <code>_resolve_enable_thinking()</code> only applies the default
+                when the field is absent from the request.</p>
             </div>
         </section>
 
@@ -757,7 +811,7 @@ payload = {
                 <ul>
                     <li>Confirm that <code>trust_remote_code: true</code> is enabled.</li>
                     <li>Check whether the model requires a special chat template (in vLLM you can specify a custom .jinja file via <code>vllm_chat_template</code>).</li>
-                    <li>For Qwen3.5, the system already disables thinking mode automatically; if you still have issues, confirm that the API request does not forcibly set <code>enable_thinking: true</code>.</li>
+                    <li>For Qwen3.5, thinking mode is off by default, but an explicit <code>enable_thinking: true</code> in the request wins — check that the caller is not setting it.</li>
                 </ul>
             </div>
 

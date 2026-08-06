@@ -1,17 +1,19 @@
-"""集中分類 vLLM stderr 輸出，產生結構化的錯誤摘要。
+"""
+Central classifier for vLLM stderr output, producing structured error reports.
 
-過去 `vllm_engine._get_error_reason` 直接在 stderr 裡 grep 關鍵字，難以擴充
-也難以在外層判斷錯誤類別。本模組把比對規則集中於此，供 `VllmEngine` 與其他
-需要解讀 vLLM 輸出的呼叫端共用。
+`vllm_engine._get_error_reason` used to grep stderr for keywords inline, which
+was hard to extend and gave callers no way to reason about the error category.
+This module keeps the matching rules in one place, shared by `VllmEngine` and
+any other caller that needs to interpret vLLM output.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Tuple
 
-
-# 錯誤類別常數（字串而非 Enum，方便序列化進 status_queue / data_queue）
+# Error category constants (plain strings rather than Enum, so they serialize
+# easily into status_queue / data_queue)
 ERROR_OOM = "oom"
 ERROR_PORT_BUSY = "port_busy"
 ERROR_MODEL_NOT_FOUND = "model_not_found"
@@ -22,17 +24,17 @@ ERROR_QUANTIZATION = "quantization"
 ERROR_UNKNOWN = "unknown"
 
 
-# 比對規則：(類別, 關鍵字 tuple)；任一關鍵字命中即歸入該類別。
-# 比對採 lower-case 包含；保持規則精簡，避免誤判。
-_RULES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+# Matching rules: (category, keyword tuple); any keyword hit assigns that category.
+# Matching is lower-case substring containment; keep rules tight to avoid false positives.
+_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         ERROR_OOM,
         (
             "out of memory",
             "cuda out of memory",
             "no available memory",
-            "kv cache",  # vLLM 在 KV cache 配置失敗時常出現
-            # vLLM v1 sampler warm-up OOM：訊息中含
+            "kv cache",  # common when vLLM fails to allocate the KV cache
+            # vLLM v1 sampler warm-up OOM: message contains
             # `Please try lowering max_num_seqs or gpu_memory_utilization ...`
             "warming up sampler",
             "max_num_seqs",
@@ -99,8 +101,8 @@ _RULES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 )
 
 
-# 用來判斷一行是否「重要」的通用關鍵字；命中任一就視為重要訊號。
-_IMPORTANT_KEYWORDS: Tuple[str, ...] = (
+# Generic keywords marking a line as "important"; any hit counts as a signal.
+_IMPORTANT_KEYWORDS: tuple[str, ...] = (
     "error",
     "failed",
     "exception",
@@ -113,22 +115,23 @@ _IMPORTANT_KEYWORDS: Tuple[str, ...] = (
 
 @dataclass
 class VllmErrorReport:
-    """vLLM 子程序錯誤報告。
+    """
+    Error report for the vLLM subprocess.
 
     Attributes:
-        category: 錯誤類別常數，未匹配時為 ``ERROR_UNKNOWN``。
-        summary: 人類可讀摘要（用於 log / API response）。
-        important_lines: 從 stderr 萃取的關鍵行，最多保留 ``max_important`` 行。
-        tail_lines: stderr 最後 N 行原樣保留，作為 fallback 上下文。
+        category: Error category constant; ``ERROR_UNKNOWN`` when nothing matched.
+        summary: Human-readable summary (for logs / API responses).
+        important_lines: Key lines extracted from stderr, at most ``max_important``.
+        tail_lines: Last N stderr lines kept verbatim as fallback context.
     """
 
     category: str = ERROR_UNKNOWN
     summary: str = ""
-    important_lines: List[str] = field(default_factory=list)
-    tail_lines: List[str] = field(default_factory=list)
+    important_lines: list[str] = field(default_factory=list)
+    tail_lines: list[str] = field(default_factory=list)
 
     def to_text(self) -> str:
-        """產生供 RuntimeError 使用的文字摘要。"""
+        """Build the text summary used for RuntimeError messages."""
         if self.important_lines:
             return "\n".join(self.important_lines)
         if self.tail_lines:
@@ -142,17 +145,18 @@ def classify_stderr(
     max_important: int = 8,
     max_tail: int = 25,
 ) -> VllmErrorReport:
-    """掃描 stderr 行列，產生結構化錯誤報告。
+    """
+    Scan stderr lines and produce a structured error report.
 
     Args:
-        lines: stderr 行序列（原樣字串，可含換行；不需事先 lower-case）。
-        max_important: ``important_lines`` 最多保留行數，取尾端優先。
-        max_tail: 找不到任何重要關鍵字時，``tail_lines`` 保留尾端 N 行。
+        lines: stderr line sequence (raw strings, newlines allowed; no need to lower-case).
+        max_important: Max lines kept in ``important_lines``, preferring the tail.
+        max_tail: When no important keyword matched, keep the last N lines in ``tail_lines``.
 
     Returns:
-        :class:`VllmErrorReport` — 至少 ``category`` 與 ``summary`` 有值。
+        :class:`VllmErrorReport` — ``category`` and ``summary`` are always set.
     """
-    materialised: List[str] = []
+    materialised: list[str] = []
     for raw in lines:
         if raw is None:
             continue
@@ -166,8 +170,8 @@ def classify_stderr(
             summary="No recent vLLM stderr logs found.",
         )
 
-    important: List[str] = []
-    matched_category: Optional[str] = None
+    important: list[str] = []
+    matched_category: str | None = None
 
     for line in materialised:
         low = line.lower()
@@ -194,8 +198,8 @@ def classify_stderr(
     )
 
 
-# 摘要優先抓「使用者可採取行動」的 hint 行（vLLM / PyTorch 常見字眼）
-_HINT_KEYWORDS: Tuple[str, ...] = (
+# Summaries prefer actionable hint lines (common vLLM / PyTorch phrasings)
+_HINT_KEYWORDS: tuple[str, ...] = (
     "please try lowering",
     "please try reducing",
     "please reduce",
@@ -212,14 +216,12 @@ _HINT_KEYWORDS: Tuple[str, ...] = (
 )
 
 
-
-
-def _pick_summary_line(important_tail: List[str], tail: List[str]) -> Optional[str]:
-    """從候選行中挑最有資訊量的一行：優先含 hint 的，其次是最後一行。"""
+def _pick_summary_line(important_tail: list[str], tail: list[str]) -> str | None:
+    """Pick the most informative candidate line: a hint line first, else the last one."""
     pool = important_tail or tail
     if not pool:
         return None
-    # 從尾端往前找含 hint 字眼的行（通常是 vLLM 給的可採取建議）
+    # Scan backwards for a line containing a hint phrase (usually vLLM's own advice)
     for line in reversed(pool):
         low = line.lower()
         if any(k in low for k in _HINT_KEYWORDS):
@@ -227,10 +229,8 @@ def _pick_summary_line(important_tail: List[str], tail: List[str]) -> Optional[s
     return pool[-1]
 
 
-def _build_summary(
-    category: str, important_tail: List[str], tail: List[str]
-) -> str:
-    """組出人類可讀的單行摘要，供 logger / status_queue 使用。"""
+def _build_summary(category: str, important_tail: list[str], tail: list[str]) -> str:
+    """Build a human-readable one-line summary for logger / status_queue."""
     label = {
         ERROR_OOM: "GPU/CPU memory exhausted",
         ERROR_PORT_BUSY: "vLLM port already bound",

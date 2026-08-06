@@ -273,28 +273,33 @@
 
             <div class="mermaid">
             graph TD
-                Client[Client / Frontend] -- HTTP API --> API[FastAPI Server (service/app.py)]
+                Client["Client / Frontend"] -- "HTTP API" --> API["FastAPI Server<br/>service/app.py"]
+                API --> TM["TrainingManager<br/>(單例，主行程)"]
+                TM --> TPM["TrainingProcessManager"]
+                TPM == "Queue IPC" ==> Worker["_training_worker_process<br/>(隔離 worker)"]
 
-                subgraph MainProcess [Main Process]
-                    API -- calls --> TM[TrainingManager (Singleton)]
-                    TM -- delegates --> TPM[TrainingProcessManager]
-                    TPM -- stores --> Redis[(Redis / Memory)]
-                    MR[ModelRegistry] -- registers finetuned model --> Registry[(models_registry.json)]
-                end
+                Worker -- "1. 策略" --> Strategy["StrategyFactory<br/>lora / qlora / full"]
+                Worker -- "2. 載入" --> Tokenizer["AutoTokenizer / Processor"]
+                Worker -- "2. 載入" --> Dataset["Dataset<br/>.json / .jsonl / HF hub id"]
+                Worker -- "3. 載入" --> Model["model_class_resolver<br/>+ PEFT"]
+                Worker -- "4. 訓練" --> Trainer["SFTTrainer / CustomTrainer"]
+                Trainer -- "5. 儲存" --> OutputDir["output_dir/"]
+                OutputDir -- "6. 轉換" --> GGUF["GGUF Q4_K_M<br/>多模態另附 mmproj"]
+                OutputDir -- "7. 註冊" --> MR["ModelRegistry"]
+                MR --> Registry[("models_registry.json")]
 
-                subgraph WorkerProcess [Isolated Training Worker Process]
-                    TPM -- Queue IPC --> Worker[_training_worker_process]
-                    Worker -- 1. Strategy --> Strategy[StrategyFactory]
-                    Worker -- 2. Load --> Tokenizer[AutoTokenizer]
-                    Worker -- 2. Load --> Dataset[Dataset JSONL]
-                    Worker -- 3. Load --> Model[AutoModelForCausalLM + PEFT]
-                    Worker -- 4. Train --> Trainer[SFTTrainer / CustomTrainer]
-                    Trainer -- 5. Save --> OutputDir[output_dir/]
-                    OutputDir -- 6. Convert --> GGUF[GGUF Q4_K_M file]
-                    OutputDir -- 7. Register --> MR
-                end
+                Worker -- "num_gpus &gt; 1" --> DS["deepspeed --num_gpus=N<br/>training_script.py"]
 
-                Worker -- progress / status --> TPM
+                Worker == "結構化事件" ==> JL["JobLogWriter"]
+                JL --> EV[("LOG_DIR/training/JOB_ID/<br/>events.jsonl · training.log · meta.json")]
+                JL --> Redis[("Redis / Memory")]
+                JL --> SSE["GET /training/JOB_ID/log<br/>與 /log/stream"]
+            </div>
+
+            <div class="note">
+                進度<strong>並非</strong>只靠 status queue 回傳。每個 stage、metric、資源取樣與錯誤都由
+                <code>JobLogWriter</code> 寫入 <code>events.jsonl</code>（持久化紀錄）與 Redis，並透過
+                <code>/training/{job_id}/log</code> 及其 SSE 串流對外提供。
             </div>
 
             <div class="note">
@@ -400,7 +405,7 @@
                     <code>POST /training/start</code>
                     <p><strong>行為:</strong> 同步驗證 + 非同步訓練。</p>
                     <p>傳入完整 <code>TrainingConfig</code>，驗證通過後立即返回 <code>session_id</code>。實際訓練在 Worker Process 背景執行。</p>
-                    <p><strong>注意：</strong> 若 <code>output_dir</code> 已存在檔案，API 返回錯誤（需手動清空）。</p>
+                    <p><strong>注意：</strong> <code>output_dir</code> 非空會被拒絕，但屬於<em>非同步</em>行為。<code>POST /training/start</code> 一律回傳 200 與 <code>session_id</code>；檢查在 worker 內執行，失敗會透過 <code>/training/status</code> 與 job log 浮現。</p>
                 </div>
 
                 <div class="card">
@@ -427,7 +432,7 @@
                 <div class="card">
                     <h3>5. 系統資源歷史</h3>
                     <code>GET /system/resource/{session_id}/history</code>
-                    <p>返回訓練期間的 CPU / GPU / Disk 使用量歷史紀錄，每個 <code>logging_steps</code> 採樣一次。</p>
+                    <p>返回訓練期間的 CPU / GPU / Disk 使用量歷史紀錄。資源取樣是背景計時器，不是依步數觸發：每 <code>TRAINING_MEM_SAMPLE_INTERVAL</code> 秒取樣一次（預設 <code>5.0</code>），且在模型載入前就已開始。只有 trainer 指標（loss / lr / epoch）才依 <code>logging_steps</code>。</p>
                 </div>
 
                 <div class="card">
@@ -541,7 +546,7 @@ for log in history["logs"]:
                     </tr>
                     <tr>
                         <td><code>service/training/core/dataset_loader.py</code></td>
-                        <td><strong>資料集加載</strong>。讀取 JSON 或 JSONL 格式資料，轉換為 HuggingFace <code>Dataset</code> 物件。</td>
+                        <td><strong>資料集加載</strong>。讀取本機 JSON / JSONL 檔案或 HuggingFace Hub dataset，轉換為 HuggingFace <code>Dataset</code> 物件，並負責 eval 切分與圖片路徑解析。</td>
                     </tr>
                     <tr>
                         <td><code>service/training/core/model_saver.py</code></td>
@@ -553,9 +558,10 @@ for log in history["logs"]:
                     </tr>
                     <tr>
                         <td><code>service/configs/deepspeed/</code></td>
-                        <td><strong>DeepSpeed 配置模板</strong>。提供四種預設 ZeRO-3 Offload 組合：
+                        <td><strong>DeepSpeed 配置模板</strong>。提供五種預設 ZeRO-3 Offload 組合：
                             <ul>
                                 <li><code>zero3_offload_cpu_cpu.json</code>: Optimizer & Param 均 Offload 到 CPU</li>
+                                <li><code>zero3_offload_cpu_cpu_tight.json</code>: 裝置相同，但設定較精簡，適合資源吃緊的主機</li>
                                 <li><code>zero3_offload_cpu_disk.json</code>: Optimizer→CPU, Param→Disk</li>
                                 <li><code>zero3_offload_disk_cpu.json</code>: Optimizer→Disk, Param→CPU</li>
                                 <li><code>zero3_offload_disk_disk.json</code>: 均 Offload 到 Disk (NVMe)</li>
@@ -614,7 +620,7 @@ for log in history["logs"]:
                     <code>strategy.prepare_trainer(model, tokenizer, dataset, training_args)</code>。
                     <ul>
                         <li>SFTStrategy：建立 <code>CustomSFTTrainer</code>，自動處理 prompt+completion loss masking（<code>completion_only_loss=True</code>）。</li>
-                        <li>CausalLMStrategy：建立 <code>CustomTrainer</code>，使用 <code>DataCollatorForLanguageModeling</code>。</li>
+                        <li>CausalLMStrategy：建立 <code>CustomTrainer</code>，使用 <code>default_data_collator</code>。<code>DataCollatorForLanguageModeling</code> 已被刻意移除 —— 它會覆蓋掉 prompt masking。</li>
                     </ul>
                     加入 <code>_ProgressCallback</code>，每個 <code>logging_steps</code> 回報 progress 到 Status Queue 並存入 Redis。
                 </div>
@@ -675,7 +681,19 @@ for log in history["logs"]:
         <!-- ================================================================ -->
         <section id="dataset-format">
             <h2>6. 資料集格式</h2>
-            <p>訓練資料必須是 <strong>JSON 或 JSONL 格式</strong>（JSONL 為每行一個 JSON 物件）。支援兩種訓練模式，透過 <code>text_field</code> 或 <code>prompt_field</code>/<code>completion_field</code> 選擇。</p>
+                        <p>
+                <code>dataset_path</code> 接受兩種值：本機的 <code>.jsonl</code>（每行一個 JSON 物件）或
+                <code>.json</code> 檔案；若是其他任何值，則視為
+                <strong>Hugging Face Hub dataset id</strong>。Hub 的情況請見下方
+                <a href="#hub-datasets">從 Hugging Face Hub 載入資料集</a> —— 它有一個很重要的行為差異。
+            </p>
+            <p>
+                對於<strong>本機檔案</strong>，loader 會依<strong>字面</strong>欄位名
+                <code>text</code>、<code>prompt</code>+<code>completion</code>、<code>messages</code>，
+                再加上多模態訓練用的選配 <code>images</code>/<code>image</code> 欄位來判斷格式 —— 共四種模式。
+                <code>prompt_field</code> / <code>completion_field</code> / <code>text_field</code> 是在載入
+                <em>之後</em>才做欄位改名，所以檔案本身仍必須使用上述字面名稱。
+            </p>
 
             <h3>模式一：text 單欄位模式（全序列 loss）</h3>
             <p>適用：語言模型預訓練或需要完整序列訓練的場景。設定 <code>text_field: "text"</code>（或對應欄位名）。</p>
@@ -695,6 +713,54 @@ for log in history["logs"]:
             <div class="note">
                 <strong>推薦選擇：</strong> 指令微調建議使用<strong>雙欄位模式</strong> + <code>use_sft_trainer: true</code>，系統會自動啟用 <code>completion_only_loss=True</code>，讓模型只學習回答部分，訓練效率更高。
             </div>
+
+            <h3 id="hub-datasets">從 Hugging Face Hub 載入資料集</h3>
+            <p>
+                只要 <code>dataset_path</code> 不是以 <code>.json</code> 或 <code>.jsonl</code> 結尾，就會被當成
+                <strong>Hub dataset id</strong>。不需要任何額外開關 —— 把 repo id 放在原本填路徑的位置即可：
+            </p>
+            <pre><code>{
+  "model_name": "Qwen/Qwen3-4B",
+  "method": "lora",
+  "dataset_path": "tatsu-lab/alpaca",     // 用 Hub dataset id 取代本機路徑
+  "prompt_field": "instruction",           // *_field 要指向該 Hub dataset 自己的欄位名
+  "completion_field": "output",
+  "output_dir": "./output/alpaca_lora"
+}</code></pre>
+
+            <h4>Split 的選擇</h4>
+            <p>
+                載入時不會傳入 <code>split</code> 參數。若結果含有多個 split，會使用 <code>train</code>；
+                若沒有 <code>train</code>，則使用<strong>第一個可用的 split</strong>並記錄一則 warning 列出它看到的
+                split 清單。空的 split，或完全沒有 split 的 dataset，都會直接拋錯。
+            </p>
+
+            <div class="warning">
+                <strong>兩個要注意的限制。</strong>
+                <ul>
+                    <li><strong>無法指定 config / subset 或 split。</strong>id 是原樣傳入的，因此需要指定設定名稱的
+                        dataset（例如 <code>wikitext</code> 需要 <code>wikitext-2-raw-v1</code>）或需要特定 split 的
+                        情況都無法選擇。請先下載並另存為本機 <code>.jsonl</code>。</li>
+                    <li><strong>格式自動偵測對 Hub dataset 不生效。</strong>上面說的
+                        <code>text</code> / <code>prompt</code>+<code>completion</code> /
+                        <code>messages</code> 嗅探只適用於本機 <code>.json</code> / <code>.jsonl</code> 檔案。
+                        Hub dataset 會原樣傳遞下去，模式改由它實際的欄位名決定：
+                        <ul>
+                            <li>有 <code>messages</code> 欄位（或 <code>messages_field</code> 指定的名稱）→ chat 模式</li>
+                            <li><code>prompt_field</code> <em>與</em> <code>completion_field</code> 兩者都有設定 → prompt+completion 模式，並將這些欄位改名供 TRL 使用</li>
+                            <li>其餘 → 單一 text 模式，讀取 <code>text_field</code>（預設 <code>text</code>）</li>
+                        </ul>
+                        所以用 Hub dataset 走 Mode 2 時，<code>prompt_field</code> 和 <code>completion_field</code>
+                        兩個都必須明確設定；留空會靜默掉進 text 模式，然後因為找不到 <code>text</code> 欄位而失敗。</li>
+                </ul>
+            </div>
+
+            <p>Hub dataset <em>仍然</em>適用的功能：</p>
+            <ul>
+                <li><strong>Held-out 評估。</strong><code>eval_split_ratio</code> 是在載入之後才套用，行為完全相同。</li>
+                <li><strong>多模態。</strong><code>images</code> 或 <code>image</code> 欄位是從 dataset 的欄位清單偵測的，因此只要有載入 processor（<code>enable_image_training</code>），圖片訓練照常運作。</li>
+                <li><strong>私有與 gated dataset。</strong>並未明確傳入 token，因此仰賴環境中既有的認證 —— 請在 <code>.env</code> 設定 <code>HF_TOKEN</code>（或 <code>HF_HUB_TOKEN</code>），或先執行一次 <code>hf auth login</code>。</li>
+            </ul>
 
             <h3>資料集品質建議</h3>
             <table>
@@ -735,8 +801,8 @@ for log in history["logs"]:
   "output_dir": "./output/my_model_v1",   // 輸出目錄（必須為空目錄）
 
   // === LoRA/QLoRA 專用 ===
-  "lora_r": 16,                           // LoRA 秩（越大→參數越多，效果越好但更慢）
-  "lora_alpha": 32,                       // LoRA scaling（通常 = lora_r * 2）
+  "lora_r": 8,                            // 預設 8。LoRA 秩（越大→參數越多，效果越好但更慢）
+  "lora_alpha": 16,                       // 預設 16。LoRA scaling（通常為 lora_r 的 1-2 倍）
   "lora_dropout": 0.05,                   // Dropout（防止過擬合）
   "lora_target_modules": [               // 要訓練的模組（留空/null = 自動偵測線性層，偵測失敗才 fallback 到此列表）
     "q_proj", "k_proj", "v_proj", "o_proj",
@@ -846,6 +912,12 @@ for log in history["logs"]:
                         <td>有大量 CPU RAM（>64GB），最常用</td>
                     </tr>
                     <tr>
+                        <td><code>zero3_offload_cpu_cpu_tight</code></td>
+                        <td>CPU RAM</td>
+                        <td>CPU RAM</td>
+                        <td>與上者裝置相同但設定較精簡，適用於標準 cpu_cpu profile 仍嫌吃重的主機</td>
+                    </tr>
+                    <tr>
                         <td><code>zero3_offload_cpu_disk</code></td>
                         <td>CPU RAM</td>
                         <td>NVMe Disk</td>
@@ -916,7 +988,7 @@ CUDA_VISIBLE_DEVICES=0        # 強制使用 GPU 0（防止多 GPU PEFT 問題�
                     </ul>
                 </li>
                 <li>GGUF 檔案存於 <code>output_dir</code> 內。</li>
-                <li><code>/training/status</code> 回傳 <code>gguf_path</code> 和 <code>gguf_quantization</code>。</li>
+                <li>GGUF 路徑<strong>不在</strong> <code>/training/status</code> 上 —— <code>TrainingStatus</code> 沒有 <code>gguf_path</code> / <code>gguf_quantization</code> 欄位，所以會被濾掉。請改從 job log（<code>/training/{job_id}/log</code> 的收尾 <code>stage</code> 事件）或 <code>meta.json</code> 讀取。</li>
             </ol>
 
             <h3>模型自動登錄至 Registry</h3>
@@ -1015,7 +1087,7 @@ CUDA_VISIBLE_DEVICES=0        # 強制使用 GPU 0（防止多 GPU PEFT 問題�
             <div class="card">
                 <h3>❌ Redis 連線失敗：訓練歷史不可用</h3>
                 <p><strong>症狀:</strong> <code>/training/status/{session_id}/history</code> 回傳 404，或 log 顯示 Redis 連線警告。</p>
-                <p><strong>說明:</strong> Redis 是選配元件。若未啟動 Redis，系統 fallback 至記憶體儲存。服務重啟後，記憶體中的歷史紀錄會清失。</p>
+                <p><strong>說明:</strong> Redis 是選配元件，但歷史紀錄<strong>沒有記憶體 fallback</strong>。沒有 Redis 時，<code>/training/status/{session_id}/history</code> 對執行中的 session 會回傳 200 但 <code>logs</code> 為空（未知 session 才回 404）。持久化的紀錄是 <code>events.jsonl</code>，請透過 <code>GET /training/{job_id}/log</code> 讀取 —— 有沒有 Redis 都能用。</p>
                 <p><strong>解決方案:</strong> 啟動 Redis 服務（<code>redis-server</code>），並在 <code>.env</code> 中設定 <code>REDIS_URL</code> 或 <code>REDIS_HOST</code>/<code>REDIS_PORT</code>。</p>
             </div>
 

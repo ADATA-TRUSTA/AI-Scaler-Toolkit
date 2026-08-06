@@ -25,6 +25,13 @@ backend/service/utils/llama.cpp/
 backend/service/configs/current_*.json
 backend/service/configs/last_finetuned_model.json
 backend/service/model_offload/
+# models_registry.json holds machine-specific local paths. It must stay untracked:
+# ModelRegistry._ensure_file() only seeds SEED_BASE_MODELS when the file is absent,
+# so shipping one leaves a fresh clone with an empty model list.
+backend/service/configs/models_registry.json
+# RAG store: SQLite DB + document copies, both created on first use.
+backend/service/rag_store/rag.db
+backend/service/rag_store/docs/
 
 # IDE
 .vscode/

@@ -1,80 +1,102 @@
 """
 FastAPI Service for LLM Inference and Fine-tuning
-Supports streaming inference with Accelerate, quantization, and model offload
+Supports streaming inference with Accelerate, quantization, and model offload.
 """
 
 import multiprocessing
 
 multiprocessing.set_start_method("spawn", force=True)
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Request
-from fastapi.responses import (
-    StreamingResponse,
-    JSONResponse,
-    FileResponse,
-    RedirectResponse,
-)
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-from typing import Optional, Dict, List, Any
+import asyncio
 import json
+import os
 import signal
 import sys
-import asyncio
-import uuid
 import threading
 import time
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
+from types import FrameType
+from typing import Annotated, Any, cast
 
+from dotenv import load_dotenv
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    ORJSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
+from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
+
+from . import config_examples
 from .config_models import (
+    ChatRequest,
+    CleanupGenerationMemoryRequest,
+    ConversionResponse,
+    GgufConfigCheckResponse,
+    GgufEstimateRequest,
+    GgufEstimateResponse,
+    GgufPlanRequest,
+    GgufPlanResponse,
+    GgufRecommendRequest,
+    GgufRecommendResponse,
+    GgufSweepRequest,
+    GgufSweepResponse,
     InferenceConfig,
     InferenceEngine,
-    ChatRequest,
-    OpenAIChatCompletionRequest,
-    StopGenerationRequest,
-    CleanupGenerationMemoryRequest,
-    TrainingConfig,
-    ModelStatus,
-    TrainingStatus,
-    TrainingHistoryResponse,
-    SystemResourceHistoryResponse,
     MemoryEstimateRequest,
     MemoryEstimateResponse,
-    SystemResourcesResponse,
     ModelConversionRequest,
-    ConversionResponse,
+    ModelStatus,
+    OpenAIChatCompletionRequest,
+    StopGenerationRequest,
+    SystemResourceHistoryResponse,
+    SystemResourcesResponse,
+    TrainingConfig,
+    TrainingHistoryResponse,
+    TrainingLogEventsResponse,
+    TrainingStatus,
 )
-from .model_manager import model_manager
-from .training_manager import training_manager
+from .download_manager import DownloadTask, download_manager
+from .inference.engines.llama_server_engine import resolve_local_model_path
+from .inference.engines.vllm_engine import sweep_stale_vllm_processes
+from .inference.gguf_estimator import (
+    RECOMMEND_SOLVED_KEYS,
+    SWEEP_SOLVED_KEYS,
+    apply_cli_args,
+    gguf_memory_estimator,
+)
 from .inference.memory_estimator import memory_estimator
-from .session_manager import session_manager
+from .model_manager import model_manager
 from .model_registry import model_registry
 from .rag_manager import rag_manager
-from .download_manager import download_manager
-from .inference.engines.vllm_engine import sweep_stale_vllm_processes
+from .session_manager import session_manager
+from .settings import (
+    LOG_LEVEL,
+    MAX_CONCURRENT_GENERATIONS,
+    SERVICE_HOST,
+    SERVICE_PORT,
+    UVICORN_ACCESS_LOG,
+    UVICORN_RELOAD,
+    UVICORN_RELOAD_EXCLUDES,
+    UVICORN_USE_COLORS,
+    configure_logging,
+    get_uvicorn_log_config,
+)
+from .training_manager import training_manager
 from .utils.conversion_manager import conversion_manager
 from .utils.openai_request_parser import (
     parse_openai_chat_request_payload,
     sanitize_openai_request_for_logging,
 )
 from .utils.system_monitor import system_monitor
-from .settings import (
-    configure_logging,
-    LOG_LEVEL,
-    SERVICE_HOST,
-    SERVICE_PORT,
-    UVICORN_RELOAD,
-    UVICORN_ACCESS_LOG,
-    UVICORN_USE_COLORS,
-    MAX_CONCURRENT_GENERATIONS,
-    get_uvicorn_log_config,
-)
-import os
-from pathlib import Path
-from datetime import datetime
-from dotenv import load_dotenv
-from pydantic import ValidationError
-import config_examples
 
 
 def _load_project_env() -> None:
@@ -85,21 +107,21 @@ def _load_project_env() -> None:
             break
 
 
-# 載入 .env 環境變數；若不存在則退回 .env.example
+# Load .env; fall back to .env.example when it does not exist
 _load_project_env()
 
 logger = configure_logging(__name__)
 generation_semaphore = asyncio.Semaphore(max(1, MAX_CONCURRENT_GENERATIONS))
 
-# 將「前端會話」與「worker 生成任務」分離：
-# - session_id: 前端對話會話識別（可長期不變）
-# - worker_request_id: 單次生成任務識別（每次 chat 重新產生）
-_session_active_worker_request: Dict[str, str] = {}
-_worker_request_session: Dict[str, str] = {}
+# Keep the "frontend session" and the "worker generation task" separate:
+# - session_id: identifies a frontend chat session (can stay stable long-term)
+# - worker_request_id: identifies a single generation task (regenerated on every chat)
+_session_active_worker_request: dict[str, str] = {}
+_worker_request_session: dict[str, str] = {}
 _request_map_lock = threading.Lock()
 
 
-def _bind_worker_request(session_id: Optional[str], worker_request_id: str) -> None:
+def _bind_worker_request(session_id: str | None, worker_request_id: str) -> None:
     if not session_id:
         return
     sid = str(session_id).strip()
@@ -113,7 +135,7 @@ def _bind_worker_request(session_id: Optional[str], worker_request_id: str) -> N
         _worker_request_session[worker_request_id] = sid
 
 
-def _unbind_worker_request(worker_request_id: Optional[str]) -> None:
+def _unbind_worker_request(worker_request_id: str | None) -> None:
     if not worker_request_id:
         return
     with _request_map_lock:
@@ -122,10 +144,8 @@ def _unbind_worker_request(worker_request_id: Optional[str]) -> None:
             _session_active_worker_request.pop(sid, None)
 
 
-def _resolve_worker_request_id(
-    request_id: Optional[str], session_id: Optional[str]
-) -> Optional[str]:
-    # request_id（若有）優先，保留相容舊行為
+def _resolve_worker_request_id(request_id: str | None, session_id: str | None) -> str | None:
+    # request_id takes precedence when present, preserving legacy behavior
     if request_id:
         rid = str(request_id).strip()
         if rid:
@@ -138,11 +158,11 @@ def _resolve_worker_request_id(
     return None
 
 
-def _normalize_openai_role(role: Optional[str]) -> str:
+def _normalize_openai_role(role: str | None) -> str:
     return str(role or "").strip().lower()
 
 
-def _normalize_request_id(request_id: Optional[str], prefix: str = "req") -> str:
+def _normalize_request_id(request_id: str | None, prefix: str = "req") -> str:
     value = str(request_id or "").strip()
     return value or f"{prefix}-{uuid.uuid4().hex}"
 
@@ -154,7 +174,7 @@ def _resolve_loaded_model_name() -> str:
     return str(config.model_path or config.model_name or "")
 
 
-def _is_qwen35_model(model_name: Optional[str]) -> bool:
+def _is_qwen35_model(model_name: str | None) -> bool:
     normalized = str(model_name or "").strip().lower()
     return "qwen3.5" in normalized
 
@@ -165,8 +185,8 @@ def _resolve_model_aware_generation_options(
     top_p: float,
     top_k: int,
     repetition_penalty: float,
-    enable_thinking: Optional[bool],
-) -> Dict[str, Any]:
+    enable_thinking: bool | None,
+) -> dict[str, Any]:
     """Resolve generation options with model-specific safe defaults."""
     model_name = _resolve_loaded_model_name()
 
@@ -181,9 +201,9 @@ def _resolve_model_aware_generation_options(
     if not _is_qwen35_model(model_name):
         return resolved
 
-    # --- Qwen3.5 MoE 模型專用安全參數 ---
-    # Qwen3.5 (尤其 MoE 架構如 35B-A3B) 在 repetition_penalty > 1.0 時
-    # 會產生多語言混合亂碼 (gibberish)。必須 **無條件** 強制設為 1.0。
+    # --- Safe parameters specific to Qwen3.5 MoE models ---
+    # With repetition_penalty > 1.0, Qwen3.5 (especially MoE architectures such as
+    # 35B-A3B) produces mixed-language gibberish. It must be forced to 1.0 **unconditionally**.
     if resolved["repetition_penalty"] > 1.0:
         logger.warning(
             "Qwen3.5 detected: forcing repetition_penalty from %.2f → 1.0 "
@@ -192,10 +212,10 @@ def _resolve_model_aware_generation_options(
         )
         resolved["repetition_penalty"] = 1.0
 
-    # 對齊 Qwen3.5 官方 generation_config：
-    # temperature=1.0, top_p=0.95, top_k=20。
-    # 先前使用 0.7 / 0.8 雖然較保守，但在這個 MoE 模型上容易讓取樣退化，
-    # 反而產生跨語言亂碼與不自然輸出。
+    # Match the official Qwen3.5 generation_config:
+    # temperature=1.0, top_p=0.95, top_k=20.
+    # The previous 0.7 / 0.8 was more conservative, but on this MoE model it easily
+    # degrades sampling and instead yields cross-language gibberish and unnatural output.
     if resolved["temperature"] != 1.0:
         logger.warning(
             "Qwen3.5 detected: forcing temperature from %s -> 1.0 for official sampling behavior",
@@ -217,16 +237,14 @@ def _resolve_model_aware_generation_options(
         )
         resolved["top_k"] = 20
 
-    # 對 Qwen3.5 一律關閉 thinking。
-    # 你提供的日誌已顯示目前仍以 enable_thinking=True 進行生成；
-    # 官方範例未使用 thinking mode，且該模式在多模態 MoE 架構下
-    # 容易讓模板/停止條件失配，最終退化成多語言亂碼。
-    if resolved["enable_thinking"] is not False:
-        logger.warning(
-            "Qwen3.5 detected: forcing enable_thinking from %s -> False "
-            "for generation stability",
-            resolved["enable_thinking"],
-        )
+    # Qwen3.5 thinking policy: honor an explicit request value, but default to
+    # OFF when unspecified — the GGUF chat template enables thinking by default
+    # (prefills '<think>\n'), which silently burns the whole max_tokens budget
+    # on reasoning for callers that never asked for it. Explicit toggling is
+    # verified working end-to-end against llama-server (--jinja) via
+    # chat_template_kwargs.enable_thinking.
+    if resolved["enable_thinking"] is None:
+        logger.info("Qwen3.5 detected: enable_thinking unspecified; defaulting to False")
         resolved["enable_thinking"] = False
 
     logger.info(
@@ -248,12 +266,12 @@ _DEFAULT_SYSTEM_PROMPT = (
 )
 
 
-def _normalize_content_parts(content: Any) -> List[Dict[str, Any]]:
+def _normalize_content_parts(content: Any) -> list[dict[str, Any]]:  # noqa: ANN401 - OpenAI content is dynamic parsed JSON (str/list/dict)
     """Normalize OpenAI-style content parts for downstream generation."""
     if not isinstance(content, list):
         return []
 
-    normalized_parts: List[Dict[str, Any]] = []
+    normalized_parts: list[dict[str, Any]] = []
     for part in content:
         if not isinstance(part, dict):
             continue
@@ -270,14 +288,12 @@ def _normalize_content_parts(content: Any) -> List[Dict[str, Any]]:
             else:
                 url = image_url
             if isinstance(url, str) and url.strip():
-                normalized_parts.append(
-                    {"type": "image_url", "image_url": {"url": url.strip()}}
-                )
+                normalized_parts.append({"type": "image_url", "image_url": {"url": url.strip()}})
 
     return normalized_parts
 
 
-def _normalize_prompt_content(content: Any) -> Any:
+def _normalize_prompt_content(content: Any) -> Any:  # noqa: ANN401 - dynamic parsed content in, str-or-list out
     """Normalize message content while preserving multimodal parts."""
     if isinstance(content, list):
         return _normalize_content_parts(content)
@@ -288,14 +304,14 @@ def _normalize_prompt_content(content: Any) -> Any:
     return str(content)
 
 
-def _extract_text_from_content(content: Any) -> str:
+def _extract_text_from_content(content: Any) -> str:  # noqa: ANN401 - OpenAI content is dynamic parsed JSON (str/list/dict)
     """Flatten textual content for session persistence and system prompt merge."""
     if isinstance(content, str):
         return content.strip()
     if content is None:
         return ""
     if isinstance(content, list):
-        text_parts: List[str] = []
+        text_parts: list[str] = []
         for part in _normalize_content_parts(content):
             if part.get("type") != "text":
                 continue
@@ -306,7 +322,7 @@ def _extract_text_from_content(content: Any) -> str:
     return str(content).strip()
 
 
-def _content_has_prompt_payload(content: Any) -> bool:
+def _content_has_prompt_payload(content: Any) -> bool:  # noqa: ANN401 - OpenAI content is dynamic parsed JSON (str/list/dict)
     """Check whether content still contains text or image payload."""
     if isinstance(content, str):
         return bool(content.strip())
@@ -326,7 +342,7 @@ def _content_has_prompt_payload(content: Any) -> bool:
     return False
 
 
-def _coerce_prompt_message(role: str, content: Any) -> Optional[Dict[str, Any]]:
+def _coerce_prompt_message(role: str, content: Any) -> dict[str, Any] | None:  # noqa: ANN401 - OpenAI content is dynamic parsed JSON (str/list/dict)
     """Create a normalized prompt message if payload exists."""
     normalized_content = _normalize_prompt_content(content)
     if not _content_has_prompt_payload(normalized_content):
@@ -334,10 +350,12 @@ def _coerce_prompt_message(role: str, content: Any) -> Optional[Dict[str, Any]]:
     return {"role": role, "content": normalized_content}
 
 
-def _session_history_to_prompt_messages(history: List[Dict[str, Any]]) -> tuple[List[str], List[Dict[str, Any]]]:
+def _session_history_to_prompt_messages(
+    history: list[dict[str, Any]],
+) -> tuple[list[str], list[dict[str, Any]]]:
     """Convert persisted text-only session history into prompt messages."""
-    system_messages: List[str] = []
-    prompt_messages: List[Dict[str, Any]] = []
+    system_messages: list[str] = []
+    prompt_messages: list[dict[str, Any]] = []
 
     for item in history:
         if not isinstance(item, dict):
@@ -355,7 +373,7 @@ def _session_history_to_prompt_messages(history: List[Dict[str, Any]]) -> tuple[
     return system_messages, prompt_messages
 
 
-def _resolve_rag_context_text(request: OpenAIChatCompletionRequest) -> Optional[str]:
+def _resolve_rag_context_text(request: OpenAIChatCompletionRequest) -> str | None:
     """Resolve RAG context for OpenAI-compatible requests."""
     if not getattr(request, "use_rag", False):
         return None
@@ -390,7 +408,7 @@ def _resolve_rag_context_text(request: OpenAIChatCompletionRequest) -> Optional[
 
 def _build_openai_prompt_messages(
     request: OpenAIChatCompletionRequest,
-) -> tuple[List[Dict[str, Any]], Optional[str], str]:
+) -> tuple[list[dict[str, Any]], str | None, str]:
     """Build final generation messages directly from OpenAI request payload."""
     session_id = request.session_id or request.user
     if request.reset_history and session_id:
@@ -402,7 +420,9 @@ def _build_openai_prompt_messages(
             last_user_idx = idx
 
     if last_user_idx < 0:
-        raise HTTPException(status_code=400, detail="messages must include at least one user message")
+        raise HTTPException(
+            status_code=400, detail="messages must include at least one user message"
+        )
 
     explicit_history = request.messages[:last_user_idx]
     current_user = request.messages[last_user_idx]
@@ -411,9 +431,9 @@ def _build_openai_prompt_messages(
     if current_user_prompt is None:
         raise HTTPException(status_code=400, detail="last user message content is empty")
 
-    explicit_system_texts: List[str] = []
-    explicit_history_prompt: List[Dict[str, Any]] = []
-    session_history_snapshot: List[Dict[str, str]] = []
+    explicit_system_texts: list[str] = []
+    explicit_history_prompt: list[dict[str, Any]] = []
+    session_history_snapshot: list[dict[str, str]] = []
 
     for msg in explicit_history:
         role = _normalize_openai_role(msg.role)
@@ -433,8 +453,8 @@ def _build_openai_prompt_messages(
         if text:
             session_history_snapshot.append({"role": role, "content": text})
 
-    effective_system_texts: List[str]
-    effective_history_prompt: List[Dict[str, Any]]
+    effective_system_texts: list[str]
+    effective_history_prompt: list[dict[str, Any]]
 
     if explicit_history:
         effective_system_texts = explicit_system_texts
@@ -457,72 +477,73 @@ def _build_openai_prompt_messages(
     rag_context_text = _resolve_rag_context_text(request)
     if rag_context_text:
         system_instruction += (
-            "\n\nReference information (use only if helpful):\n"
-            + rag_context_text.strip()
+            "\n\nReference information (use only if helpful):\n" + rag_context_text.strip()
         )
 
-    recent_history = effective_history_prompt[-6:] if len(effective_history_prompt) > 6 else effective_history_prompt
-    prompt_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": system_instruction}
-    ]
+    recent_history = (
+        effective_history_prompt[-6:]
+        if len(effective_history_prompt) > 6
+        else effective_history_prompt
+    )
+    prompt_messages: list[dict[str, Any]] = [{"role": "system", "content": system_instruction}]
     prompt_messages.extend(recent_history)
     prompt_messages.append(current_user_prompt)
     return prompt_messages, session_id, current_user_text
 
 
-# 自定义 asyncio 异常处理，抑制无害的 socket.send() 警告
-def custom_exception_handler(loop, context):
-    """处理 asyncio 中的异常，抑制客户端断开连接时的警告"""
+# Custom asyncio exception handling that suppresses harmless socket.send() warnings
+def custom_exception_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """Handle asyncio exceptions, suppressing warnings when a client disconnects."""
     exception = context.get("exception")
     message = context.get("message", "")
 
-    # 忽略客户端断开连接时的 socket 错误
+    # Ignore socket errors caused by client disconnects
     if exception and isinstance(exception, (ConnectionError, BrokenPipeError, OSError)):
-        # 这些是正常的客户端断开，不记录警告
+        # These are normal client disconnects; do not log a warning
         return
 
-    # 检查是否是 socket.send() 相关的错误
+    # Check whether the error is socket.send() related
     if "socket.send()" in message or "Connection" in message:
-        # 记录为 debug 级别，不作为 warning
+        # Log at debug level rather than as a warning
         logger.debug(f"Client connection closed: {message}")
         return
 
-    # 其他异常正常处理
+    # Handle all other exceptions normally
     if exception:
         logger.error(f"Asyncio exception: {exception}", exc_info=exception)
     else:
         logger.error(f"Asyncio error: {context}")
 
 
-def signal_handler(signum, frame):
-    """處理終止信號"""
+def signal_handler(signum: int, frame: FrameType | None) -> None:
+    """Handle termination signals."""
     logger.info(f"Received signal {signum}, cleaning up...")
     try:
         model_manager.cleanup()
         logger.info("✅ Model manager cleanup completed")
     except Exception as e:
-        logger.error(f"Error during signal cleanup: {e}")
+        logger.exception(f"Error during signal cleanup: {e}")
 
     try:
         session_manager.close()
         logger.info("✅ Session manager cleanup completed")
     except Exception as e:
-        logger.error(f"Error during session cleanup: {e}")
+        logger.exception(f"Error during session cleanup: {e}")
 
     sys.exit(0)
 
 
-# 註冊信號處理器
+# Register signal handlers
 signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-signal.signal(signal.SIGTERM, signal_handler)  # kill 命令
+signal.signal(signal.SIGTERM, signal_handler)  # kill command
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """應用生命週期管理"""
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Application lifecycle management."""
     logger.info("🚀 Starting LLM Service...")
 
-    # 啟動階段先清理可能殘留的 vLLM serve 進程，避免後續 load_model 發生 port 衝突。
+    # Sweep leftover vLLM serve processes at startup so later load_model calls do not hit port conflicts.
     try:
         sweep_result = sweep_stale_vllm_processes()
         if sweep_result.get("enabled"):
@@ -535,7 +556,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"vLLM startup sweep failed (non-blocking): {e}")
 
-    # 确保 asyncio 异常处理器已设置
+    # Make sure the asyncio exception handler is installed
     try:
         loop = asyncio.get_running_loop()
         loop.set_exception_handler(custom_exception_handler)
@@ -546,18 +567,18 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("🛑 Shutting down LLM Service...")
-    # Cleanup - 使用新的清理方法
+    # Cleanup - use the new cleanup methods
     try:
         model_manager.cleanup()
         logger.info("✅ Model manager cleanup completed")
     except Exception as e:
-        logger.error(f"Error during model_manager cleanup: {e}")
+        logger.exception(f"Error during model_manager cleanup: {e}")
     # Close session manager resources
     try:
         session_manager.close()
         logger.info("✅ Session manager cleanup completed")
     except Exception as e:
-        logger.error(f"Error during session_manager cleanup: {e}")
+        logger.exception(f"Error during session_manager cleanup: {e}")
 
 
 # Create FastAPI app
@@ -566,6 +587,10 @@ app = FastAPI(
     description="FastAPI service for LLM inference with streaming and fine-tuning support",
     version="1.0.0",
     lifespan=lifespan,
+    # orjson serializes responses faster and natively handles numpy / datetime;
+    # covers routes returning plain dict/model. Explicit responses below use
+    # ORJSONResponse too so the whole API goes through the same encoder.
+    default_response_class=ORJSONResponse,
 )
 
 # ==================== Frontend Static Files ====================
@@ -620,7 +645,7 @@ if FRONTEND_DIST.exists():
         if file_path.is_file():
 
             @_frontend_router.get(f"/{fname}")  # type: ignore
-            async def _serve_file(fp=str(file_path)):
+            async def _serve_file(fp: str = str(file_path)) -> FileResponse:
                 return FileResponse(fp)
 
             logger.info(f"🔗 Frontend top-level asset route added: /{fname}")
@@ -628,14 +653,13 @@ if FRONTEND_DIST.exists():
             logger.debug(f"Top-level asset not found (skip): {file_path}")
     app.include_router(_frontend_router)
 else:
-    logger.warning(
-        f"⚠️ Frontend dist directory not found, skipping mount: {FRONTEND_DIST}"
-    )
+    logger.warning(f"⚠️ Frontend dist directory not found, skipping mount: {FRONTEND_DIST}")
 
 
-@app.get("/frontend/{full_path:path}")
-async def frontend_spa_fallback(full_path: str):
-    """SPA fallback: if a deep route isn't an existing file, serve index.html.
+@app.get("/frontend/{full_path:path}", response_model=None)
+async def frontend_spa_fallback(full_path: str) -> FileResponse:
+    """
+    SPA fallback: if a deep route isn't an existing file, serve index.html.
     This allows React Router (or similar) client-side routing to work when refreshing.
     """
     if not FRONTEND_DIST.exists():
@@ -652,7 +676,7 @@ async def frontend_spa_fallback(full_path: str):
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 在生產環境中應該設置具體的來源
+    allow_origins=["*"],  # Should be restricted to specific origins in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -662,9 +686,9 @@ app.add_middleware(
 # ==================== Health Check ====================
 
 
-@app.get("/")
-async def root():
-    """根路徑：若前端存在則 302 轉址至 /frontend/，否則返回服務資訊"""
+@app.get("/", response_model=None)
+async def root() -> dict[str, Any] | RedirectResponse:
+    """Root path: 302 redirect to /frontend/ when the frontend exists, otherwise return service info."""
     try:
         if FRONTEND_DIST.exists() and (FRONTEND_DIST / "index.html").is_file():
             return RedirectResponse(url="/frontend/")
@@ -679,54 +703,56 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
-    """健康檢查"""
+async def health_check() -> dict[str, Any]:
+    """Health check."""
     return {
         "status": "healthy",
         "model_loaded": model_manager.is_loaded(),
         "model_loaded_config": (
-            model_manager.config.model_dump() if model_manager.is_loaded() else None
+            model_manager.config.model_dump()
+            if model_manager.is_loaded() and model_manager.config is not None
+            else None
         ),
         "training_active": training_manager.get_status().is_training,
     }
 
+
 @app.get("/v1/models")
-def list_models():
+def list_models() -> dict[str, Any]:
+    """List loaded models in OpenAI-compatible format."""
     if model_manager.is_loaded():
-        return {
-            "object": "list",
-            "data": [{"id": "trusta-ast-default", "object": "model"}]
-        }
+        return {"object": "list", "data": [{"id": "trusta-ast-default", "object": "model"}]}
     else:
-        return {
-            "object": "list",
-            "data": []
-        }
+        return {"object": "list", "data": []}
+
+
 # ==================== Inference Endpoints ====================
 
 
 @app.post("/inference/load_model")
 async def load_model(
-    config: InferenceConfig = Body(
-        ..., openapi_examples=config_examples.INFERENCE_CONFIG_EXAMPLES
-    )
-):
+    config: Annotated[
+        InferenceConfig,
+        Body(openapi_examples=cast(dict[str, Any], config_examples.INFERENCE_CONFIG_EXAMPLES)),
+    ],
+) -> dict[str, Any]:
     """
-    加載推理模型
-    前端傳送模型名稱、量化類型和 offload 設定
+    Load an inference model
+    The frontend sends the model name, quantization type and offload settings.
 
-    注意：模型加載在後台執行，立即返回。使用 /inference/status 檢查載入狀態。
+    Note: loading runs in the background and returns immediately. Use /inference/status
+    to check the loading state.
     """
     try:
         logger.info(f"Loading model request: {config.model_name}")
 
-        # 若已經有模型處於載入完成狀態，根據規則回應
+        # A model is already fully loaded: respond according to the rules below
         if model_manager.is_loaded():
             current = model_manager.config
 
-            # 判斷是否與現有配置相同（同一模型 + 關鍵配置一致）
-            def _norm(v):
-                # 將 dict/其他型別正規化為可比較的穩定字符串
+            # Decide whether it matches the current config (same model + same key settings)
+            def _norm(v: Any) -> str:  # noqa: ANN401 - normalizes arbitrary config field values
+                # Normalize dicts and other types into a stable, comparable string
                 try:
                     if isinstance(v, dict):
                         return json.dumps(v, sort_keys=True)
@@ -734,15 +760,17 @@ async def load_model(
                 except Exception:
                     return str(v)
 
-            def _same_inference_config(a, b):
+            def _same_inference_config(
+                a: InferenceConfig | None, b: InferenceConfig | None
+            ) -> bool:
                 if a is None or b is None:
                     return False
-                # 模型識別：優先使用 model_path，其次 model_name
+                # Model identity: prefer model_path, then model_name
                 a_id = a.model_path or a.model_name
                 b_id = b.model_path or b.model_name
                 if a_id != b_id:
                     return False
-                # 比較關鍵欄位
+                # Compare the key fields
                 fields = [
                     "quantization",
                     "device_map",
@@ -762,13 +790,13 @@ async def load_model(
                     "message": f"Model {config.model_name} is already loaded with the same configuration.",
                     "config": config.model_dump(),
                 }
-            # 不同模型或不同配置 → 409 請先卸載
+            # Different model or different config -> 409, unload first
             raise HTTPException(
                 status_code=409,
                 detail="A model is already loaded. Please unload the model before loading a new model.",
             )
 
-        # 檢查是否已經有模型正在加載
+        # Check whether a model is already being loaded
         status = model_manager.get_status()
         if status.get("is_loading"):
             raise HTTPException(
@@ -776,15 +804,15 @@ async def load_model(
                 detail="A model is already being loaded. Please wait or check status.",
             )
 
-        # 分階段載入：立即設定 config，後台進程執行實際權重載入
+        # Staged loading: set the config immediately, load the actual weights in a background process
         try:
             model_manager.start_loading(config)
         except ValueError as ve:
-            # 配置檢查錯誤（例如量化限制）→ 400
-            raise HTTPException(status_code=400, detail=str(ve))
+            # Config validation error (e.g. quantization limits) -> 400
+            raise HTTPException(status_code=400, detail=str(ve)) from ve
         except RuntimeError as re:
-            # 其它當前狀態衝突（理論上前面已處理）→ 409
-            raise HTTPException(status_code=409, detail=str(re))
+            # Any other state conflict (should already be handled above) -> 409
+            raise HTTPException(status_code=409, detail=str(re)) from re
 
         return {
             "status": "loading",
@@ -794,33 +822,31 @@ async def load_model(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to start model loading: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to start model loading: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/inference/unload_model")
-async def unload_model():
-    """卸載模型"""
+async def unload_model() -> dict[str, Any]:
+    """Unload the model."""
     try:
         return model_manager.unload_model()
 
     except Exception as e:
-        logger.error(f"Failed to unload model: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to unload model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/inference/stop_generation")
 async def stop_generation(
-    request: StopGenerationRequest = Body(default_factory=StopGenerationRequest),
-):
+    request: Annotated[StopGenerationRequest, Body(default_factory=StopGenerationRequest)],
+) -> dict[str, Any]:
     """
-    停止当前正在进行的生成
-    适用于流式和非流式生成
+    Stop the generation currently in progress
+    Works for both streaming and non-streaming generation.
     """
     try:
-        target_request_id = _resolve_worker_request_id(
-            request.request_id, request.session_id
-        )
+        target_request_id = _resolve_worker_request_id(request.request_id, request.session_id)
         result = model_manager.stop_generation(request_id=target_request_id)
         if target_request_id:
             _unbind_worker_request(target_request_id)
@@ -830,63 +856,63 @@ async def stop_generation(
             result["request_id"] = target_request_id
         return result
     except Exception as e:
-        logger.error(f"Failed to stop generation: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to stop generation: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/inference/cleanup_generation_memory")
 async def cleanup_generation_memory(
-    request: CleanupGenerationMemoryRequest = Body(
-        default_factory=CleanupGenerationMemoryRequest
-    ),
-):
+    request: Annotated[
+        CleanupGenerationMemoryRequest, Body(default_factory=CleanupGenerationMemoryRequest)
+    ],
+) -> dict[str, Any]:
     """
-    清理生成過程中累積的記憶體（KV cache 和中間激活）
-    不卸載模型，適用於：
-    - 長對話後釋放 KV cache
-    - 切換 session 時清理記憶體
-    - OOM 錯誤後的恢復（在重試前調用）
+    Free the memory accumulated during generation (KV cache and intermediate activations)
+    Does not unload the model. Useful for:
+    - releasing the KV cache after a long conversation
+    - freeing memory when switching sessions
+    - recovering from an OOM error (call before retrying).
     """
     try:
         result = model_manager.cleanup_generation_memory(slot=request.slot)
         return result
     except Exception as e:
-        logger.error(f"Failed to cleanup generation memory: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to cleanup generation memory: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/inference/force_cleanup_gpu")
-async def force_cleanup_gpu():
+async def force_cleanup_gpu() -> dict[str, Any]:
     """
-    強制清理 GPU 記憶體
-    當模型加載因 OOM 失敗且 VRAM 未釋放時使用
-    會強制終止 worker 進程並重啟一個乾淨的進程
+    Force GPU memory cleanup
+    Use this when model loading failed with OOM and VRAM was not released.
+    Kills the worker process and restarts a clean one.
     """
     try:
         logger.warning("Force GPU cleanup requested")
         result = model_manager.force_cleanup_gpu()
         return result
     except Exception as e:
-        logger.error(f"Failed to force cleanup GPU: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to force cleanup GPU: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.get("/inference/status", response_model=ModelStatus)
-async def get_model_status():
-    """獲取模型狀態"""
+@app.get("/inference/status")
+async def get_model_status() -> ModelStatus:
+    """Get the model status."""
     try:
         status = model_manager.get_status()
         return ModelStatus(**status)
     except Exception as e:
-        logger.error(f"Failed to get model status: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to get model status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/inference/error_details")
-async def get_error_details():
+async def get_error_details() -> dict[str, Any]:
     """
-    獲取詳細的錯誤信息（包括完整的 traceback）
-    當模型加載失敗時，可以通過此端點獲取完整的錯誤堆棧信息
+    Get detailed error information (including the full traceback)
+    When model loading fails, this endpoint returns the complete error stack.
     """
     try:
         error_details = model_manager.get_error_details()
@@ -902,33 +928,67 @@ async def get_error_details():
             "process_alive": error_details.get("process_alive", False),
         }
     except Exception as e:
-        logger.error(f"Failed to get error details: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to get error details: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ==================== Memory Estimation Endpoints ====================
 
 
-@app.post("/inference/estimate_memory", response_model=MemoryEstimateResponse)
-async def estimate_memory_requirements(
-    request: MemoryEstimateRequest = Body(
-        ..., openapi_examples=config_examples.MEMORY_ESTIMATE_EXAMPLES
+def _dominant_cost(estimate: dict[str, Any]) -> str:
+    """Name the largest GPU memory term, so a failed fit points at the right knob."""
+    gpu = estimate["memory_breakdown_mib"]["gpu_total"]
+    settings = estimate["settings"]
+    largest = max(("model", "context", "compute"), key=lambda k: gpu[k])
+    if largest == "compute":
+        return (
+            f"The GPU compute buffer dominates at {gpu['compute']:.0f} MiB, driven by "
+            f"-ub {settings['n_ubatch']} (and -b {settings['n_batch']}). Lower the ubatch "
+            f"size first; it scales this buffer almost linearly."
+        )
+    if largest == "context":
+        return (
+            f"The KV cache dominates at {gpu['context']:.0f} MiB for n_ctx "
+            f"{settings['n_ctx']}. Shorten the context or use -ctk q8_0 -ctv q8_0, which "
+            f"roughly halves it."
+        )
+    return (
+        f"Model weights dominate at {gpu['model']:.0f} MiB. Lower -ngl, or for a MoE model "
+        f"use -ncmoe to push expert weights to RAM while keeping the KV cache on the GPU."
     )
-):
-    """
-    估計模型在 offload 混合模式下的 GPU 記憶體需求
 
-    此端點會根據模型名稱和量化配置，估算：
-    - 完整 GPU 模式所需的記憶體
-    - CPU offload 混合模式的最低 GPU 記憶體需求
-    - Disk offload 模式的最低 GPU 記憶體需求
-    - 不同 offload 策略的建議
+
+def _require_gguf_path(model_path: str | None) -> str:
+    """Resolve the GGUF path, which may come from `model_path` or from `-m` inside `args`."""
+    if not model_path:
+        raise HTTPException(
+            status_code=400,
+            detail="A GGUF path is required: set model_path, or pass -m/--model inside args.",
+        )
+    return model_path
+
+
+@app.post("/inference/estimate_memory")
+async def estimate_memory_requirements(
+    request: Annotated[
+        MemoryEstimateRequest,
+        Body(openapi_examples=cast(dict[str, Any], config_examples.MEMORY_ESTIMATE_EXAMPLES)),
+    ],
+) -> MemoryEstimateResponse:
+    """
+    Estimate a model's GPU memory requirements under mixed offload modes.
+
+    From the model name and quantization config, this endpoint estimates:
+    - the memory needed for full GPU mode
+    - the minimum GPU memory needed for mixed CPU offload
+    - the minimum GPU memory needed for disk offload
+    - recommendations for the different offload strategies
 
     Args:
-        request: 包含 model_name, quantization 等參數的請求
+        request: the request carrying model_name, quantization and other parameters
 
     Returns:
-        詳細的記憶體需求估計和 offload 策略建議
+        A detailed memory requirement estimate and offload strategy recommendations
     """
     try:
         logger.info(
@@ -943,7 +1003,7 @@ async def estimate_memory_requirements(
             sequence_length=request.sequence_length,
         )
 
-        # 如果估計失敗（無法識別模型）
+        # Estimation failed (model could not be identified)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result)
 
@@ -952,8 +1012,459 @@ async def estimate_memory_requirements(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Memory estimation error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Memory estimation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/inference/estimate_memory/gguf")
+async def estimate_gguf_memory(
+    request: Annotated[
+        GgufEstimateRequest,
+        Body(openapi_examples=cast(dict[str, Any], config_examples.GGUF_ESTIMATE_EXAMPLES)),
+    ],
+) -> GgufEstimateResponse:
+    """
+    Estimate how much memory a GGUF model needs under llama.cpp.
+
+    Reads the GGUF tensor table directly, so the weight and KV cache figures are computed
+    from real tensor sizes rather than inferred from a parameter count. Returns the
+    model / context / compute split for every GPU and for host RAM, plus a per-layer
+    breakdown into attention, dense FFN, MoE experts and shared expert.
+
+    Args:
+        request: llama.cpp runtime settings (-ngl / -c / -ctk / -ctv / -ncmoe and friends)
+
+    Returns:
+        Per-device memory breakdown and the per-layer detail table
+    """
+    try:
+        kwargs, parsed_args = apply_cli_args(
+            {
+                "n_gpu_layers": request.n_gpu_layers,
+                "n_ctx": request.n_ctx,
+                "n_batch": request.n_batch,
+                "n_ubatch": request.n_ubatch,
+                "cache_type_k": request.cache_type_k.value,
+                "cache_type_v": request.cache_type_v.value,
+                "n_cpu_moe": request.n_cpu_moe,
+                "cpu_moe": request.cpu_moe,
+                "flash_attn": request.flash_attn,
+                "n_parallel": request.n_parallel,
+                "no_kv_offload": request.no_kv_offload,
+                "swa_full": request.swa_full,
+                "n_gpu": request.n_gpu,
+                "tensor_split": request.tensor_split,
+                "model_path": request.model_path,
+            },
+            request.args,
+        )
+        model_path = _require_gguf_path(kwargs.pop("model_path"))
+
+        result = gguf_memory_estimator.estimate(
+            model_path, include_per_layer=request.include_per_layer, **kwargs
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result)
+        if parsed_args:
+            result["parsed_args"] = parsed_args
+            result["notes"].extend(parsed_args["warnings"])
+
+        if request.verify:
+            exact = gguf_memory_estimator.probe_exact(model_path, **kwargs)
+            if exact is None:
+                result["notes"].append(
+                    "Exact verification was requested but the fit-params probe is unavailable; "
+                    "install the prebuilt llama (setup_env with TRUSTA_INSTALL_LLAMA=1 / "
+                    "-InstallLlama) or set LLAMA_FIT_PARAMS_BIN to enable it."
+                )
+            else:
+                result["verification"] = exact
+
+        return GgufEstimateResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"GGUF memory estimation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/inference/estimate_memory/gguf/check")
+async def check_gguf_config(
+    config: Annotated[
+        InferenceConfig,
+        Body(openapi_examples=cast(dict[str, Any], config_examples.INFERENCE_CONFIG_EXAMPLES)),
+    ],
+    margin_mib: float = 1024,
+    verify: bool = False,
+    include_per_layer: bool = False,
+    gpu_budget_mib: float | None = None,
+    host_budget_mib: float | None = None,
+) -> GgufConfigCheckResponse:
+    """
+    Pre-flight check whether a llama-server configuration will run out of memory.
+
+    Accepts the very same InferenceConfig the frontend sends to `/inference/load_model`, so
+    no separate payload has to be assembled. Reads `n_gpu_layers` / `n_ctx` / `n_batch` /
+    `llama_server_np` and parses the llama.cpp flags inside `llama_server_extra_args`
+    (`-ncmoe`, `-ctk`, `-ctv`, `-ub`, `-fa`, `-ot` and so on). The extra arguments take
+    precedence, matching how llama-server appends them last on the command line.
+
+    When the configuration does not fit, a `suggestion` with a workable set of settings and
+    a ready-to-use argument string is returned alongside the verdict.
+
+    Args:
+        config: the same inference configuration accepted by load_model
+        margin_mib: memory to leave free on each GPU
+        verify: also cross-check with llama-fit-params (requires that binary)
+        include_per_layer: whether to return the per-layer detail table
+        gpu_budget_mib: override the GPU budget; defaults to currently free VRAM
+        host_budget_mib: override the host budget; defaults to currently free DRAM
+
+    Returns:
+        Whether it fits, the memory breakdown, and a suggested configuration if it does not
+    """
+    try:
+        # Resolve exactly as the engine will at launch. Note this follows symlinks, so a
+        # HuggingFace-cached GGUF lands on an extension-less blob file; the file is
+        # identified by its GGUF magic rather than by its name.
+        model_path = resolve_local_model_path(config.model_path or config.model_name)
+
+        kwargs, parsed_args = apply_cli_args(
+            {
+                "n_gpu_layers": config.n_gpu_layers,
+                "n_ctx": config.n_ctx,
+                "n_batch": config.n_batch,
+                "n_parallel": config.llama_server_np,
+            },
+            config.llama_server_extra_args,
+        )
+        kwargs.pop("model_path", None)  # -m inside extra args must not retarget the check
+
+        result = gguf_memory_estimator.estimate(
+            model_path, include_per_layer=include_per_layer, **kwargs
+        )
+        if "error" in result:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    **result,
+                    "hint": (
+                        "This endpoint only checks GGUF models served by llama.cpp. Point "
+                        "model_path (or model_name) at a GGUF file; a HuggingFace "
+                        "transformers directory cannot be checked here."
+                    ),
+                    "resolved_path": model_path,
+                },
+            )
+
+        notes = result["notes"]
+        if config.engine != InferenceEngine.LLAMA_SERVER:
+            notes.append(
+                f"Config engine is '{config.engine}', not 'llama_server'; these figures "
+                f"describe what llama.cpp would use."
+            )
+        if parsed_args:
+            notes.extend(parsed_args["warnings"])
+            if parsed_args["ignored"]:
+                notes.append(
+                    f"Flags with no effect on memory were skipped: "
+                    f"{', '.join(parsed_args['ignored'])}."
+                )
+
+        budgets = gguf_memory_estimator.resolve_budgets(gpu_budget_mib, host_budget_mib)
+        gpu_used = result["memory_breakdown_mib"]["gpu_total"]["total"]
+        host_used = result["memory_breakdown_mib"]["host"]["total"]
+        gpu_budget = budgets["gpu_budget_mib"]
+        host_budget = budgets["host_budget_mib"]
+
+        gpu_ok = gpu_budget is None or gpu_used + margin_mib <= gpu_budget
+        host_ok = host_budget is None or host_used <= host_budget
+        if gpu_budget is None:
+            verdict = "unknown_budget"
+            summary = (
+                f"Needs {gpu_used:.0f} MiB of VRAM, but no GPU budget could be read. "
+                f"Pass gpu_budget_mib to get a verdict."
+            )
+        elif not gpu_ok:
+            verdict = "gpu_short"
+            summary = (
+                f"Does not fit: needs {gpu_used:.0f} MiB plus a {margin_mib:.0f} MiB margin, "
+                f"but only {gpu_budget:.0f} MiB of VRAM is free."
+            )
+        elif not host_ok:
+            verdict = "host_short"
+            summary = (
+                f"Fits in VRAM ({gpu_used:.0f} of {gpu_budget:.0f} MiB) but needs "
+                f"{host_used:.0f} MiB of host RAM with only {host_budget:.0f} MiB free. "
+                f"llama.cpp mmaps weights, so this may still run from page cache."
+            )
+        else:
+            verdict = "ok"
+            summary = (
+                f"Fits: {gpu_used:.0f} MiB of {gpu_budget:.0f} MiB free VRAM, "
+                f"leaving {gpu_budget - gpu_used:.0f} MiB headroom."
+            )
+
+        suggestion = None
+        if verdict == "gpu_short":
+            advice = gguf_memory_estimator.recommend(
+                model_path,
+                n_ctx=kwargs.get("n_ctx", 0),
+                gpu_budget_mib=gpu_budget,
+                host_budget_mib=host_budget,
+                margin_mib=margin_mib,
+                verify=False,
+                n_batch=kwargs.get("n_batch", 2048),
+                n_ubatch=kwargs.get("n_ubatch", 512),
+                flash_attn=kwargs.get("flash_attn", True),
+                n_parallel=kwargs.get("n_parallel", 1),
+            )
+            if "error" in advice:
+                # recommend() only tunes -ngl / -ncmoe / -c / KV quant, so when it cannot
+                # find anything the binding term is usually one it does not touch.
+                suggestion = {"error": advice["error"], "dominant_cost": _dominant_cost(result)}
+                notes.append(suggestion["dominant_cost"])
+            else:
+                suggestion = {
+                    "recommended": advice["recommended"],
+                    "llama_server_args": advice["llama_server_args"],
+                    "memory_breakdown_mib": advice["memory_breakdown_mib"],
+                }
+
+        verification = None
+        if verify:
+            exact = gguf_memory_estimator.probe_exact(model_path, **kwargs)
+            if exact is None:
+                notes.append(
+                    "Exact verification was requested but the fit-params probe is unavailable; "
+                    "install the prebuilt llama (setup_env with TRUSTA_INSTALL_LLAMA=1 / "
+                    "-InstallLlama) or set LLAMA_FIT_PARAMS_BIN to enable it."
+                )
+            else:
+                verification = exact
+
+        return GgufConfigCheckResponse(
+            fits=(verdict == "ok"),
+            verdict=verdict,
+            summary=summary,
+            model_path=model_path,
+            resolved_settings=result["settings"],
+            parsed_args=parsed_args or None,
+            model_info=result["model_info"],
+            budgets_mib=budgets,
+            memory_breakdown_mib=result["memory_breakdown_mib"],
+            placement=result["placement"],
+            per_layer_mib=result.get("per_layer_mib"),
+            suggestion=suggestion,
+            verification=verification,
+            notes=notes,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"GGUF config check error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/inference/estimate_memory/gguf/sweep")
+async def sweep_gguf_memory(
+    request: Annotated[
+        GgufSweepRequest,
+        Body(openapi_examples=cast(dict[str, Any], config_examples.GGUF_SWEEP_EXAMPLES)),
+    ],
+) -> GgufSweepResponse:
+    """
+    Sweep -ngl x context x KV quantization and flag which combinations fit in VRAM.
+
+    Purely analytic: no llama.cpp process is started, so a whole grid costs almost nothing.
+    Budgets default to the currently free VRAM/DRAM when not supplied.
+
+    Args:
+        request: the grid to sweep and the memory budgets to test against
+
+    Returns:
+        Memory usage and feasibility for every combination in the grid
+    """
+    try:
+        kwargs, parsed_args = apply_cli_args(
+            {
+                "n_batch": request.n_batch,
+                "n_ubatch": request.n_ubatch,
+                "flash_attn": request.flash_attn,
+                "n_parallel": request.n_parallel,
+                "n_gpu": request.n_gpu,
+                "tensor_split": request.tensor_split,
+                "model_path": request.model_path,
+            },
+            request.args,
+            solved_keys=SWEEP_SOLVED_KEYS,
+        )
+        model_path = _require_gguf_path(kwargs.pop("model_path"))
+
+        result = gguf_memory_estimator.sweep(
+            model_path,
+            n_gpu_layers_grid=request.n_gpu_layers_grid,
+            n_ctx_grid=request.n_ctx_grid,
+            kv_quant_grid=[k.value for k in request.kv_quant_grid]
+            if request.kv_quant_grid
+            else None,
+            gpu_budget_mib=request.gpu_budget_mib,
+            host_budget_mib=request.host_budget_mib,
+            margin_mib=request.margin_mib,
+            **kwargs,
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result)
+        if parsed_args:
+            result["parsed_args"] = parsed_args
+        return GgufSweepResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"GGUF memory sweep error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/inference/estimate_memory/gguf/recommend")
+async def recommend_gguf_settings(
+    request: Annotated[
+        GgufRecommendRequest,
+        Body(openapi_examples=cast(dict[str, Any], config_examples.GGUF_RECOMMEND_EXAMPLES)),
+    ],
+) -> GgufRecommendResponse:
+    """
+    Solve for the best llama-server settings the current hardware can run.
+
+    Maximises -ngl first. For MoE models it prefers --n-cpu-moe to push expert weights into
+    DRAM, because that keeps attention and the KV cache on the GPU, and only then shortens
+    the context or quantizes the KV cache. Returns an argument string that can be pasted
+    straight into `llama_server_extra_args`.
+
+    Args:
+        request: target context, memory budgets, and which knobs may be adjusted
+
+    Returns:
+        The chosen settings, the memory breakdown, and a llama-server argument string
+    """
+    try:
+        kwargs, parsed_args = apply_cli_args(
+            {
+                "n_batch": request.n_batch,
+                "n_ubatch": request.n_ubatch,
+                "flash_attn": request.flash_attn,
+                "n_parallel": request.n_parallel,
+                "n_gpu": request.n_gpu,
+                "tensor_split": request.tensor_split,
+                "n_ctx": request.n_ctx,
+                "model_path": request.model_path,
+            },
+            request.args,
+            solved_keys=RECOMMEND_SOLVED_KEYS,
+        )
+        model_path = _require_gguf_path(kwargs.pop("model_path"))
+        n_ctx = kwargs.pop("n_ctx")
+
+        result = gguf_memory_estimator.recommend(
+            model_path,
+            n_ctx=n_ctx,
+            n_ctx_min=request.n_ctx_min,
+            n_ctx_max=request.n_ctx_max,
+            gpu_budget_mib=request.gpu_budget_mib,
+            host_budget_mib=request.host_budget_mib,
+            margin_mib=request.margin_mib,
+            allow_kv_quant=request.allow_kv_quant,
+            allow_ctx_reduction=request.allow_ctx_reduction,
+            target_utilization=request.target_utilization,
+            verify=request.verify,
+            **kwargs,
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result)
+        if parsed_args:
+            result["parsed_args"] = parsed_args
+            result["notes"].extend(parsed_args["warnings"])
+        return GgufRecommendResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"GGUF recommendation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/inference/estimate_memory/gguf/plan")
+async def plan_gguf_settings(
+    request: Annotated[
+        GgufPlanRequest,
+        Body(openapi_examples=cast(dict[str, Any], config_examples.GGUF_PLAN_EXAMPLES)),
+    ],
+) -> GgufPlanResponse:
+    """
+    Offer several usable configurations per GPU budget, one per KV cache type.
+
+    Where /recommend returns a single answer and only quantizes the KV cache as a last
+    resort, this solves every requested quantization against every requested budget and
+    ranks the results. That exposes the trade-off: on a fixed budget a q8_0 or q4_0 cache
+    buys context or offloaded layers, and a candidate that gains neither is flagged
+    `dominated`. Each candidate carries its own pasteable argument string.
+
+    Costs roughly a second per candidate when `verify` is on, so keep budgets x KV types
+    small; the limit is 32 combinations.
+
+    Args:
+        request: the GPU budgets, the KV cache types to offer, and the context bounds
+
+    Returns:
+        One plan per budget, each holding the ranked candidates and their memory figures
+    """
+    try:
+        kwargs, parsed_args = apply_cli_args(
+            {
+                "n_batch": request.n_batch,
+                "n_ubatch": request.n_ubatch,
+                "flash_attn": request.flash_attn,
+                "n_parallel": request.n_parallel,
+                "n_gpu": request.n_gpu,
+                "tensor_split": request.tensor_split,
+                "n_ctx": request.n_ctx,
+                "model_path": request.model_path,
+            },
+            request.args,
+            solved_keys=RECOMMEND_SOLVED_KEYS,
+        )
+        model_path = _require_gguf_path(kwargs.pop("model_path"))
+        n_ctx = kwargs.pop("n_ctx")
+
+        result = gguf_memory_estimator.plan(
+            model_path,
+            gpu_budgets_mib=request.gpu_budgets_mib,
+            kv_cache_types=[k.value for k in request.kv_cache_types]
+            if request.kv_cache_types
+            else None,
+            host_budget_mib=request.host_budget_mib,
+            margin_mib=request.margin_mib,
+            n_ctx=n_ctx,
+            n_ctx_min=request.n_ctx_min,
+            n_ctx_max=request.n_ctx_max,
+            target_utilization=request.target_utilization,
+            verify=request.verify,
+            **kwargs,
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result)
+        if parsed_args:
+            result["parsed_args"] = parsed_args
+            result["notes"].extend(parsed_args["warnings"])
+        return GgufPlanResponse(**result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"GGUF plan error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/inference/estimate_memory/{model_name}")
@@ -962,14 +1473,14 @@ async def estimate_memory_by_name(
     quantization: str = "none",
     batch_size: int = 1,
     sequence_length: int = 2048,
-):
+) -> dict[str, Any]:
     """
-    通過 URL 參數快速估計模型記憶體需求（簡化版）
+    Quickly estimate a model's memory requirements from URL parameters (simplified).
 
-    範例: /inference/estimate_memory/llama-2-7b?quantization=int8
+    Example: /inference/estimate_memory/llama-2-7b?quantization=int8
     """
     try:
-        # 處理 URL 編碼的模型名稱
+        # Handle the URL-encoded model name
         from urllib.parse import unquote
 
         decoded_model_name = unquote(model_name)
@@ -990,25 +1501,25 @@ async def estimate_memory_by_name(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Memory estimation error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Memory estimation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/inference/chat", deprecated=True)
-async def chat(request: ChatRequest):
-    """已棄用；請改用 OpenAI 相容 API。"""
+async def chat(request: ChatRequest) -> None:
+    """Deprecated; use the OpenAI-compatible API instead."""
     raise HTTPException(
         status_code=410,
         detail={
             "error": "deprecated_endpoint",
-            "message": "'/inference/chat' 已棄用，請改用 '/v1/chat/completions'。",
+            "message": "'/inference/chat' is deprecated; use '/v1/chat/completions' instead.",
         },
     )
 
 
-@app.post("/v1/chat/completions")
-async def openai_chat_completions(http_request: Request):
-    """OpenAI 相容聊天端點。"""
+@app.post("/v1/chat/completions", response_model=None)
+async def openai_chat_completions(http_request: Request) -> JSONResponse | StreamingResponse:
+    """OpenAI-compatible chat endpoint."""
 
     raw_payload = await parse_openai_chat_request_payload(http_request)
     logger.info(
@@ -1037,7 +1548,45 @@ async def openai_chat_completions(http_request: Request):
                 exc,
             )
 
-    def _resolve_enable_thinking() -> Optional[bool]:
+    async def _backend_generate(**kwargs: Any) -> Any:  # noqa: ANN401 - kwargs/return are dynamic backend generation passthrough
+        """
+        Non-stream generation: direct async HTTP for server engines, else the
+        sync worker path run off the event loop."""
+        if model_manager.uses_async_http():
+            return await model_manager.agenerate(**kwargs)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: model_manager.generate(**kwargs))
+
+    async def _backend_generate_stream(**kwargs: Any) -> AsyncIterator[Any]:  # noqa: ANN401 - kwargs passthrough, items are dynamic backend chunks
+        """
+        Stream items: direct async HTTP for server engines, else the sync
+        worker generator bridged onto the event loop via a producer thread."""
+        if model_manager.uses_async_http():
+            async for item in model_manager.agenerate_stream(**kwargs):
+                yield item
+            return
+
+        loop = asyncio.get_running_loop()
+        bridge: asyncio.Queue = asyncio.Queue()
+
+        def _producer() -> None:
+            try:
+                for item in model_manager.generate_stream(**kwargs):
+                    loop.call_soon_threadsafe(bridge.put_nowait, ("data", item))
+                loop.call_soon_threadsafe(bridge.put_nowait, ("done", None))
+            except Exception as exc:
+                loop.call_soon_threadsafe(bridge.put_nowait, ("error", exc))
+
+        threading.Thread(target=_producer, daemon=True).start()
+        while True:
+            kind, payload = await bridge.get()
+            if kind == "error":
+                raise payload
+            if kind == "done":
+                return
+            yield payload
+
+    def _resolve_enable_thinking() -> bool | None:
         if "enable_thinking" in request.model_fields_set:
             return request.enable_thinking
 
@@ -1055,8 +1604,9 @@ async def openai_chat_completions(http_request: Request):
         return max(1.0, float(request.presence_penalty))
 
     def _build_openai_stream_error(
-        message: Any, error_type: str = "server_error"
-    ) -> Dict[str, Any]:
+        message: Any,  # noqa: ANN401 - backend error payload is dynamic (str or dict)
+        error_type: str = "server_error",
+    ) -> dict[str, Any]:
         detail = message
         if isinstance(detail, dict):
             error_message = (
@@ -1069,7 +1619,7 @@ async def openai_chat_completions(http_request: Request):
             error_message = str(detail)
             error_code = None
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "error": {
                 "message": error_message,
                 "type": error_type,
@@ -1086,23 +1636,20 @@ async def openai_chat_completions(http_request: Request):
         return bool(stream_options.get("include_usage"))
 
     def _build_openai_usage(
-        prompt_tokens: Any,
-        completion_tokens: Any,
-        total_tokens: Any,
-        payload: Any = None,
-    ) -> Optional[Dict[str, Any]]:
+        prompt_tokens: Any,  # noqa: ANN401 - token counts are dynamic backend values
+        completion_tokens: Any,  # noqa: ANN401 - token counts are dynamic backend values
+        total_tokens: Any,  # noqa: ANN401 - token counts are dynamic backend values
+        payload: Any = None,  # noqa: ANN401 - dynamic backend response payload
+    ) -> dict[str, Any] | None:
         payload_dict = payload if isinstance(payload, dict) else {}
 
         if all(v is None for v in [prompt_tokens, completion_tokens, total_tokens]) and all(
-            payload_dict.get(key) is None
-            for key in ["gen_tokens", "gen_tps", "prompt_tps"]
+            payload_dict.get(key) is None for key in ["gen_tokens", "gen_tps", "prompt_tps"]
         ):
             return None
 
         pt = int(
-            prompt_tokens
-            if prompt_tokens is not None
-            else (payload_dict.get("prompt_tokens") or 0)
+            prompt_tokens if prompt_tokens is not None else (payload_dict.get("prompt_tokens") or 0)
         )
         ct = int(
             completion_tokens
@@ -1115,7 +1662,7 @@ async def openai_chat_completions(http_request: Request):
             else (payload_dict.get("total_tokens") or (pt + ct))
         )
 
-        usage: Dict[str, Any] = {
+        usage: dict[str, Any] = {
             "prompt_tokens": pt,
             "completion_tokens": ct,
             "total_tokens": tt,
@@ -1128,7 +1675,7 @@ async def openai_chat_completions(http_request: Request):
             usage["prompt_tps"] = payload_dict.get("prompt_tps")
         return usage
 
-    def _normalize_tool_choice_for_backend(tool_choice: Any) -> Any:
+    def _normalize_tool_choice_for_backend(tool_choice: Any) -> Any:  # noqa: ANN401 - tool_choice is dynamic OpenAI payload (str or dict), passed through
         if not isinstance(tool_choice, dict):
             return tool_choice
 
@@ -1164,7 +1711,7 @@ async def openai_chat_completions(http_request: Request):
     def _should_fallback_tool_passthrough_stream() -> bool:
         return False
 
-    def _is_known_tool_stream_mismatch_error(error: Any) -> bool:
+    def _is_known_tool_stream_mismatch_error(error: Any) -> bool:  # noqa: ANN401 - error is a dynamic backend exception/message
         message = str(error or "").strip().lower()
         if not message:
             return False
@@ -1177,13 +1724,13 @@ async def openai_chat_completions(http_request: Request):
         ]
         return any(pattern in message for pattern in known_patterns)
 
-    def _iter_text_stream_chunks(text: str, chunk_size: int = 32) -> List[str]:
+    def _iter_text_stream_chunks(text: str, chunk_size: int = 32) -> list[str]:
         """Split finalized text into small SSE-friendly chunks for smoother UI updates."""
         normalized = str(text or "")
         if not normalized:
             return []
 
-        chunks: List[str] = []
+        chunks: list[str] = []
         current = ""
         for char in normalized:
             current += char
@@ -1196,11 +1743,11 @@ async def openai_chat_completions(http_request: Request):
 
         return chunks
 
-    def _build_passthrough_messages() -> List[Dict[str, Any]]:
-        passthrough_messages: List[Dict[str, Any]] = []
+    def _build_passthrough_messages() -> list[dict[str, Any]]:
+        passthrough_messages: list[dict[str, Any]] = []
         for msg in request.messages:
             role = _normalize_openai_role(msg.role)
-            item: Dict[str, Any] = {"role": role}
+            item: dict[str, Any] = {"role": role}
 
             if getattr(msg, "name", None):
                 item["name"] = msg.name
@@ -1252,57 +1799,48 @@ async def openai_chat_completions(http_request: Request):
         created = int(time.time())
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
 
+        tool_kwargs = {
+            "prompt": passthrough_messages,
+            "max_new_tokens": request.max_tokens,
+            "temperature": generation_options["temperature"],
+            "top_p": generation_options["top_p"],
+            "top_k": generation_options["top_k"],
+            "repetition_penalty": generation_options["repetition_penalty"],
+            "system_prompt": None,
+            "total_timeout": request.total_timeout,
+            "enable_thinking": generation_options["enable_thinking"],
+            "tools": request.tools,
+            "tool_choice": _normalize_tool_choice_for_backend(request.tool_choice),
+            "request_id": backend_request_id,
+        }
+
         if not request.stream:
             async with generation_semaphore:
-                loop = asyncio.get_running_loop()
-                result_queue: asyncio.Queue = asyncio.Queue()
-
-                def _non_stream_worker():
-                    try:
-                        internal_resp = model_manager.generate(
-                            prompt=passthrough_messages,
-                            max_new_tokens=request.max_tokens,
-                            temperature=generation_options["temperature"],
-                            top_p=generation_options["top_p"],
-                            top_k=generation_options["top_k"],
-                            repetition_penalty=generation_options["repetition_penalty"],
-                            system_prompt=None,
-                            total_timeout=request.total_timeout,
-                            enable_thinking=generation_options["enable_thinking"],
-                            tools=request.tools,
-                            tool_choice=_normalize_tool_choice_for_backend(request.tool_choice),
-                            request_id=backend_request_id,
-                        )
-                        loop.call_soon_threadsafe(
-                            result_queue.put_nowait, ("ok", internal_resp)
-                        )
-                    except Exception as exc:
-                        loop.call_soon_threadsafe(result_queue.put_nowait, ("error", exc))
-
-                threading.Thread(target=_non_stream_worker, daemon=True).start()
-                kind, payload = await result_queue.get()
+                try:
+                    payload = await _backend_generate(**tool_kwargs)
+                    kind = "ok"
+                except Exception as exc:
+                    kind, payload = "error", exc
 
             if kind == "error":
                 raise HTTPException(status_code=500, detail=str(payload))
 
             internal_resp = payload
             if not isinstance(internal_resp, dict):
-                raise HTTPException(
-                    status_code=500, detail="Unexpected non-stream response type"
-                )
+                raise HTTPException(status_code=500, detail="Unexpected non-stream response type")
 
             content = internal_resp.get("response", internal_resp.get("result", ""))
             tool_calls = internal_resp.get("tool_calls")
             finish_reason = internal_resp.get("finish_reason") or (
                 "tool_calls" if tool_calls else "stop"
             )
-            message: Dict[str, Any] = {"role": "assistant", "content": content}
+            message: dict[str, Any] = {"role": "assistant", "content": content}
             if tool_calls:
                 message["tool_calls"] = tool_calls
                 if not content:
                     message["content"] = None
 
-            output: Dict[str, Any] = {
+            output: dict[str, Any] = {
                 "id": completion_id,
                 "object": "chat.completion",
                 "created": created,
@@ -1323,120 +1861,68 @@ async def openai_chat_completions(http_request: Request):
             )
             if usage_payload is not None:
                 output["usage"] = usage_payload
-            return JSONResponse(content=output)
+            return ORJSONResponse(content=output)
 
-        async def _passthrough_stream_to_openai():
+        async def _passthrough_stream_to_openai() -> AsyncIterator[str]:
             first_chunk = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model_name,
-                "choices": [
-                    {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
-                ],
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
             }
             yield f"data: {json.dumps(first_chunk)}\n\n"
 
             async with generation_semaphore:
-                loop = asyncio.get_running_loop()
-                queue: asyncio.Queue = asyncio.Queue()
                 use_non_stream_fallback = _should_fallback_tool_passthrough_stream()
 
-                def _producer():
+                def _fallback_done_payload(internal_resp: Any) -> dict[str, Any]:  # noqa: ANN401 - dynamic backend response payload
+                    internal_error = (
+                        internal_resp.get("error") if isinstance(internal_resp, dict) else None
+                    )
+                    return {
+                        "error": internal_error,
+                        "chunk": internal_resp.get("response", internal_resp.get("result", "")),
+                        "tool_calls": internal_resp.get("tool_calls"),
+                        "done": True,
+                        "finish_reason": internal_resp.get("finish_reason"),
+                        "prompt_tokens": internal_resp.get("prompt_tokens"),
+                        "gen_tokens": internal_resp.get("gen_tokens"),
+                        "total_tokens": internal_resp.get("total_tokens"),
+                    }
+
+                async def _iter_items() -> AsyncIterator[Any]:  # noqa: ANN401 - yields dynamic backend chunk dicts
+                    # Both branches route through _backend_generate[_stream], so
+                    # server engines go over async HTTP and transformers over the
+                    # worker path — while preserving the tool-diff-mismatch
+                    # fallback to non-stream planning.
+                    if use_non_stream_fallback:
+                        logger.info(
+                            "OpenAI tool passthrough stream uses non-stream backend planning to avoid tool diff mismatch during streaming"
+                        )
+                        internal_resp = await _backend_generate(**tool_kwargs)
+                        yield _fallback_done_payload(internal_resp)
+                        return
+
+                    text_stream_emitted = False
                     try:
-                        backend_kwargs = {
-                            "prompt": passthrough_messages,
-                            "max_new_tokens": request.max_tokens,
-                            "temperature": generation_options["temperature"],
-                            "top_p": generation_options["top_p"],
-                            "top_k": generation_options["top_k"],
-                            "repetition_penalty": generation_options["repetition_penalty"],
-                            "system_prompt": None,
-                            "total_timeout": request.total_timeout,
-                            "enable_thinking": generation_options["enable_thinking"],
-                            "tools": request.tools,
-                            "tool_choice": _normalize_tool_choice_for_backend(request.tool_choice),
-                            "request_id": backend_request_id,
-                        }
-
-                        if use_non_stream_fallback:
-                            logger.info(
-                                "OpenAI tool passthrough stream uses non-stream backend planning to avoid tool diff mismatch during streaming"
-                            )
-                            internal_resp = model_manager.generate(**backend_kwargs)
-                            internal_error = None
-                            if isinstance(internal_resp, dict):
-                                internal_error = internal_resp.get("error")
-                            loop.call_soon_threadsafe(
-                                queue.put_nowait,
-                                (
-                                    "data",
-                                    {
-                                        "error": internal_error,
-                                        "chunk": internal_resp.get("response", internal_resp.get("result", "")),
-                                        "tool_calls": internal_resp.get("tool_calls"),
-                                        "done": True,
-                                        "finish_reason": internal_resp.get("finish_reason"),
-                                        "prompt_tokens": internal_resp.get("prompt_tokens"),
-                                        "gen_tokens": internal_resp.get("gen_tokens"),
-                                        "total_tokens": internal_resp.get("total_tokens"),
-                                    },
-                                ),
-                            )
-                        else:
-                            text_stream_emitted = False
-                            try:
-                                stream_iterator = model_manager.generate_stream(**backend_kwargs)
-                                for item in stream_iterator:
-                                    if isinstance(item, dict) and item.get("chunk"):
-                                        text_stream_emitted = True
-                                    loop.call_soon_threadsafe(queue.put_nowait, ("data", item))
-                            except Exception as exc:
-                                if (
-                                    not text_stream_emitted
-                                    and _is_known_tool_stream_mismatch_error(exc)
-                                ):
-                                    logger.warning(
-                                        "OpenAI tool passthrough stream fallback triggered after tool diff mismatch: %s",
-                                        exc,
-                                    )
-                                    internal_resp = model_manager.generate(**backend_kwargs)
-                                    internal_error = None
-                                    if isinstance(internal_resp, dict):
-                                        internal_error = internal_resp.get("error")
-                                    loop.call_soon_threadsafe(
-                                        queue.put_nowait,
-                                        (
-                                            "data",
-                                            {
-                                                "error": internal_error,
-                                                "chunk": internal_resp.get("response", internal_resp.get("result", "")),
-                                                "tool_calls": internal_resp.get("tool_calls"),
-                                                "done": True,
-                                                "finish_reason": internal_resp.get("finish_reason"),
-                                                "prompt_tokens": internal_resp.get("prompt_tokens"),
-                                                "gen_tokens": internal_resp.get("gen_tokens"),
-                                                "total_tokens": internal_resp.get("total_tokens"),
-                                            },
-                                        ),
-                                    )
-                                else:
-                                    raise
-                        loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+                        async for item in _backend_generate_stream(**tool_kwargs):
+                            if isinstance(item, dict) and item.get("chunk"):
+                                text_stream_emitted = True
+                            yield item
                     except Exception as exc:
-                        loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
-
-                threading.Thread(target=_producer, daemon=True).start()
+                        if not text_stream_emitted and _is_known_tool_stream_mismatch_error(exc):
+                            logger.warning(
+                                "OpenAI tool passthrough stream fallback triggered after tool diff mismatch: %s",
+                                exc,
+                            )
+                            internal_resp = await _backend_generate(**tool_kwargs)
+                            yield _fallback_done_payload(internal_resp)
+                        else:
+                            raise
 
                 try:
-                    while True:
-                        kind, payload = await queue.get()
-                        if kind == "error":
-                            raise payload
-                        if kind == "done":
-                            break
-
-                        item = payload
+                    async for item in _iter_items():
                         if not isinstance(item, dict):
                             continue
 
@@ -1520,22 +2006,16 @@ async def openai_chat_completions(http_request: Request):
                             yield "data: [DONE]\n\n"
                             return
                 except (asyncio.CancelledError, ConnectionError, BrokenPipeError) as exc:
-                    logger.warning(
-                        "OpenAI tool passthrough stream disconnected: %s", exc
-                    )
+                    logger.warning("OpenAI tool passthrough stream disconnected: %s", exc)
                     _stop_backend_generation()
                     raise
                 except RuntimeError as exc:
-                    logger.warning(
-                        "OpenAI tool passthrough stream backend error: %s", exc
-                    )
+                    logger.warning("OpenAI tool passthrough stream backend error: %s", exc)
                     _stop_backend_generation()
                     yield f"data: {json.dumps(_build_openai_stream_error(str(exc)))}\n\n"
                     return
                 except Exception as exc:
-                    logger.error(
-                        "OpenAI tool passthrough stream exception: %s", exc
-                    )
+                    logger.exception("OpenAI tool passthrough stream exception: %s", exc)
                     yield f"data: {json.dumps(_build_openai_stream_error(str(exc)))}\n\n"
                     return
 
@@ -1567,9 +2047,7 @@ async def openai_chat_completions(http_request: Request):
         repetition_penalty=_resolve_repetition_penalty(),
         enable_thinking=_resolve_enable_thinking(),
     )
-    prompt_messages, session_id, current_user_text = _build_openai_prompt_messages(
-        request
-    )
+    prompt_messages, session_id, current_user_text = _build_openai_prompt_messages(request)
     model_name = (
         request.model
         or (
@@ -1584,32 +2062,35 @@ async def openai_chat_completions(http_request: Request):
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
 
     if not request.stream:
+        # Bind this generation to the session so /inference/stop_generation
+        # can resolve it by session_id alone.
+        _bind_worker_request(session_id, backend_request_id)
         async with generation_semaphore:
-            loop = asyncio.get_running_loop()
-            result_queue: asyncio.Queue = asyncio.Queue()
-
-            def _non_stream_worker():
+            gen_kwargs = {
+                "prompt": prompt_messages,
+                "max_new_tokens": request.max_tokens,
+                "temperature": generation_options["temperature"],
+                "top_p": generation_options["top_p"],
+                "top_k": generation_options["top_k"],
+                "repetition_penalty": generation_options["repetition_penalty"],
+                "system_prompt": None,
+                "total_timeout": request.total_timeout,
+                "enable_thinking": generation_options["enable_thinking"],
+                "request_id": backend_request_id,
+            }
+            try:
                 try:
-                    response_payload = model_manager.generate(
-                        prompt=prompt_messages,
-                        max_new_tokens=request.max_tokens,
-                        temperature=generation_options["temperature"],
-                        top_p=generation_options["top_p"],
-                        top_k=generation_options["top_k"],
-                        repetition_penalty=generation_options["repetition_penalty"],
-                        system_prompt=None,
-                        total_timeout=request.total_timeout,
-                        enable_thinking=generation_options["enable_thinking"],
-                        request_id=backend_request_id,
-                    )
-                    loop.call_soon_threadsafe(
-                        result_queue.put_nowait, ("ok", response_payload)
-                    )
+                    payload = await _backend_generate(**gen_kwargs)
+                    kind = "ok"
+                except asyncio.CancelledError:
+                    # Client disconnected mid-generation; stop the backend so it
+                    # doesn't keep generating after we've gone away.
+                    _stop_backend_generation()
+                    raise
                 except Exception as exc:
-                    loop.call_soon_threadsafe(result_queue.put_nowait, ("error", exc))
-
-            threading.Thread(target=_non_stream_worker, daemon=True).start()
-            kind, payload = await result_queue.get()
+                    kind, payload = "error", exc
+            finally:
+                _unbind_worker_request(backend_request_id)
 
         if kind == "error":
             error_str = str(payload)
@@ -1645,12 +2126,12 @@ async def openai_chat_completions(http_request: Request):
                         session_id, {"role": "user", "content": current_user_text}
                     )
                 session_manager.append_message(
-                    session_id, {"role": "assistant", "content": content}
+                    session_id, {"role": "assistant", "content": cast(str, content)}
                 )
             except Exception as exc:
-                logger.error(f"Failed to save session history (openai non-stream): {exc}")
+                logger.exception(f"Failed to save session history (openai non-stream): {exc}")
 
-        output: Dict[str, Any] = {
+        output: dict[str, Any] = {
             "id": completion_id,
             "object": "chat.completion",
             "created": created,
@@ -1671,55 +2152,38 @@ async def openai_chat_completions(http_request: Request):
         )
         if usage_payload is not None:
             output["usage"] = usage_payload
-        return JSONResponse(content=output)
+        return ORJSONResponse(content=output)
 
-    async def _stream_openai_generation():
+    async def _stream_openai_generation() -> AsyncIterator[str]:
         first_chunk = {
             "id": completion_id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": model_name,
-            "choices": [
-                {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
-            ],
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
         }
         yield f"data: {json.dumps(first_chunk)}\n\n"
 
         assistant_text = ""
+        # Bind this generation to the session so /inference/stop_generation
+        # can resolve it by session_id alone.
+        _bind_worker_request(session_id, backend_request_id)
         async with generation_semaphore:
-            loop = asyncio.get_running_loop()
-            queue: asyncio.Queue = asyncio.Queue()
-
-            def _producer():
-                try:
-                    stream_iterator = model_manager.generate_stream(
-                        prompt=prompt_messages,
-                        max_new_tokens=request.max_tokens,
-                        temperature=generation_options["temperature"],
-                        top_p=generation_options["top_p"],
-                        top_k=generation_options["top_k"],
-                        repetition_penalty=generation_options["repetition_penalty"],
-                        system_prompt=None,
-                        total_timeout=request.total_timeout,
-                        enable_thinking=generation_options["enable_thinking"],
-                        request_id=backend_request_id,
-                    )
-                    for item in stream_iterator:
-                        loop.call_soon_threadsafe(queue.put_nowait, ("data", item))
-                    loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
-                except Exception as exc:
-                    loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
-
-            threading.Thread(target=_producer, daemon=True).start()
+            gen_kwargs = {
+                "prompt": prompt_messages,
+                "max_new_tokens": request.max_tokens,
+                "temperature": generation_options["temperature"],
+                "top_p": generation_options["top_p"],
+                "top_k": generation_options["top_k"],
+                "repetition_penalty": generation_options["repetition_penalty"],
+                "system_prompt": None,
+                "total_timeout": request.total_timeout,
+                "enable_thinking": generation_options["enable_thinking"],
+                "request_id": backend_request_id,
+            }
 
             try:
-                while True:
-                    kind, payload = await queue.get()
-                    if kind == "error":
-                        raise payload
-                    if kind == "done":
-                        break
-
+                async for payload in _backend_generate_stream(**gen_kwargs):
                     item = payload if isinstance(payload, dict) else {"chunk": str(payload)}
                     if item.get("error"):
                         logger.error(
@@ -1753,9 +2217,7 @@ async def openai_chat_completions(http_request: Request):
                             "object": "chat.completion.chunk",
                             "created": created,
                             "model": model_name,
-                            "choices": [
-                                {"index": 0, "delta": {}, "finish_reason": "stop"}
-                            ],
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                         }
                         yield f"data: {json.dumps(done_payload)}\n\n"
 
@@ -1781,20 +2243,27 @@ async def openai_chat_completions(http_request: Request):
                                     {"role": "assistant", "content": assistant_text},
                                 )
                             except Exception as exc:
-                                logger.error(
+                                logger.exception(
                                     f"Failed to save session history (openai stream): {exc}"
                                 )
 
                         yield "data: [DONE]\n\n"
                         return
-            except (asyncio.CancelledError, ConnectionError, BrokenPipeError, RuntimeError) as exc:
+            except (asyncio.CancelledError, ConnectionError, BrokenPipeError) as exc:
+                # Genuine client disconnects only. Backend generation failures
+                # are wrapped in RuntimeError by both backend paths and must
+                # fall through to the generic handler below so the client
+                # receives a structured SSE error payload instead of a
+                # silently dropped connection.
                 logger.warning("OpenAI compatibility stream disconnected: %s", exc)
                 _stop_backend_generation()
                 raise
             except Exception as exc:
-                logger.error("OpenAI compatibility stream exception: %s", exc)
+                logger.exception("OpenAI compatibility stream exception: %s", exc)
                 yield f"data: {json.dumps(_build_openai_stream_error(str(exc)))}\n\n"
                 return
+            finally:
+                _unbind_worker_request(backend_request_id)
 
         yield "data: [DONE]\n\n"
 
@@ -1812,57 +2281,56 @@ async def openai_chat_completions(http_request: Request):
 # ==================== RAG Endpoints ====================
 
 
-@app.get("/rag/docs")
-async def rag_list_docs():
-    """列出目前既有文件"""
+@app.get("/rag/docs", response_model=None)
+async def rag_list_docs() -> JSONResponse:
+    """List the existing documents."""
     try:
-        return JSONResponse(content={"documents": rag_manager.list_documents()})
+        return ORJSONResponse(content={"documents": rag_manager.list_documents()})
     except Exception as e:
-        logger.error(f"Failed to list RAG docs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to list RAG docs: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.post("/rag/docs")
-async def rag_add_doc(payload: dict):
-    """新增或更新文件與對應資料庫內容
-    請求格式: {"doc_id": Optional[str], "content": str}
+@app.post("/rag/docs", response_model=None)
+async def rag_add_doc(payload: dict) -> JSONResponse:
+    """
+    Add or update a document and its database content
+    Request format: {"doc_id": Optional[str], "content": str}.
     """
     try:
         doc_id = payload.get("doc_id")
         content = payload.get("content")
         if not content or not isinstance(content, str):
-            raise HTTPException(
-                status_code=400, detail="content is required and must be a string"
-            )
+            raise HTTPException(status_code=400, detail="content is required and must be a string")
         result = rag_manager.add_document(content=content, doc_id=doc_id)
-        return JSONResponse(content={"status": "ok", "result": result})
+        return ORJSONResponse(content={"status": "ok", "result": result})
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to add RAG doc: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to add RAG doc: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.delete("/rag/docs/{doc_id}")
-async def rag_delete_doc(doc_id: str):
-    """刪除指定文件與資料庫內容"""
+@app.delete("/rag/docs/{doc_id}", response_model=None)
+async def rag_delete_doc(doc_id: str) -> JSONResponse:
+    """Delete the given document and its database content."""
     try:
         result = rag_manager.delete_document(doc_id)
-        return JSONResponse(content={"status": "ok", "result": result})
+        return ORJSONResponse(content={"status": "ok", "result": result})
     except Exception as e:
-        logger.error(f"Failed to delete RAG doc: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to delete RAG doc: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.get("/rag/search")
-async def rag_search(q: str, k: int = 3):
-    """搜尋 RAG 文檔，回傳前 k 筆"""
+@app.get("/rag/search", response_model=None)
+async def rag_search(q: str, k: int = 3) -> JSONResponse:
+    """Search the RAG documents and return the top k results."""
     try:
         results = rag_manager.search(q, k=k)
-        return JSONResponse(content={"query": q, "k": k, "results": results})
+        return ORJSONResponse(content={"query": q, "k": k, "results": results})
     except Exception as e:
-        logger.error(f"Failed to search RAG: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to search RAG: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ==================== Training Endpoints ====================
@@ -1870,24 +2338,21 @@ async def rag_search(q: str, k: int = 3):
 
 @app.post("/training/start")
 async def start_training(
-    config: TrainingConfig = Body(
-        ..., openapi_examples=config_examples.TRAINING_CONFIG_EXAMPLES
-    )
-):
+    config: Annotated[
+        TrainingConfig,
+        Body(openapi_examples=cast(dict[str, Any], config_examples.TRAINING_CONFIG_EXAMPLES)),
+    ],
+) -> dict[str, Any]:
     """
-    開始訓練
-    支持 LoRA/QLoRA/Full Parameter Training
+    Start training
+    Supports LoRA/QLoRA/Full Parameter Training.
     """
     try:
-        logger.info(
-            f"Starting training request: {config.model_name} with method {config.method}"
-        )
+        logger.info(f"Starting training request: {config.model_name} with method {config.method}")
 
         # Check if model is loaded for inference
         if model_manager.is_loaded():
-            logger.warning(
-                "Inference model is loaded. Consider unloading it before training."
-            )
+            logger.warning("Inference model is loaded. Consider unloading it before training.")
 
         # Start training
         result = training_manager.start_training(config)
@@ -1900,26 +2365,24 @@ async def start_training(
         }
 
     except Exception as e:
-        logger.error(f"Failed to start training: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to start training: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.get("/training/status", response_model=TrainingStatus)
-async def get_training_status():
-    """獲取訓練狀態"""
+@app.get("/training/status")
+async def get_training_status() -> TrainingStatus:
+    """Get the training status."""
     try:
         status = training_manager.get_status()
         return status
     except Exception as e:
-        logger.error(f"Failed to get training status: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to get training status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.get(
-    "/training/status/{session_id}/history", response_model=TrainingHistoryResponse
-)
-async def get_training_history(session_id: str):
-    """獲取訓練歷史紀錄（包含 Loss, Learning Rate 等）"""
+@app.get("/training/status/{session_id}/history")
+async def get_training_history(session_id: str) -> TrainingHistoryResponse:
+    """Get the training history (Loss, Learning Rate and so on)."""
     try:
         history = training_manager.get_history(session_id)
         if not history or "training_logs" not in history:
@@ -1929,22 +2392,23 @@ async def get_training_history(session_id: str):
             )
 
         return TrainingHistoryResponse(
-            session_id=session_id, logs=history["training_logs"]
+            session_id=session_id,
+            logs=history["training_logs"],
+            eval_logs=history.get("eval_logs", []),
         )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get training history: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to get training history: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get(
     "/system/resource/{session_id}/history",
-    response_model=SystemResourceHistoryResponse,
     response_model_exclude_none=True,
 )
-async def get_system_resource_history(session_id: str):
-    """獲取訓練時的系統資源歷史紀錄"""
+async def get_system_resource_history(session_id: str) -> SystemResourceHistoryResponse:
+    """Get the system resource history recorded during training."""
     try:
         history = training_manager.get_history(session_id)
         if not history or "resource_logs" not in history:
@@ -1959,16 +2423,97 @@ async def get_system_resource_history(session_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get system resource history: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to get system resource history: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def _validate_job_id(job_id: str) -> str:
+    # Guard against path traversal — job ids are uuid-like tokens.
+    if not job_id or "/" in job_id or "\\" in job_id or ".." in job_id:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    return job_id
+
+
+@app.get("/training/{job_id}/log")
+async def get_training_log(job_id: str, since: int = 0) -> TrainingLogEventsResponse:
+    """
+    Return structured training-log events for a job (incremental via `since`).
+
+    Reads the durable events.jsonl on disk, so it works even when Redis is down
+    and lets clients browse past sessions / backfill after an SSE reconnect.
+    """
+    from .training.core.job_logger import job_log_dir, read_events
+
+    _validate_job_id(job_id)
+    events = await asyncio.to_thread(read_events, job_id, since)
+    if not events and not job_log_dir(job_id).exists():
+        raise HTTPException(status_code=404, detail="Training job log not found")
+    cursor = events[-1]["seq"] if events else since
+    return TrainingLogEventsResponse(job_id=job_id, cursor=cursor, events=events)
+
+
+@app.get("/training/{job_id}/log/stream", response_model=None)
+async def stream_training_log(job_id: str, request: Request, since: int = 0) -> StreamingResponse:
+    """
+    Server-Sent Events stream of a job's training log.
+
+    Emits the backlog first, then tails new events as they are appended. Each
+    event carries its `seq` as the SSE id so a client can resume with
+    `Last-Event-ID` / `?since=`. Closes on a terminal event or client disconnect.
+    """
+    from .training.core.job_logger import is_terminal_event, job_log_dir, read_events
+
+    _validate_job_id(job_id)
+    if not job_log_dir(job_id).exists():
+        raise HTTPException(status_code=404, detail="Training job log not found")
+
+    # Resume support: Last-Event-ID header wins over the query param.
+    last_event_id = request.headers.get("last-event-id")
+    if last_event_id:
+        try:
+            since = int(last_event_id)
+        except ValueError:
+            pass
+
+    async def event_gen() -> AsyncIterator[str]:
+        last_seq = since
+        ticks_since_data = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            events = await asyncio.to_thread(read_events, job_id, last_seq)
+            if events:
+                ticks_since_data = 0
+                for ev in events:
+                    last_seq = int(ev.get("seq", last_seq))
+                    yield (
+                        f"id: {last_seq}\n"
+                        f"event: {ev.get('type', 'message')}\n"
+                        f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                    )
+                    if is_terminal_event(ev):
+                        return
+            else:
+                ticks_since_data += 1
+                if ticks_since_data % 15 == 0:
+                    # keep-alive comment so proxies don't drop an idle stream
+                    yield ": keepalive\n\n"
+            await asyncio.sleep(1.0)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # disable nginx proxy buffering for SSE
+    }
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=headers)
 
 
 @app.get("/training/error_details")
-async def get_training_error_details():
+async def get_training_error_details() -> dict[str, Any]:
     """
-    獲取詳細的訓練錯誤信息（包括完整的 traceback）
-    當訓練失敗時，可以通過此端點獲取完整的錯誤堆棧信息
-    格式與 /inference/error_details 一致
+    Get detailed training error information (including the full traceback)
+    When training fails, this endpoint returns the complete error stack,
+    in the same format as /inference/error_details.
     """
     try:
         error_details = training_manager.get_error_details()
@@ -1984,13 +2529,13 @@ async def get_training_error_details():
             "process_alive": error_details.get("process_alive", False),
         }
     except Exception as e:
-        logger.error(f"Failed to get training error details: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to get training error details: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/training/stop")
-async def stop_training():
-    """停止訓練"""
+async def stop_training() -> dict[str, Any]:
+    """Stop training."""
     try:
         result = training_manager.stop_training()
         return {
@@ -1999,22 +2544,23 @@ async def stop_training():
             "result": result,
         }
     except Exception as e:
-        logger.error(f"Failed to stop training: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to stop training: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/training/force_cleanup_gpu")
-async def force_cleanup_training_gpu():
-    """強制清理 Training 相關 GPU 進程與記憶體。
+async def force_cleanup_training_gpu() -> dict[str, Any]:
+    """
+    Force cleanup of the training-related GPU processes and memory.
 
-    行為與 /inference/force_cleanup_gpu 類似：
-    - 終止當前 training worker process（若存在）。
-    - 重置 TrainingProcessManager 狀態，確保下次訓練在乾淨進程上啟動。
-    注意：這不會影響 inference 相關的 worker。
+    Behaves like /inference/force_cleanup_gpu:
+    - Terminates the current training worker process (if any).
+    - Resets the TrainingProcessManager state so the next run starts on a clean process.
+    Note: this does not affect the inference workers.
     """
     try:
         logger.warning("Force training GPU cleanup requested")
-        # 直接呼叫 training_process_manager.cleanup() 終止當前 worker 進程並重置狀態。
+        # Call training_process_manager.cleanup() directly to kill the current worker and reset state.
         from .training.training_process import training_process_manager
 
         training_process_manager.cleanup()
@@ -2023,16 +2569,16 @@ async def force_cleanup_training_gpu():
             "message": "Training worker process terminated and state reset.",
         }
     except Exception as e:
-        logger.error(f"Failed to force cleanup training GPU: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to force cleanup training GPU: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ==================== Configuration Endpoints ====================
 
 
 @app.get("/config/quantization_types")
-async def get_quantization_types():
-    """獲取支持的量化類型"""
+async def get_quantization_types() -> dict[str, Any]:
+    """Get the supported quantization types."""
     return {
         "quantization_types": [
             {
@@ -2047,8 +2593,8 @@ async def get_quantization_types():
 
 
 @app.get("/config/offload_types")
-async def get_offload_types():
-    """獲取支持的 offload 類型"""
+async def get_offload_types() -> dict[str, Any]:
+    """Get the supported offload types."""
     return {
         "offload_types": [
             {"value": "none", "label": "No Offload", "description": "Keep all in GPU"},
@@ -2067,8 +2613,8 @@ async def get_offload_types():
 
 
 @app.get("/config/training_methods")
-async def get_training_methods():
-    """獲取支持的訓練方法"""
+async def get_training_methods() -> dict[str, Any]:
+    """Get the supported training methods."""
     return {
         "training_methods": [
             {
@@ -2089,25 +2635,25 @@ async def get_training_methods():
 # ==================== Models Listing Endpoint ====================
 
 
-@app.get("/config/models")
-async def list_available_models():
-    """列出可用的推理模型清單（基礎模型 + 本地微調模型）"""
+@app.get("/config/models", response_model=None)
+async def list_available_models() -> JSONResponse:
+    """List the available inference models (base models + local fine-tuned models)."""
     try:
         data = model_registry.list_models()
-        return JSONResponse(content=data)
+        return ORJSONResponse(content=data)
     except Exception as e:
-        logger.error(f"Failed to list models: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to list models: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/config/models/refresh_context_lengths")
-async def refresh_model_context_lengths():
+async def refresh_model_context_lengths() -> dict[str, Any]:
     """
-    刷新所有 Hugging Face 模型的 max context length
-    從 HF API 獲取最新的 max_position_embeddings 資訊
+    Refresh the max context length of every Hugging Face model
+    Fetches the latest max_position_embeddings from the HF API.
     """
     try:
-        # 嘗試讀取 HF token
+        # Try to read the HF token
         from .utils.token_utils import load_hf_token
 
         hf_token = load_hf_token()
@@ -2119,67 +2665,66 @@ async def refresh_model_context_lengths():
             "message": "Model context lengths refreshed successfully",
         }
     except Exception as e:
-        logger.error(f"Failed to refresh context lengths: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to refresh context lengths: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/config/models/download")
 async def download_and_register_model(
-    model_id: str = Body(
-        ..., description="Hugging Face 模型 ID，例如: 'Qwen/Qwen2.5-0.5B-Instruct'"
-    ),
-    label: Optional[str] = Body(
-        None,
-        description="自訂標籤名稱，若不提供則使用模型 ID 的最後部分。若是 GGUF 檔案，請在此填入檔案完整名稱 (如 'model.gguf')",
-    ),
-    cache_dir: Optional[str] = Body(
-        None, description="自訂 cache 根目錄，若不提供則使用 HF_HOME 或預設路徑"
-    ),
-    force_download: bool = Body(
-        False, description="是否強制重新下載（即使本地已存在）"
-    ),
-    filename: Optional[str] = Body(
-        None, description="[GGUF專用] 若指定此欄位，則僅下載該檔案並註冊為 GGUF 模型"
-    ),
-):
+    model_id: Annotated[
+        str, Body(description="Hugging Face model ID, e.g. 'Qwen/Qwen2.5-0.5B-Instruct'")
+    ],
+    label: Annotated[
+        str | None,
+        Body(
+            description="Custom label; defaults to the last segment of the model ID. For a GGUF file, put the full file name here (e.g. 'model.gguf')"
+        ),
+    ] = None,
+    cache_dir: Annotated[
+        str | None, Body(description="Custom cache root; defaults to HF_HOME or the default path")
+    ] = None,
+    force_download: Annotated[bool, Body(description="Force re-download even if present")] = False,
+    filename: Annotated[
+        str | None, Body(description="[GGUF only] Download this file only and register as GGUF")
+    ] = None,
+) -> dict[str, Any]:
     """
-    從 Hugging Face 下載模型並註冊到 model registry
+    Download a model from Hugging Face and register it in the model registry.
 
-    此端點會：
-    1. 啟動背景下載任務（使用 DownloadManager）
-    2. 返回 task_id 以供查詢進度
+    This endpoint:
+    1. starts a background download task (via DownloadManager)
+    2. returns a task_id for progress queries
 
-    查詢進度: GET /config/models/download/{task_id}
+    Check progress: GET /config/models/download/{task_id}
     """
     try:
-        # 優先使用明確傳入的 filename
+        # Prefer the explicitly supplied filename
         target_filename = filename
 
-        # 生成標籤（若未提供）
+        # Generate a label when none was supplied
         if not label:
             label = model_id.split("/")[-1].lower().replace("-", "_").replace(".", "_")
         else:
-            # 便利功能：如果 label 看起來像是 GGUF 檔名且 user 未指定 filename，則將其視為 filename
+            # Convenience: if the label looks like a GGUF file name and no filename was given, treat it as the filename
             if not target_filename and (label.endswith(".gguf") or ".gguf" in label):
                 target_filename = label
 
-        # 檢查標籤是否已存在
+        # Check whether the label already exists
         existing_models = model_registry.list_models()
         if target_filename:
-            gguf_models = existing_models.get("llama_gguf_models", [])
-            # GGUF 模型的註冊特例：label 可能是路徑，也可能是顯示名稱。
-            # 這裡我們只做簡單檢查，download manager 會處理路徑覆蓋
+            # Special case for GGUF registration: the label may be a path or a display name.
+            # Only a light check here; the download manager handles path overrides
             pass
         else:
             base_models = existing_models.get("base_models", [])
-            # 若強制下載，則允許重複（覆蓋）; 但通常標籤唯一性會保留
+            # Force download allows duplicates (overwrite); normally label uniqueness is kept
             if not force_download and any(m.get("label") == label for m in base_models):
                 raise HTTPException(
                     status_code=409,
                     detail=f"Model with label '{label}' already exists in registry. Use force_download=true to re-download.",
                 )
 
-        # 啟動下載任務
+        # Start the download task
         task_id = download_manager.start_download(
             model_id=model_id,
             label=label,
@@ -2201,13 +2746,13 @@ async def download_and_register_model(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to start model download: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to start model download: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/config/models/download/{task_id}")
-async def get_download_status(task_id: str):
-    """查詢下載任務狀態"""
+async def get_download_status(task_id: str) -> DownloadTask:
+    """Get the status of a download task."""
     task = download_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -2215,19 +2760,20 @@ async def get_download_status(task_id: str):
 
 
 @app.get("/config/models/downloads")
-async def list_download_tasks():
-    """列出所有下載任務"""
+async def list_download_tasks() -> dict[str, Any]:
+    """List all download tasks."""
     return {"tasks": download_manager.list_tasks()}
 
 
-@app.post("/config/models/convert", response_model=ConversionResponse)
+@app.post("/config/models/convert")
 async def convert_model_to_gguf(
-    request: ModelConversionRequest = Body(
-        ..., openapi_examples=config_examples.CONVERSION_CONFIG_EXAMPLES
-    ),
-):
+    request: Annotated[
+        ModelConversionRequest,
+        Body(openapi_examples=cast(dict[str, Any], config_examples.CONVERSION_CONFIG_EXAMPLES)),
+    ],
+) -> ConversionResponse:
     """
-    將 Hugging Face 模型轉換為 GGUF 格式
+    Convert a Hugging Face model to GGUF format.
     """
     try:
         job_id = conversion_manager.start_conversion(
@@ -2235,18 +2781,16 @@ async def convert_model_to_gguf(
             output_path=request.output_path,
             outtype=request.outtype,
         )
-        return ConversionResponse(
-            job_id=job_id, status="pending", message="Conversion job started"
-        )
+        return ConversionResponse(job_id=job_id, status="pending", message="Conversion job started")
     except Exception as e:
-        logger.error(f"Failed to start conversion: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to start conversion: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.get("/config/models/convert/{job_id}", response_model=ConversionResponse)
-async def get_conversion_status(job_id: str):
+@app.get("/config/models/convert/{job_id}")
+async def get_conversion_status(job_id: str) -> ConversionResponse:
     """
-    查詢模型轉換狀態
+    Get the status of a model conversion.
     """
     status = conversion_manager.get_job_status(job_id)
     if not status:
@@ -2258,22 +2802,20 @@ async def get_conversion_status(job_id: str):
 
 
 @app.delete("/config/models/{label:path}")
-async def delete_model(label: str, delete_files: bool = False):
+async def delete_model(label: str, delete_files: bool = False) -> dict[str, Any]:
     """
-    刪除已註冊的模型
+    Delete a registered model.
 
     Args:
-        label: 模型標籤
-        delete_files: 是否同時刪除本地檔案 (預設 False)
+        label: the model label
+        delete_files: also delete the local files (default False)
     """
     try:
         # 1. Remove from registry
         model_info = model_registry.delete_model(label)
 
         if not model_info:
-            raise HTTPException(
-                status_code=404, detail=f"Model with label '{label}' not found"
-            )
+            raise HTTPException(status_code=404, detail=f"Model with label '{label}' not found")
 
         result = {
             "status": "deleted",
@@ -2295,12 +2837,12 @@ async def delete_model(label: str, delete_files: bool = False):
                 raw_path = model_info.get("local_path")
                 if raw_path:
                     path_to_delete = raw_path
-                    # 優化：如果是 Hugging Face Cache 結構，嘗試刪除整個模型目錄以釋放 blobs 空間
-                    # 標準結構: .../models--Org--Repo/snapshots/HASH
+                    # Optimization: for a Hugging Face cache layout, delete the whole model
+                    # directory to reclaim the blobs. Standard layout: .../models--Org--Repo/snapshots/HASH
                     try:
                         p = Path(raw_path)
                         if "snapshots" in p.parts:
-                            # 往上找直到找到 models-- 開頭的目錄
+                            # Walk up until a directory starting with models-- is found
                             current = p
                             while len(current.parts) > 1:
                                 if current.name.startswith("models--"):
@@ -2313,11 +2855,11 @@ async def delete_model(label: str, delete_files: bool = False):
                     except Exception as e:
                         logger.warning(f"Error parsing HF cache path: {e}")
                 else:
-                    # Fallback: 如果沒有 local_path，嘗試從 HF_HOME 推斷預設路徑
+                    # Fallback: without a local_path, infer the default path from HF_HOME
                     hf_id = model_info.get("base_model_name")
                     if hf_id and "/" in hf_id:
                         try:
-                            hf_home = os.getenv("HF_HOME") or os.path.expanduser(
+                            hf_home = os.getenv("HF_HOME") or os.path.expanduser(  # noqa: ASYNC240 - cheap string expansion, not blocking I/O
                                 "~/.cache/huggingface"
                             )
                             # HF cache directory naming convention: models--Org--Repo
@@ -2330,9 +2872,7 @@ async def delete_model(label: str, delete_files: bool = False):
                                     f"No local_path found, but detected default HF cache path: {path_to_delete}"
                                 )
                         except Exception as e:
-                            logger.warning(
-                                f"Error inferring default HF cache path: {e}"
-                            )
+                            logger.warning(f"Error inferring default HF cache path: {e}")
 
             elif model_info.get("type") == "finetuned":
                 # For finetuned models, check 'output_dir'
@@ -2350,7 +2890,7 @@ async def delete_model(label: str, delete_files: bool = False):
                     try:
                         p = Path(path_to_delete)
                         if "snapshots" in p.parts:
-                            # 往上找直到找到 models-- 開頭的目錄
+                            # Walk up until a directory starting with models-- is found
                             current = p
                             while len(current.parts) > 1:
                                 if current.name.startswith("models--"):
@@ -2361,25 +2901,33 @@ async def delete_model(label: str, delete_files: bool = False):
                                     break
                                 current = current.parent
                     except Exception as e:
-                        logger.warning(
-                            f"Error parsing GGUF path for HF cache detection: {e}"
-                        )
+                        logger.warning(f"Error parsing GGUF path for HF cache detection: {e}")
 
             if path_to_delete:
                 # Guard against deleting OS system directories via a poisoned
                 # registry entry (e.g. output_dir="/etc" from a malicious config).
                 _BLOCKED_DELETE_PREFIXES = (
-                    "/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/lib",
-                    "/lib", "/lib64", "/boot", "/sys", "/proc", "/dev", "/run",
-                    "/root", "/home",
+                    "/etc",
+                    "/bin",
+                    "/sbin",
+                    "/usr/bin",
+                    "/usr/sbin",
+                    "/usr/lib",
+                    "/lib",
+                    "/lib64",
+                    "/boot",
+                    "/sys",
+                    "/proc",
+                    "/dev",
+                    "/run",
+                    "/root",
+                    "/home",
                 )
-                _resolved_delete = os.path.realpath(path_to_delete)
-                if not os.path.lexists(path_to_delete):
+                _resolved_delete = os.path.realpath(path_to_delete)  # noqa: ASYNC240 - cheap stat; the actual delete already runs in to_thread
+                if not os.path.lexists(path_to_delete):  # noqa: ASYNC240 - cheap stat
                     result["files_removed"] = True
                     result["path"] = path_to_delete
-                    result["file_deletion_note"] = (
-                        "Path already missing; treated as deleted"
-                    )
+                    result["file_deletion_note"] = "Path already missing; treated as deleted"
                     logger.info(
                         f"Model files for {label} already missing at {path_to_delete}; treated as deleted"
                     )
@@ -2390,18 +2938,19 @@ async def delete_model(label: str, delete_files: bool = False):
                     logger.error(
                         f"Blocked attempt to delete protected system path: {path_to_delete}"
                     )
-                    result["file_deletion_error"] = "Deletion blocked: path resolves to a protected system directory"
+                    result["file_deletion_error"] = (
+                        "Deletion blocked: path resolves to a protected system directory"
+                    )
                 else:
                     try:
-                        if os.path.isdir(path_to_delete):
-                            shutil.rmtree(path_to_delete)
+                        if os.path.isdir(path_to_delete):  # noqa: ASYNC240 - cheap stat
+                            # Deleting a large model directory can take seconds; move it off the event loop
+                            await asyncio.to_thread(shutil.rmtree, path_to_delete)
                         else:
-                            os.remove(path_to_delete)
+                            await asyncio.to_thread(os.remove, path_to_delete)
                         result["files_removed"] = True
                         result["path"] = path_to_delete
-                        logger.info(
-                            f"Deleted local files for model {label} at {path_to_delete}"
-                        )
+                        logger.info(f"Deleted local files for model {label} at {path_to_delete}")
                     except FileNotFoundError:
                         result["files_removed"] = True
                         result["path"] = path_to_delete
@@ -2412,7 +2961,7 @@ async def delete_model(label: str, delete_files: bool = False):
                             f"Model files for {label} disappeared during deletion at {path_to_delete}; treated as deleted"
                         )
                     except Exception as e:
-                        logger.error(f"Failed to delete files at {path_to_delete}: {e}")
+                        logger.exception(f"Failed to delete files at {path_to_delete}: {e}")
                         result["file_deletion_error"] = str(e)
 
         return result
@@ -2420,45 +2969,52 @@ async def delete_model(label: str, delete_files: bool = False):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete model: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to delete model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ==================== System Resource Endpoints ====================
 
 
-@app.get("/system/resources", response_model=SystemResourcesResponse)
+@app.get("/system/resources")
 async def get_system_resources(
     mode: str = "spec", disk_path: str = "/", calc_size: bool = False
-):
+) -> SystemResourcesResponse:
     """
-    查詢系統資源（CPU/RAM/GPU/DISK）。
-    - mode=spec: 回傳硬體規格（總量、型號等）
-    - mode=usage: 回傳當前使用量（負載、已用記憶體等）
+    Query system resources (CPU/RAM/GPU/DISK).
+    - mode=spec: return hardware specs (totals, models and so on)
+    - mode=usage: return current usage (load, used memory and so on).
 
-    可選參數：
-    - disk_path: 指定磁碟查詢路徑（預設 "/"）
+    Optional parameters:
+    - disk_path: the disk path to query (default "/")
     """
     try:
         # Validate mode
         if mode not in ["spec", "usage"]:
-            raise HTTPException(
-                status_code=400, detail="mode must be 'spec' or 'usage'"
-            )
+            raise HTTPException(status_code=400, detail="mode must be 'spec' or 'usage'")
 
         # calc_size triggers a recursive os.walk; block OS system directories
         # that are never valid data/model paths to prevent filesystem enumeration.
         if calc_size:
             _BLOCKED_CALC_PREFIXES = (
-                "/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/lib",
-                "/lib", "/lib64", "/boot", "/sys", "/proc", "/dev", "/run",
-                "/root", "/home",
+                "/etc",
+                "/bin",
+                "/sbin",
+                "/usr/bin",
+                "/usr/sbin",
+                "/usr/lib",
+                "/lib",
+                "/lib64",
+                "/boot",
+                "/sys",
+                "/proc",
+                "/dev",
+                "/run",
+                "/root",
+                "/home",
             )
-            _resolved = os.path.realpath(disk_path)
-            if any(
-                _resolved == p or _resolved.startswith(p + "/")
-                for p in _BLOCKED_CALC_PREFIXES
-            ):
+            _resolved = os.path.realpath(disk_path)  # noqa: ASYNC240 - cheap stat
+            if any(_resolved == p or _resolved.startswith(p + "/") for p in _BLOCKED_CALC_PREFIXES):
                 raise HTTPException(
                     status_code=400,
                     detail=f"calc_size is not allowed for system directory: {disk_path}",
@@ -2466,8 +3022,9 @@ async def get_system_resources(
 
         cpu_res = system_monitor.get_cpu_resource(mode)
         gpu_res = system_monitor.get_gpu_resource(mode)
-        disk_res = system_monitor.get_disk_resource(
-            path=disk_path, calc_size=calc_size, mode=mode
+        # calc_size triggers a recursive os.walk; move it off the event loop to avoid blocking
+        disk_res = await asyncio.to_thread(
+            system_monitor.get_disk_resource, path=disk_path, calc_size=calc_size, mode=mode
         )
 
         return SystemResourcesResponse(
@@ -2481,16 +3038,16 @@ async def get_system_resources(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get system resources: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(f"Failed to get system resources: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ==================== Example Usage ====================
 
 
 @app.get("/examples/inference")
-async def get_inference_example():
-    """獲取推理配置範例"""
+async def get_inference_example() -> dict[str, Any]:
+    """Get the inference config examples."""
     return {
         "load_model_example": {
             "model_name": "Qwen/Qwen3-4B",
@@ -2512,8 +3069,8 @@ async def get_inference_example():
 
 
 @app.get("/examples/training")
-async def get_training_example():
-    """獲取訓練配置範例"""
+async def get_training_example() -> dict[str, Any]:
+    """Get the training config examples."""
     return {
         "qlora_example": {
             "model_name": "Qwen/Qwen3-4B",
@@ -2544,25 +3101,26 @@ async def get_training_example():
 
 
 @app.get("/examples/conversion")
-async def get_conversion_example():
-    """獲取 GGUF 轉換範例"""
+async def get_conversion_example() -> dict[str, Any]:
+    """Get the GGUF conversion examples."""
     return {
         "recommended_outtypes": ["auto", "f16", "bf16", "q8_0", "f32"],
         "notes": {
-            "auto": "推薦，讓 llama.cpp 依權重自動選擇常見 16-bit 類型",
-            "f16": "最常見的半精度完整模型格式",
-            "bf16": "常用於原始模型本身是 bfloat16 的情況",
-            "q8_0": "常見高品質量化格式，體積較小",
-            "f32": "全精度，體積最大，通常只用於驗證或除錯",
+            "auto": "Recommended; lets llama.cpp pick a common 16-bit type from the weights",
+            "f16": "The most common half-precision full-model format",
+            "bf16": "Commonly used when the original model is already bfloat16",
+            "q8_0": "A common high-quality quantization format, smaller in size",
+            "f32": "Full precision, largest in size, normally only for verification or debugging",
         },
         "examples": config_examples.CONVERSION_CONFIG_EXAMPLES,
     }
 
 
 def run() -> None:
-    """Start uvicorn using settings.py.
+    """
+    Start uvicorn using settings.py.
 
-    讓 `python -m service.app` 與 shell script 啟動時，都能共用同一套 settings。
+    Lets `python -m service.app` and the shell scripts share the same settings.
     """
     import uvicorn
 
@@ -2571,6 +3129,7 @@ def run() -> None:
         host=SERVICE_HOST,
         port=SERVICE_PORT,
         reload=UVICORN_RELOAD,
+        reload_excludes=UVICORN_RELOAD_EXCLUDES,
         log_level=LOG_LEVEL.lower(),
         log_config=get_uvicorn_log_config(),
         access_log=UVICORN_ACCESS_LOG,

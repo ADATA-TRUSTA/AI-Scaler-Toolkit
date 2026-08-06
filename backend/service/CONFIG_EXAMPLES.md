@@ -1,10 +1,10 @@
-# 配置範例 - Hugging Face Transformers 標準格式
+# Config Examples - Standard Hugging Face Transformers Format
 
-本文檔展示了簡化後的配置格式，直接使用 Hugging Face Transformers 的標準參數。
+This document shows the simplified config format, which uses the standard Hugging Face Transformers parameters directly.
 
-## 推理配置 (InferenceConfig)
+## Inference Config (InferenceConfig)
 
-### 範例 1: 基本配置 (CPU)
+### Example 1: Basic config (CPU)
 ```json
 {
   "model_name": "meta-llama/Llama-2-7b-chat-hf",
@@ -13,7 +13,7 @@
 }
 ```
 
-### 範例 2: GPU 配置 + INT8 量化
+### Example 2: GPU config + INT8 quantization
 ```json
 {
   "model_name": "meta-llama/Llama-2-7b-chat-hf",
@@ -22,7 +22,7 @@
 }
 ```
 
-### 範例 3: 記憶體限制配置
+### Example 3: Memory-limited config
 ```json
 {
   "model_name": "meta-llama/Llama-2-7b-chat-hf",
@@ -35,7 +35,7 @@
 }
 ```
 
-### 範例 4: Disk Offload 配置
+### Example 4: Disk offload config
 ```json
 {
   "model_name": "openai/gpt-oss-120b",
@@ -49,7 +49,7 @@
 }
 ```
 
-### 範例 5: 自定義設備映射
+### Example 5: Custom device map
 ```json
 {
   "model_name": "meta-llama/Llama-2-7b-chat-hf",
@@ -64,9 +64,9 @@
 }
 ```
 
-## 訓練配置 (TrainingConfig)
+## Training Config (TrainingConfig)
 
-### 範例 1: LoRA 訓練
+### Example 1: LoRA training
 ```json
 {
   "model_name": "meta-llama/Llama-2-7b-chat-hf",
@@ -80,7 +80,7 @@
 }
 ```
 
-### 範例 2: QLoRA 訓練 + 記憶體限制
+### Example 2: QLoRA training + memory limits
 ```json
 {
   "model_name": "meta-llama/Llama-2-7b-chat-hf",
@@ -98,7 +98,7 @@
 }
 ```
 
-### 範例 3: 完整配置 + Disk Offload
+### Example 3: Full config + disk offload
 ```json
 {
   "model_name": "openai/gpt-oss-120b",
@@ -122,30 +122,30 @@
 }
 ```
 
-## 主要改變
+## Key Changes
 
-### 移除的配置
-- ❌ `model_offload` (整個物件)
-- ❌ `ModelOffloadConfig` 類別
+### Removed
+- ❌ `model_offload` (the whole object)
+- ❌ the `ModelOffloadConfig` class
 
-### 新增/保留的配置
-- ✅ `device_map`: 直接使用 HF 格式 ("auto", "cpu", "cuda:0", 或自定義字典)
-- ✅ `max_memory`: 記憶體限制 (例如: {0: "20GB", "cpu": "50GB"})
-- ✅ `offload_folder`: Disk offload 路徑
-- ✅ `quantization`: 量化類型 (none, int8, int4, nf4, fp4)
+### Added/kept
+- ✅ `device_map`: HF format used directly ("auto", "cpu", "cuda:0", or a custom dict)
+- ✅ `max_memory`: memory limits (e.g. {0: "20GB", "cpu": "50GB"})
+- ✅ `offload_folder`: disk offload path
+- ✅ `quantization`: quantization type (none, int8, int4, nf4, fp4)
 
-## 對應關係
+## Mapping
 
-### 舊格式 → 新格式
+### Old format → new format
 
 #### CPU Offload
 ```json
-// 舊格式
+// Old format
 {
   "model_offload": {"type": "cpu"}
 }
 
-// 新格式
+// New format
 {
   "device_map": "auto",
   "max_memory": {"cpu": "30GB"}
@@ -154,7 +154,7 @@
 
 #### Disk Offload
 ```json
-// 舊格式
+// Old format
 {
   "model_offload": {
     "type": "disk",
@@ -162,23 +162,23 @@
   }
 }
 
-// 新格式
+// New format
 {
   "device_map": "auto",
   "offload_folder": "./offload"
 }
 ```
 
-#### 自定義設備映射
+#### Custom device map
 ```json
-// 舊格式
+// Old format
 {
   "model_offload": {
     "device_map": {"GPU0": 12, "CPU": 50}
   }
 }
 
-// 新格式
+// New format
 {
   "device_map": "auto",
   "max_memory": {
@@ -188,36 +188,34 @@
 }
 ```
 
-## API 使用範例
+## API Usage Examples
 
-### 載入模型
+### Loading a model
 ```python
 from service import InferenceConfig, model_manager
 
-# 基本配置
+# Basic config
 config = InferenceConfig(
-    model_name="meta-llama/Llama-2-7b-chat-hf",
-    quantization="int8",
-    device_map="auto"
+    model_name="meta-llama/Llama-2-7b-chat-hf", quantization="int8", device_map="auto"
 )
 
 model_manager.load_model(config)
 ```
 
-### 記憶體限制配置
+### Memory-limited config
 ```python
 config = InferenceConfig(
     model_name="meta-llama/Llama-2-7b-chat-hf",
     quantization="int8",
     device_map="auto",
     max_memory={0: "5GB", "cpu": "20GB"},
-    offload_folder="./offload"
+    offload_folder="./offload",
 )
 
 model_manager.load_model(config)
 ```
 
-### 訓練配置
+### Training config
 ```python
 from service import TrainingConfig, training_manager
 
@@ -228,7 +226,7 @@ config = TrainingConfig(
     output_dir="./output/qlora",
     quantization="nf4",
     device_map="auto",
-    max_memory={0: "10GB", "cpu": "30GB"}
+    max_memory={0: "10GB", "cpu": "30GB"},
 )
 
 training_manager.start_training(config)

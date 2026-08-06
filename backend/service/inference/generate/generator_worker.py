@@ -1,28 +1,30 @@
 """
 Generator Worker - Worker process handlers for generation commands
-Handles 'generate' and 'generate_stream' commands in the worker process loop
+Handles 'generate' and 'generate_stream' commands in the worker process loop.
 """
-import torch
+
 import logging
-import time
 import queue
-from typing import Dict, Any, Optional
+import time
 from threading import Thread
+from typing import Any, cast
+
+import torch
 from transformers import TextIteratorStreamer
 
-from .generator_core import (
-    validate_and_prepare_params,
-    tokenize_prompt,
-    get_generation_kwargs,
-    decode_generated_tokens
-)
-from .gpt_parser import create_gpt_parser, is_gpt_model, create_stream_parser, TokenIDStreamer
 from ...settings import get_response_queue_debug
+from .generator_core import (
+    decode_generated_tokens,
+    get_generation_kwargs,
+    tokenize_prompt,
+    validate_and_prepare_params,
+)
+from .gpt_parser import TokenIDStreamer, create_gpt_parser, create_stream_parser, is_gpt_model
 
 logger = logging.getLogger(__name__)
 
 
-def _sync_cuda():
+def _sync_cuda() -> None:
     """Synchronize CUDA for accurate timing if available."""
     try:
         if torch.cuda.is_available():
@@ -31,7 +33,7 @@ def _sync_cuda():
         pass
 
 
-def _is_xpu_model_device(model) -> bool:
+def _is_xpu_model_device(model: Any) -> bool:  # noqa: ANN401 - duck-typed transformers model
     """Best-effort check whether the loaded model is running on Intel XPU."""
     try:
         model_device = getattr(model, "device", None)
@@ -69,7 +71,10 @@ def _split_stream_text_chunks(text: str, max_chars: int = 96) -> list[str]:
 
     for ch in text:
         current += ch
-        if ch in {"\n", ".", "!", "?", ",", "，", "。", "！", "？", "；", ";", ":", "："} or len(current) >= max_chars:
+        if (
+            ch in {"\n", ".", "!", "?", ",", "，", "。", "！", "？", "；", ";", ":", "："}
+            or len(current) >= max_chars
+        ):
             chunks.append(current)
             current = ""
 
@@ -79,7 +84,7 @@ def _split_stream_text_chunks(text: str, max_chars: int = 96) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
-def _normalize_eos_token_ids(eos_token_ids) -> set[int]:
+def _normalize_eos_token_ids(eos_token_ids: Any) -> set[int]:  # noqa: ANN401 - int, iterable of ids, or None
     if eos_token_ids is None:
         return set()
     if isinstance(eos_token_ids, int):
@@ -93,14 +98,16 @@ def _normalize_eos_token_ids(eos_token_ids) -> set[int]:
     return out
 
 
-def _apply_repetition_penalty_(logits: torch.Tensor, seen_token_ids: list[int], penalty: float) -> torch.Tensor:
+def _apply_repetition_penalty_(
+    logits: torch.Tensor, seen_token_ids: list[int], penalty: float
+) -> torch.Tensor:
     if penalty <= 1.0 or not seen_token_ids:
         return logits
 
     # outputs.logits may be an inference tensor; clone before any in-place update.
     logits = logits.clone()
 
-    unique_ids = set(int(token_id) for token_id in seen_token_ids)
+    unique_ids = {int(token_id) for token_id in seen_token_ids}
     for token_id in unique_ids:
         token_logit = logits[..., token_id]
         logits[..., token_id] = torch.where(
@@ -111,7 +118,7 @@ def _apply_repetition_penalty_(logits: torch.Tensor, seen_token_ids: list[int], 
     return logits
 
 
-def _sample_next_token_id(logits: torch.Tensor, params: Dict[str, Any]) -> int:
+def _sample_next_token_id(logits: torch.Tensor, params: dict[str, Any]) -> int:
     temperature = float(params.get("temperature", 0.7))
     top_p = float(params.get("top_p", 1.0))
     top_k = int(params.get("top_k", 50))
@@ -154,15 +161,15 @@ def _sample_next_token_id(logits: torch.Tensor, params: Dict[str, Any]) -> int:
 
 def _stream_generate_xpu_text(
     *,
-    model,
-    tokenizer,
-    inputs,
-    validated_params: Dict[str, Any],
-    eos_token_ids,
-    data_queue,
+    model: Any,  # noqa: ANN401 - duck-typed transformers model
+    tokenizer: Any,  # noqa: ANN401 - duck-typed tokenizer
+    inputs: Any,  # noqa: ANN401 - tokenizer BatchEncoding of tensors
+    validated_params: dict[str, Any],
+    eos_token_ids: int | list[int] | None,
+    data_queue: Any,  # noqa: ANN401 - multiprocessing response queue
     request_id: str,
-    stop_generation_flag,
-) -> Dict[str, Any]:
+    stop_generation_flag: Any,  # noqa: ANN401 - stop-generation Event
+) -> dict[str, Any]:
     """Manual token-by-token streaming fallback for XPU text generation."""
     input_ids = inputs.get("input_ids")
     attention_mask = inputs.get("attention_mask")
@@ -180,7 +187,7 @@ def _stream_generate_xpu_text(
     eos_token_id_set = _normalize_eos_token_ids(eos_token_ids)
 
     perf_start = time.perf_counter()
-    first_token_time: Optional[float] = None
+    first_token_time: float | None = None
     prompt_tokens = int(input_ids.shape[1])
     gen_token_count = 0
     start_time = time.time()
@@ -219,7 +226,9 @@ def _stream_generate_xpu_text(
 
         past_key_values = outputs.past_key_values
         next_token_logits = outputs.logits[:, -1, :]
-        next_token_logits = _apply_repetition_penalty_(next_token_logits, generated_token_ids, repetition_penalty)
+        next_token_logits = _apply_repetition_penalty_(
+            next_token_logits, generated_token_ids, repetition_penalty
+        )
         next_token_id = _sample_next_token_id(next_token_logits, validated_params)
 
         generated_token_ids.append(next_token_id)
@@ -229,10 +238,19 @@ def _stream_generate_xpu_text(
         if first_token_time is None:
             first_token_time = time.perf_counter()
 
-        next_token_tensor = torch.tensor([[next_token_id]], device=input_ids.device, dtype=input_ids.dtype)
+        next_token_tensor = torch.tensor(
+            [[next_token_id]], device=input_ids.device, dtype=input_ids.dtype
+        )
         current_input_ids = next_token_tensor
         current_attention_mask = torch.cat(
-            [current_attention_mask, torch.ones((current_attention_mask.shape[0], 1), device=current_attention_mask.device, dtype=current_attention_mask.dtype)],
+            [
+                current_attention_mask,
+                torch.ones(
+                    (current_attention_mask.shape[0], 1),
+                    device=current_attention_mask.device,
+                    dtype=current_attention_mask.dtype,
+                ),
+            ],
             dim=1,
         )
         if current_token_type_ids is not None:
@@ -249,13 +267,16 @@ def _stream_generate_xpu_text(
             clean_up_tokenization_spaces=False,
         )
         if decoded_text:
-            _put_response(data_queue, {
-                "type": "stream_chunk",
-                "request_id": request_id,
-                "chunk": decoded_text,
-                "done": False,
-                "chunk_tokens": len(pending_token_ids),
-            })
+            _put_response(
+                data_queue,
+                {
+                    "type": "stream_chunk",
+                    "request_id": request_id,
+                    "chunk": decoded_text,
+                    "done": False,
+                    "chunk_tokens": len(pending_token_ids),
+                },
+            )
             pending_token_ids = []
 
     if pending_token_ids and not stopped:
@@ -265,13 +286,16 @@ def _stream_generate_xpu_text(
             clean_up_tokenization_spaces=False,
         )
         if decoded_text:
-            _put_response(data_queue, {
-                "type": "stream_chunk",
-                "request_id": request_id,
-                "chunk": decoded_text,
-                "done": False,
-                "chunk_tokens": len(pending_token_ids),
-            })
+            _put_response(
+                data_queue,
+                {
+                    "type": "stream_chunk",
+                    "request_id": request_id,
+                    "chunk": decoded_text,
+                    "done": False,
+                    "chunk_tokens": len(pending_token_ids),
+                },
+            )
 
     perf_end = time.perf_counter()
     return {
@@ -288,15 +312,15 @@ def _stream_generate_xpu_text(
 
 def _log_transformers_perf(
     *,
-    prompt_tokens: Optional[int],
-    gen_tokens: Optional[int],
-    prompt_time_s: Optional[float],
-    gen_time_s: Optional[float],
-    total_time_s: Optional[float],
+    prompt_tokens: int | None,
+    gen_tokens: int | None,
+    prompt_time_s: float | None,
+    gen_time_s: float | None,
+    total_time_s: float | None,
     tag: str = "Transformers",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Log transformers performance stats when timing/token info is available."""
-    stats: Dict[str, Any] = {
+    stats: dict[str, Any] = {
         "total_tokens": None,
         "gen_tps": None,
         "prompt_tokens": None,
@@ -349,7 +373,7 @@ def _log_transformers_perf(
         return stats
 
 
-def _count_tokens_safe(tokenizer, text: str) -> int:
+def _count_tokens_safe(tokenizer: Any, text: str) -> int:  # noqa: ANN401 - duck-typed tokenizer
     """Count tokens for a text chunk safely (best-effort)."""
     try:
         if not text:
@@ -360,8 +384,13 @@ def _count_tokens_safe(tokenizer, text: str) -> int:
         return 0
 
 
-def _get_extended_eos_token_ids(tokenizer, model, model_name: str):
-    """Resolve complete eos token ids from tokenizer/model generation config.
+def _get_extended_eos_token_ids(
+    tokenizer: Any,  # noqa: ANN401 - duck-typed tokenizer
+    model: Any,  # noqa: ANN401 - duck-typed transformers model
+    model_name: str,
+) -> int | list[int] | None:
+    """
+    Resolve complete eos token ids from tokenizer/model generation config.
 
     Qwen3.5 publishes multiple eos ids in generation_config (e.g. [248046, 248044]).
     If we only keep tokenizer.eos_token_id, generation may miss the actual stop token
@@ -382,18 +411,21 @@ def _get_extended_eos_token_ids(tokenizer, model, model_name: str):
         if getattr(tokenizer, "eos_token_id", None) is not None:
             if tokenizer.eos_token_id not in eos_ids:
                 eos_ids.append(tokenizer.eos_token_id)
-        
+
         # Check if Gemma3 model
         if any(pattern in model_name.lower() for pattern in ["gemma-3", "gemma3", "gemma-2-3"]):
             try:
                 end_turn_id = tokenizer.convert_tokens_to_ids("<end_of_turn>")
-                if end_turn_id is not None and end_turn_id not in eos_ids:
+                # convert_tokens_to_ids returns the unk id (a valid int) for
+                # unknown tokens; don't treat that as a real <end_of_turn> eos.
+                unk_id = getattr(tokenizer, "unk_token_id", None)
+                if end_turn_id is not None and end_turn_id != unk_id and end_turn_id not in eos_ids:
                     eos_ids.append(end_turn_id)
             except Exception as e:
                 logger.debug(f"[Worker] Could not resolve <end_of_turn> id: {e}")
 
         logger.info("[Worker] Resolved eos_token_id(s) for %s: %s", model_name, eos_ids)
-        
+
         if not eos_ids:
             return None
         return eos_ids[0] if len(eos_ids) == 1 else eos_ids
@@ -402,8 +434,8 @@ def _get_extended_eos_token_ids(tokenizer, model, model_name: str):
         return getattr(tokenizer, "eos_token_id", None)
 
 
-def _cleanup_generation_inputs(inputs):
-    """Clean up generation inputs to free memory"""
+def _cleanup_generation_inputs(inputs: Any) -> None:  # noqa: ANN401 - tokenizer BatchEncoding of tensors
+    """Clean up generation inputs to free memory."""
     try:
         del inputs
         if torch.cuda.is_available():
@@ -412,42 +444,43 @@ def _cleanup_generation_inputs(inputs):
         logger.debug(f"[Worker] Cleanup error: {e}")
 
 
-def _put_response(data_queue, response: dict, debug: bool = None):
-    """輔助函數：發送響應到隊列並打印（用於調試）
-    
+def _put_response(data_queue: Any, response: dict, debug: bool | None = None) -> None:  # noqa: ANN401 - multiprocessing response queue
+    """
+    Helper: put a response on the queue and print it (for debugging).
+
     Args:
-        data_queue: 目標隊列
-        response: 要發送的數據字典
-        debug: 是否啟用調試輸出（None 時使用全局設定）
+        data_queue: Target queue
+        response: Response dict to send
+        debug: Whether to enable debug output (falls back to the global setting when None)
     """
     if debug is None:
         debug = get_response_queue_debug()
-    
+
     if debug:
-        # 打印響應內容（縮短 chunk 以避免過長）
+        # Print the response (truncate chunk to keep it short)
         debug_data = response.copy()
         if "chunk" in debug_data and len(str(debug_data["chunk"])) > 50:
             debug_data["chunk"] = str(debug_data["chunk"])[:50] + "..."
         print(f"[Response Queue] {debug_data}", flush=True)
-    
+
     try:
         data_queue.put(response)
     except Exception as e:
-        logger.error(f"[Worker] Failed to put response to queue: {e}")
+        logger.exception(f"[Worker] Failed to put response to queue: {e}")
 
 
 def handle_generate_request(
-    request: Dict[str, Any],
-    model,
-    tokenizer,
-    processor,
-    config,
-    data_queue,
-    stop_generation_flag
-):
+    request: dict[str, Any],
+    model: Any,  # noqa: ANN401 - duck-typed transformers model
+    tokenizer: Any,  # noqa: ANN401 - duck-typed tokenizer
+    processor: Any,  # noqa: ANN401 - duck-typed processor
+    config: Any,  # noqa: ANN401 - model config object
+    data_queue: Any,  # noqa: ANN401 - multiprocessing response queue
+    stop_generation_flag: Any,  # noqa: ANN401 - stop-generation Event
+) -> None:
     """
-    Handle non-streaming generation request
-    
+    Handle non-streaming generation request.
+
     Args:
         request: Request dictionary with prompt, params, and request_id
         model: Loaded model instance
@@ -459,26 +492,32 @@ def handle_generate_request(
     request_id = request.get("request_id")
     prompt = request.get("prompt")
     params = request.get("params", {})
-    
+
     try:
         # Clear stop flag for new generation
         stop_generation_flag.clear()
-        
+
         # Validate and prepare parameters
         validated_params = validate_and_prepare_params(params)
-        
+
         # Tokenize prompt
-        inputs = tokenize_prompt(prompt, tokenizer, model.device, params, processor)
-        
+        inputs = tokenize_prompt(
+            cast("str | list[dict[str, Any]]", prompt),
+            tokenizer,
+            model.device,
+            params,
+            processor,
+        )
+
         # Get EOS token IDs
         model_name = config.model_name if config else "unknown"
         eos_token_ids = _get_extended_eos_token_ids(tokenizer, model, model_name)
-        
+
         # Build generation kwargs
         generation_kwargs = get_generation_kwargs(
             inputs, validated_params, tokenizer, eos_token_ids
         )
-        
+
         # Generate
         # Use inference_mode for better performance and memory usage (supports offload)
         _sync_cuda()
@@ -487,20 +526,20 @@ def handle_generate_request(
             outputs = model.generate(**generation_kwargs)
         _sync_cuda()
         gen_end = time.perf_counter()
-        
+
         # Check if GPT model and use structured parsing
         gpt_parser = create_gpt_parser(model_name)
-        
+
         if gpt_parser and gpt_parser.should_parse():
             # GPT model: parse structured response with <think></think> tags
             logger.info("[Worker] Using GPT Harmony parser for structured response")
-            
+
             # Extract generated tokens (excluding input)
-            generated_tokens = outputs[0][inputs.input_ids.shape[1]:].tolist()
-            
+            generated_tokens = outputs[0][inputs.input_ids.shape[1] :].tolist()
+
             # Parse with Harmony
             parsed = gpt_parser.parse_generated_tokens(generated_tokens, strict=False)
-            
+
             if parsed["parsed"] and parsed["formatted_text"]:
                 # Successfully parsed - return formatted text
                 perf_stats = _log_transformers_perf(
@@ -527,7 +566,7 @@ def handle_generate_request(
                 if perf_stats.get("prompt_tps") is not None:
                     response["prompt_tps"] = perf_stats.get("prompt_tps")
                 _put_response(data_queue, response)
-                logger.info(f"[Worker] GPT response parsed successfully")
+                logger.info("[Worker] GPT response parsed successfully")
             else:
                 # Parsing failed - fallback to normal decode
                 logger.warning("[Worker] GPT parsing failed, falling back to normal decode")
@@ -559,9 +598,7 @@ def handle_generate_request(
                 _put_response(data_queue, response)
         else:
             # Non-GPT model or parser not available: standard decode
-            generated_text = decode_generated_tokens(
-                outputs, inputs.input_ids.shape[1], tokenizer
-            )
+            generated_text = decode_generated_tokens(outputs, inputs.input_ids.shape[1], tokenizer)
             perf_stats = _log_transformers_perf(
                 prompt_tokens=int(inputs.input_ids.shape[1]),
                 gen_tokens=int(outputs[0].shape[0] - inputs.input_ids.shape[1]),
@@ -586,62 +623,65 @@ def handle_generate_request(
             if perf_stats.get("prompt_tps") is not None:
                 response["prompt_tps"] = perf_stats.get("prompt_tps")
             _put_response(data_queue, response)
-    
+
     except Exception as e:
-        logger.error(f"[Worker] Generation error: {e}")
+        logger.exception(f"[Worker] Generation error: {e}")
         error_str = str(e)
         error_type = type(e).__name__
-        
-        is_oom = ("out of memory" in error_str.lower() or
-                  "oom" in error_str.lower() or
-                  "OutOfMemoryError" in error_type or
-                  isinstance(e, torch.cuda.OutOfMemoryError))
-        
+
+        is_oom = (
+            "out of memory" in error_str.lower()
+            or "oom" in error_str.lower()
+            or "OutOfMemoryError" in error_type
+            or isinstance(e, torch.cuda.OutOfMemoryError)
+        )
+
         if is_oom:
-            logger.error("[Worker] Recoverable OOM during generation – soft cleanup")
+            logger.exception("[Worker] Recoverable OOM during generation – soft cleanup")
             try:
                 _cleanup_generation_inputs(inputs)
-            except:
+            except Exception:
                 pass
-            
-            _put_response(data_queue, {
-                "type": "error",
-                "request_id": request_id,
-                "error": f"OOM Error: {error_str}",
-                "is_oom": True,
-                "recoverable": True,
-                "suggestions": [
-                    "Lower max_new_tokens",
-                    "Reduce prompt length / history",
-                    "Increase offload / quantization"
-                ]
-            })
+
+            _put_response(
+                data_queue,
+                {
+                    "type": "error",
+                    "request_id": request_id,
+                    "error": f"OOM Error: {error_str}",
+                    "is_oom": True,
+                    "recoverable": True,
+                    "suggestions": [
+                        "Lower max_new_tokens",
+                        "Reduce prompt length / history",
+                        "Increase offload / quantization",
+                    ],
+                },
+            )
         else:
-            _put_response(data_queue, {
-                "type": "error",
-                "request_id": request_id,
-                "error": error_str
-            })
+            _put_response(
+                data_queue, {"type": "error", "request_id": request_id, "error": error_str}
+            )
     finally:
         # Cleanup
         try:
             _cleanup_generation_inputs(inputs)
-        except:
+        except Exception:
             pass
 
 
 def handle_generate_stream_request(
-    request: Dict[str, Any],
-    model,
-    tokenizer,
-    processor,
-    config,
-    data_queue,
-    stop_generation_flag
-):
+    request: dict[str, Any],
+    model: Any,  # noqa: ANN401 - duck-typed transformers model
+    tokenizer: Any,  # noqa: ANN401 - duck-typed tokenizer
+    processor: Any,  # noqa: ANN401 - duck-typed processor
+    config: Any,  # noqa: ANN401 - model config object
+    data_queue: Any,  # noqa: ANN401 - multiprocessing response queue
+    stop_generation_flag: Any,  # noqa: ANN401 - stop-generation Event
+) -> None:
     """
-    Handle streaming generation request
-    
+    Handle streaming generation request.
+
     Args:
         request: Request dictionary with prompt, params, and request_id
         model: Loaded model instance
@@ -653,21 +693,27 @@ def handle_generate_stream_request(
     request_id = request.get("request_id")
     prompt = request.get("prompt")
     params = request.get("params", {})
-    
+
     try:
         # Clear stop flag for new generation
         stop_generation_flag.clear()
-        
+
         # Validate and prepare parameters
         validated_params = validate_and_prepare_params(params)
-        
+
         # Tokenize prompt
-        inputs = tokenize_prompt(prompt, tokenizer, model.device, params, processor)
-        
+        inputs = tokenize_prompt(
+            cast("str | list[dict[str, Any]]", prompt),
+            tokenizer,
+            model.device,
+            params,
+            processor,
+        )
+
         # Get EOS token IDs
         model_name = config.model_name if config else "unknown"
         eos_token_ids = _get_extended_eos_token_ids(tokenizer, model, model_name)
-        
+
         # Check if GPT model
         is_gpt = is_gpt_model(model_name)
         is_xpu = _is_xpu_model_device(model)
@@ -681,7 +727,7 @@ def handle_generate_stream_request(
                 validated_params=validated_params,
                 eos_token_ids=eos_token_ids,
                 data_queue=data_queue,
-                request_id=request_id,
+                request_id=cast(str, request_id),
                 stop_generation_flag=stop_generation_flag,
             )
 
@@ -707,21 +753,23 @@ def handle_generate_stream_request(
             _cleanup_generation_inputs(inputs)
             return
         elif is_xpu:
-            logger.info("[Worker] XPU streaming fallback enabled; generating full response before emitting stream chunks")
+            logger.info(
+                "[Worker] XPU streaming fallback enabled; generating full response before emitting stream chunks"
+            )
 
             generation_kwargs = get_generation_kwargs(
                 inputs, validated_params, tokenizer, eos_token_ids, streamer=None
             )
 
-            result_holder: Dict[str, Any] = {"outputs": None, "exception": None}
+            result_holder: dict[str, Any] = {"outputs": None, "exception": None}
 
-            def generate_xpu_fallback():
+            def generate_xpu_fallback() -> None:
                 try:
                     with torch.inference_mode():
                         result_holder["outputs"] = model.generate(**generation_kwargs)
                 except Exception as e:
                     result_holder["exception"] = e
-                    logger.error(f"[Worker] XPU fallback generation error: {e}")
+                    logger.exception(f"[Worker] XPU fallback generation error: {e}")
 
             perf_start = time.perf_counter()
             thread = Thread(target=generate_xpu_fallback)
@@ -750,22 +798,23 @@ def handle_generate_stream_request(
                 raise result_holder["exception"]
 
             if stopped:
-                _put_response(data_queue, {
-                    "type": "stream_chunk",
-                    "request_id": request_id,
-                    "chunk": "",
-                    "done": True,
-                    "stopped": True,
-                })
+                _put_response(
+                    data_queue,
+                    {
+                        "type": "stream_chunk",
+                        "request_id": request_id,
+                        "chunk": "",
+                        "done": True,
+                        "stopped": True,
+                    },
+                )
                 return
 
             outputs = result_holder.get("outputs")
             if outputs is None:
                 raise RuntimeError("XPU fallback generation completed without outputs")
 
-            generated_text = decode_generated_tokens(
-                outputs, inputs.input_ids.shape[1], tokenizer
-            )
+            generated_text = decode_generated_tokens(outputs, inputs.input_ids.shape[1], tokenizer)
             gen_tokens = int(outputs[0].shape[0] - inputs.input_ids.shape[1])
             perf_end = time.perf_counter()
             perf_stats = _log_transformers_perf(
@@ -784,22 +833,29 @@ def handle_generate_stream_request(
                 remaining_tokens = gen_tokens
                 for idx, text_chunk in enumerate(text_chunks):
                     if stop_generation_flag.is_set():
-                        logger.info("[Worker] Stop generation signal received during XPU fallback chunk emission")
+                        logger.info(
+                            "[Worker] Stop generation signal received during XPU fallback chunk emission"
+                        )
                         stopped = True
                         break
 
                     chunk_tokens = _count_tokens_safe(tokenizer, text_chunk)
                     if chunk_tokens <= 0:
-                        chunk_tokens = max(0, remaining_tokens) if idx == len(text_chunks) - 1 else 0
+                        chunk_tokens = (
+                            max(0, remaining_tokens) if idx == len(text_chunks) - 1 else 0
+                        )
                     remaining_tokens = max(0, remaining_tokens - chunk_tokens)
 
-                    _put_response(data_queue, {
-                        "type": "stream_chunk",
-                        "request_id": request_id,
-                        "chunk": text_chunk,
-                        "done": False,
-                        "chunk_tokens": chunk_tokens,
-                    })
+                    _put_response(
+                        data_queue,
+                        {
+                            "type": "stream_chunk",
+                            "request_id": request_id,
+                            "chunk": text_chunk,
+                            "done": False,
+                            "chunk_tokens": chunk_tokens,
+                        },
+                    )
 
                     time.sleep(0.01)
 
@@ -823,41 +879,35 @@ def handle_generate_stream_request(
             _put_response(data_queue, response)
             _cleanup_generation_inputs(inputs)
             return
-        
+
         # Create streamer
         if is_gpt and not is_xpu:
             stream_parser = create_stream_parser(model_name)
             if stream_parser:
-                streamer = TokenIDStreamer(
-                    skip_prompt=True
-                )
+                streamer = TokenIDStreamer(skip_prompt=True)
             else:
                 streamer = TextIteratorStreamer(
-                    tokenizer,
-                    skip_prompt=True,
-                    skip_special_tokens=True
+                    tokenizer, skip_prompt=True, skip_special_tokens=True
                 )
                 stream_parser = None
         else:
-            streamer = TextIteratorStreamer(
-                tokenizer,
-                skip_prompt=True,
-                skip_special_tokens=True
-            )
+            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
             stream_parser = None
 
         if is_gpt and is_xpu:
-            logger.info("[Worker] XPU detected for GPT streaming; using TextIteratorStreamer fallback")
-        
+            logger.info(
+                "[Worker] XPU detected for GPT streaming; using TextIteratorStreamer fallback"
+            )
+
         # Build generation kwargs
         generation_kwargs = get_generation_kwargs(
             inputs, validated_params, tokenizer, eos_token_ids, streamer
         )
-        
+
         # Generation exception tracking
         generation_exception = None
-        
-        def generate_with_exception_handling():
+
+        def generate_with_exception_handling() -> None:
             nonlocal generation_exception
             try:
                 # Use inference_mode for better performance and memory usage (supports offload)
@@ -865,46 +915,46 @@ def handle_generate_stream_request(
                     model.generate(**generation_kwargs)
             except Exception as e:
                 generation_exception = e
-                logger.error(f"[Worker] Generation thread error: {e}")
+                logger.exception(f"[Worker] Generation thread error: {e}")
                 # Signal exception to streamer if it's a TokenIDStreamer
                 if is_gpt and isinstance(streamer, TokenIDStreamer):
                     streamer.set_exception(e)
-        
+
         # Start generation in separate thread
         perf_start = time.perf_counter()
-        first_token_time: Optional[float] = None
+        first_token_time: float | None = None
         gen_token_count: int = 0
         early_done_sent = False
         thread = Thread(target=generate_with_exception_handling)
         thread.daemon = True
         thread.start()
-        
+
         # Stream generated tokens with timeout
         total_timeout = validated_params["total_timeout"]
         start_time = time.time()
         first_token_timeout = min(45.0, max(10.0, float(total_timeout) * 0.1))
         stopped = False
-        
+
         # For GPT models with StreamableParser: track state
         if is_gpt and stream_parser:
             shown_headers = set()
             last_channel = None
-        
+
         try:
             dead_thread_check_count = 0
-            
+
             while True:
                 # 1. Check for generation exception
                 if generation_exception is not None:
                     logger.error(f"[Worker] Generation thread exception: {generation_exception}")
                     raise generation_exception
-                
+
                 # 2. Check stop flag
                 if stop_generation_flag.is_set():
                     logger.info("[Worker] Stop generation signal received")
                     stopped = True
                     break
-                
+
                 # 3. Check total timeout
                 if time.time() - start_time > total_timeout:
                     logger.error("[Worker] Total generation timeout exceeded")
@@ -912,9 +962,13 @@ def handle_generate_stream_request(
 
                 # 3.5. First token watchdog: surface hangs before the full request timeout.
                 if first_token_time is None and (time.time() - start_time) > first_token_timeout:
-                    logger.error("[Worker] First token timeout exceeded (%.1fs)", first_token_timeout)
-                    raise TimeoutError(f"No first token produced within {first_token_timeout:.1f} seconds")
-                
+                    logger.error(
+                        "[Worker] First token timeout exceeded (%.1fs)", first_token_timeout
+                    )
+                    raise TimeoutError(
+                        f"No first token produced within {first_token_timeout:.1f} seconds"
+                    )
+
                 # 4. Check if generation thread finished
                 if not thread.is_alive():
                     if generation_exception is not None:
@@ -922,9 +976,11 @@ def handle_generate_stream_request(
                     else:
                         dead_thread_check_count += 1
                         if dead_thread_check_count > 3:
-                            logger.info("[Worker] Thread finished and queue empty after multiple checks")
+                            logger.info(
+                                "[Worker] Thread finished and queue empty after multiple checks"
+                            )
                             break
-                
+
                 # 5. Get next token from streamer
                 try:
                     if is_gpt and isinstance(streamer, TokenIDStreamer):
@@ -935,98 +991,126 @@ def handle_generate_stream_request(
                             logger.info("[Worker] Token stream completed")
                             break
                         except (TimeoutError, Exception) as stream_error:
-                            logger.error(f"[Worker] Streamer error: {stream_error}")
+                            logger.exception(f"[Worker] Streamer error: {stream_error}")
                             raise
-                        
+
                         dead_thread_check_count = 0
                         if first_token_time is None:
                             first_token_time = time.perf_counter()
                         gen_token_count += 1
-                        
-                        # Process token with StreamableParser
+
+                        # Process token with StreamableParser.
+                        # A TokenIDStreamer is only created together with stream_parser,
+                        # so it is guaranteed non-None on this branch.
+                        assert stream_parser is not None  # noqa: S101 - type-narrowing guard
                         stream_parser.process(token_id)
-                        
+
                         current_channel = stream_parser.current_channel
                         last_delta = stream_parser.last_content_delta
-                        
+
                         # Detect channel switch
                         if current_channel != last_channel:
                             # Close previous channel
-                            if last_channel == "analysis" and 'think_end' not in shown_headers:
-                                _put_response(data_queue, {
-                                    "type": "stream_chunk",
-                                    "request_id": request_id,
-                                    "chunk": "\n</think>\n\n",
-                                    "done": False
-                                })
-                                shown_headers.add('think_end')
-                            
+                            if last_channel == "analysis" and "think_end" not in shown_headers:
+                                _put_response(
+                                    data_queue,
+                                    {
+                                        "type": "stream_chunk",
+                                        "request_id": request_id,
+                                        "chunk": "\n</think>\n\n",
+                                        "done": False,
+                                    },
+                                )
+                                shown_headers.add("think_end")
+
                             # Open new channel
-                            if current_channel == "analysis" and 'think' not in shown_headers:
-                                _put_response(data_queue, {
-                                    "type": "stream_chunk",
-                                    "request_id": request_id,
-                                    "chunk": "<think>\n",
-                                    "done": False
-                                })
-                                shown_headers.add('think')
-                            
+                            if current_channel == "analysis" and "think" not in shown_headers:
+                                _put_response(
+                                    data_queue,
+                                    {
+                                        "type": "stream_chunk",
+                                        "request_id": request_id,
+                                        "chunk": "<think>\n",
+                                        "done": False,
+                                    },
+                                )
+                                shown_headers.add("think")
+
                             last_channel = current_channel
-                        
+
                         # Send delta (new content)
                         if last_delta:
                             chunk_tokens = 1
-                            _put_response(data_queue, {
-                                "type": "stream_chunk",
-                                "request_id": request_id,
-                                "chunk": last_delta,
-                                "done": False,
-                                "chunk_tokens": chunk_tokens
-                            })
-                    
+                            _put_response(
+                                data_queue,
+                                {
+                                    "type": "stream_chunk",
+                                    "request_id": request_id,
+                                    "chunk": last_delta,
+                                    "done": False,
+                                    "chunk_tokens": chunk_tokens,
+                                },
+                            )
+
                     else:
-                        # Non-GPT: standard text streaming
+                        # Non-GPT: standard text streaming.
+                        # A TokenIDStreamer is only used on the GPT branch above, so here the
+                        # streamer is always a TextIteratorStreamer (yields str chunks).
+                        assert isinstance(streamer, TextIteratorStreamer)  # noqa: S101
                         chunk_tokens = 0
-                        if hasattr(streamer, 'text_queue'):
+                        if hasattr(streamer, "text_queue"):
                             text = streamer.text_queue.get(timeout=1.0)
                         else:
                             text = next(iter(streamer))
-                        
+
                         dead_thread_check_count = 0
                         if first_token_time is None:
                             first_token_time = time.perf_counter()
-                        
-                        if text == streamer.stop_signal if hasattr(streamer, 'stop_signal') else text is None:
+
+                        if (
+                            text == streamer.stop_signal
+                            if hasattr(streamer, "stop_signal")
+                            else text is None
+                        ):
                             logger.info("[Worker] Stream completed (stop signal)")
                             break
-                        
+
                         # Handle <end_of_turn> for Gemma3
                         if "<end_of_turn>" in text:
                             before, _, _ = text.partition("<end_of_turn>")
                             if before:
                                 chunk_tokens = _count_tokens_safe(tokenizer, before)
                                 gen_token_count += chunk_tokens
-                                _put_response(data_queue, {
-                                    "type": "stream_chunk",
-                                    "request_id": request_id,
-                                    "chunk": before,
-                                    "done": False,
-                                    "chunk_tokens": chunk_tokens
-                                })
+                                _put_response(
+                                    data_queue,
+                                    {
+                                        "type": "stream_chunk",
+                                        "request_id": request_id,
+                                        "chunk": before,
+                                        "done": False,
+                                        "chunk_tokens": chunk_tokens,
+                                    },
+                                )
                             perf_end = time.perf_counter()
                             perf_stats = _log_transformers_perf(
                                 prompt_tokens=int(inputs.input_ids.shape[1]),
                                 gen_tokens=gen_token_count,
-                                prompt_time_s=(first_token_time - perf_start) if first_token_time else None,
-                                gen_time_s=(perf_end - first_token_time) if first_token_time else None,
-                                total_time_s=(perf_end - perf_start) if perf_end and perf_start else None,
+                                prompt_time_s=(first_token_time - perf_start)
+                                if first_token_time
+                                else None,
+                                gen_time_s=(perf_end - first_token_time)
+                                if first_token_time
+                                else None,
+                                total_time_s=(perf_end - perf_start)
+                                if perf_end and perf_start
+                                else None,
                             )
                             response = {
                                 "type": "stream_chunk",
                                 "request_id": request_id,
                                 "chunk": "",
                                 "done": True,
-                                "stopped": False
+                                "stopped": False,
                             }
                             if perf_stats.get("total_tokens") is not None:
                                 response["total_tokens"] = perf_stats.get("total_tokens")
@@ -1041,69 +1125,81 @@ def handle_generate_stream_request(
                             _put_response(data_queue, response)
                             early_done_sent = True
                             break
-                        
+
                         if text:
                             chunk_tokens = _count_tokens_safe(tokenizer, text)
                             gen_token_count += chunk_tokens
-                        _put_response(data_queue, {
-                            "type": "stream_chunk",
-                            "request_id": request_id,
-                            "chunk": text,
-                            "done": False,
-                            "chunk_tokens": chunk_tokens
-                        })
-                
+                        _put_response(
+                            data_queue,
+                            {
+                                "type": "stream_chunk",
+                                "request_id": request_id,
+                                "chunk": text,
+                                "done": False,
+                                "chunk_tokens": chunk_tokens,
+                            },
+                        )
+
                 except queue.Empty:
                     continue
                 except StopIteration:
                     logger.info("[Worker] Streamer iteration complete (StopIteration)")
                     break
-        
+
         except Exception as e:
             if not isinstance(e, (TimeoutError, RuntimeError)):
-                logger.error(f"[Worker] Unexpected error in stream loop: {e}")
+                logger.exception(f"[Worker] Unexpected error in stream loop: {e}")
             # Wait for thread to finish on exception
-            logger.warning("[Worker] Exception occurred, waiting for generation thread to finish...")
+            logger.warning(
+                "[Worker] Exception occurred, waiting for generation thread to finish..."
+            )
             thread.join(timeout=5.0)
             if thread.is_alive():
-                logger.error("[Worker] Generation thread still alive after exception, will be left as daemon")
+                logger.exception(
+                    "[Worker] Generation thread still alive after exception, will be left as daemon"
+                )
             raise
-        
+
         # Wait for thread to finish
         wait_timeout = 5.0 if stopped else 3.0
         thread.join(timeout=wait_timeout)
-        
+
         # Check for thread exception
         if generation_exception is not None:
             raise generation_exception
-        
+
         # Check if thread still running
         if thread.is_alive():
             if stopped:
-                logger.warning("[Worker] Generation thread still running after user stop (normal, will terminate as daemon)")
+                logger.warning(
+                    "[Worker] Generation thread still running after user stop (normal, will terminate as daemon)"
+                )
             else:
                 logger.error("[Worker] Generation thread still alive after timeout!")
                 raise TimeoutError("Generation thread timeout")
         else:
             logger.info("[Worker] Generation thread completed successfully")
-        
+
         # Cleanup generation resources
         _cleanup_generation_inputs(inputs)
-        
+
         # For GPT models: close any remaining tags
         if is_gpt and stream_parser and not stopped:
             try:
                 # Close think tag if still open
-                if last_channel == "analysis" and 'think_end' not in shown_headers:
-                    _put_response(data_queue, {
-                        "type": "stream_chunk",
-                        "request_id": request_id,
-                        "chunk": "\n</think>\n\n",
-                        "done": False
-                    })
+                if last_channel == "analysis" and "think_end" not in shown_headers:
+                    _put_response(
+                        data_queue,
+                        {
+                            "type": "stream_chunk",
+                            "request_id": request_id,
+                            "chunk": "\n</think>\n\n",
+                            "done": False,
+                        },
+                    )
             except Exception as e:
                 logger.debug(f"[Worker] Error closing GPT tags: {e}")
-        
+
         # Send completion signal
         if not early_done_sent:
             perf_end = time.perf_counter()
@@ -1131,48 +1227,53 @@ def handle_generate_stream_request(
             if perf_stats.get("prompt_tps") is not None:
                 response["prompt_tps"] = perf_stats.get("prompt_tps")
             _put_response(data_queue, response)
-    
+
     except Exception as e:
-        logger.error(f"[Worker] Stream generation error: {e}")
+        logger.exception(f"[Worker] Stream generation error: {e}")
         error_str = str(e)
         error_type = type(e).__name__
-        
-        is_oom = ("out of memory" in error_str.lower() or
-                  "oom" in error_str.lower() or
-                  "OutOfMemoryError" in error_type or
-                  isinstance(e, torch.cuda.OutOfMemoryError))
-        
+
+        is_oom = (
+            "out of memory" in error_str.lower()
+            or "oom" in error_str.lower()
+            or "OutOfMemoryError" in error_type
+            or isinstance(e, torch.cuda.OutOfMemoryError)
+        )
+
         if is_oom:
-            logger.error("[Worker] Recoverable OOM during stream generation – soft cleanup")
+            logger.exception("[Worker] Recoverable OOM during stream generation – soft cleanup")
             try:
                 _cleanup_generation_inputs(inputs)
-            except:
+            except Exception:
                 pass
-            
-            _put_response(data_queue, {
-                "type": "error",
-                "request_id": request_id,
-                "error": f"OOM Error: {error_str}",
-                "is_oom": True,
-                "recoverable": True,
-                "suggestions": [
-                    "Lower max_new_tokens",
-                    "Reduce prompt length / history",
-                    "Increase offload / quantization",
-                    "Invoke /inference/cleanup_generation_memory if needed"
-                ]
-            })
+
+            _put_response(
+                data_queue,
+                {
+                    "type": "error",
+                    "request_id": request_id,
+                    "error": f"OOM Error: {error_str}",
+                    "is_oom": True,
+                    "recoverable": True,
+                    "suggestions": [
+                        "Lower max_new_tokens",
+                        "Reduce prompt length / history",
+                        "Increase offload / quantization",
+                        "Invoke /inference/cleanup_generation_memory if needed",
+                    ],
+                },
+            )
         else:
-            _put_response(data_queue, {
-                "type": "error",
-                "request_id": request_id,
-                "error": error_str
-            })
+            _put_response(
+                data_queue, {"type": "error", "request_id": request_id, "error": error_str}
+            )
             if isinstance(e, TimeoutError) and thread.is_alive():
-                logger.warning("[Worker] Timeout with thread still running - thread is daemon and will not block unload")
+                logger.warning(
+                    "[Worker] Timeout with thread still running - thread is daemon and will not block unload"
+                )
     finally:
         # Final cleanup
         try:
             _cleanup_generation_inputs(inputs)
-        except:
+        except Exception:
             pass

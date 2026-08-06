@@ -1,11 +1,16 @@
-import requests
 import time
 import json
 import os
 import sys
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 from datetime import datetime
+
+import httpx
+
+# training / model-load endpoints block for minutes; disable the client timeout
+# to match requests' default (no timeout).
+http = httpx.Client(timeout=None)
 
 # Ensure logs directory exists
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -25,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE_URL = "http://localhost:8000"
-DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset", "dataset.jsonl")
+DATASET_PATH = os.path.abspath("dataset/dataset.jsonl")
 
 # Define test configurations
 # Note: Ensure these base models exist in models_registry.json
@@ -45,7 +50,7 @@ TEST_CONFIGS = [
 
 def check_service_health():
     try:
-        resp = requests.get(f"{BASE_URL}/health")
+        resp = http.get(f"{BASE_URL}/health")
         resp.raise_for_status()
         logger.info("Service is healthy")
         return True
@@ -57,7 +62,7 @@ def wait_for_training(timeout=3600):
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            resp = requests.get(f"{BASE_URL}/training/status")
+            resp = http.get(f"{BASE_URL}/training/status")
             status = resp.json()
             state = status.get("status")
             
@@ -84,7 +89,7 @@ def wait_for_model_load(timeout=600):
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            resp = requests.get(f"{BASE_URL}/inference/status")
+            resp = http.get(f"{BASE_URL}/inference/status")
             status = resp.json()
             
             if status.get("loaded"):
@@ -104,7 +109,7 @@ def wait_for_model_load(timeout=600):
 def ensure_model_exists(model_name):
     """Ensure the base model is registered."""
     logger.info(f"Checking if model {model_name} exists...")
-    resp = requests.get(f"{BASE_URL}/config/models")
+    resp = http.get(f"{BASE_URL}/config/models")
     models = resp.json()
     base_models = models.get("base_models", [])
     
@@ -137,7 +142,7 @@ def run_test_cycle(config: Dict[str, Any]):
     # The backend training process expects a valid HF ID or path, not just a label
     actual_model_id = model_name
     try:
-        resp = requests.get(f"{BASE_URL}/config/models")
+        resp = http.get(f"{BASE_URL}/config/models")
         models = resp.json()
         base_models = models.get("base_models", [])
         for m in base_models:
@@ -197,7 +202,7 @@ def run_test_cycle(config: Dict[str, Any]):
         }
     
     logger.info(f"Starting training for {model_name}...")
-    resp = requests.post(f"{BASE_URL}/training/start", json=train_payload)
+    resp = http.post(f"{BASE_URL}/training/start", json=train_payload)
     if resp.status_code != 200:
         logger.error(f"Failed to start training: {resp.text}")
         return False
@@ -214,7 +219,7 @@ def run_test_cycle(config: Dict[str, Any]):
     # The system registers it. Let's list models to find it.
     
     time.sleep(2) # Wait for registration
-    models_resp = requests.get(f"{BASE_URL}/config/models")
+    models_resp = http.get(f"{BASE_URL}/config/models")
     models = models_resp.json()
     finetuned_models = models.get("finetuned_models", [])
     
@@ -244,7 +249,7 @@ def run_test_cycle(config: Dict[str, Any]):
         }
 
     logger.info("Loading fine-tuned model for inference...")
-    resp = requests.post(f"{BASE_URL}/inference/load_model", json=load_payload)
+    resp = http.post(f"{BASE_URL}/inference/load_model", json=load_payload)
     if resp.status_code != 200:
         logger.error(f"Failed to request model load: {resp.text}")
         return False
@@ -259,7 +264,7 @@ def run_test_cycle(config: Dict[str, Any]):
         "max_new_tokens": 50,
         "temperature": 0.7
     }
-    resp = requests.post(f"{BASE_URL}/inference/chat", json=chat_payload)
+    resp = http.post(f"{BASE_URL}/inference/chat", json=chat_payload)
     if resp.status_code == 200:
         logger.info(f"Chat response: {resp.json().get('response')}")
     else:
@@ -268,14 +273,14 @@ def run_test_cycle(config: Dict[str, Any]):
         
     # 4. Unload Model
     logger.info("Unloading model...")
-    requests.post(f"{BASE_URL}/inference/unload_model")
+    http.post(f"{BASE_URL}/inference/unload_model")
     time.sleep(5)
     
     # 5. Delete Model (Cleanup)
     if target_model:
         label_to_delete = target_model["label"]
         logger.info(f"Deleting model {label_to_delete}...")
-        requests.delete(f"{BASE_URL}/config/models/{label_to_delete}?delete_files=true")
+        http.delete(f"{BASE_URL}/config/models/{label_to_delete}?delete_files=true")
     else:
         # Manual cleanup if not found in registry
         import shutil

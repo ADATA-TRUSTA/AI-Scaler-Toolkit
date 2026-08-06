@@ -1,60 +1,72 @@
 """
-PEFT/LoRA Model Loader - 載入 PEFT 微調模型的工具函數
+PEFT/LoRA Model Loader - helper functions for loading PEFT fine-tuned models.
 """
+
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any
 
-# 嘗試導入 PEFT
+# Try to import PEFT
 try:
-    from peft import PeftModel, PeftConfig
+    from peft import PeftConfig, PeftModel
+
     PEFT_AVAILABLE = True
 except ImportError:
     PEFT_AVAILABLE = False
     PeftModel = None
     PeftConfig = None
 
+if TYPE_CHECKING:
+    from peft import PeftModel as PeftModelType
+    from transformers import PreTrainedModel
+
 logger = logging.getLogger(__name__)
 
 
 def is_peft_model(model_path: str) -> bool:
     """
-    檢測路徑是否為 PEFT/LoRA 微調模型
-    
+    Check whether a path holds a PEFT/LoRA fine-tuned model.
+
     Args:
-        model_path: 模型路徑
-    
+        model_path: Model path
+
     Returns:
-        True 如果是 PEFT 模型（包含 adapter_config.json）
+        True if it is a PEFT model (contains adapter_config.json)
     """
     path = Path(model_path)
     if not path.exists():
         return False
-    # PEFT 模型的標誌檔案
+    # Marker file of a PEFT model
     adapter_config = path / "adapter_config.json"
     return adapter_config.exists()
 
 
-def load_peft_model(model_path: str, base_model, hf_token: Optional[str] = None, **kwargs):
+def load_peft_model(
+    model_path: str,
+    base_model: "PreTrainedModel",
+    hf_token: str | None = None,
+    **kwargs: Any,  # noqa: ANN401 - forwarded verbatim to PeftModel.from_pretrained
+) -> "PeftModelType":
     """
-    載入 PEFT/LoRA 微調模型
-    
+    Load a PEFT/LoRA fine-tuned model.
+
     Args:
-        model_path: LoRA adapter 路徑
-        base_model: 已載入的基礎模型
+        model_path: LoRA adapter path
+        base_model: Already-loaded base model
         hf_token: HuggingFace token
-    
+
     Returns:
-        合併了 LoRA adapter 的模型
-    
+        Model with the LoRA adapter attached
+
     Raises:
-        RuntimeError: 如果 PEFT 未安裝
-        Exception: 如果載入失敗
+        RuntimeError: If PEFT is not installed
+        Exception: If loading fails
     """
-    if not PEFT_AVAILABLE:
+    # A None PeftModel means PEFT is not installed; check it too so the type narrows
+    if not PEFT_AVAILABLE or PeftModel is None:
         raise RuntimeError("PEFT library not available. Install with: pip install peft")
-    
+
     logger.info(f"[PEFT] Loading adapters from: {model_path}")
 
     try:
@@ -72,7 +84,7 @@ def load_peft_model(model_path: str, base_model, hf_token: Optional[str] = None,
                     flattened.append(str(item))
             base_model._no_split_modules = flattened
 
-        # 載入 LoRA adapters 並合併到 base model
+        # Load the LoRA adapters onto the base model
         model = PeftModel.from_pretrained(
             base_model,
             model_path,
@@ -82,38 +94,39 @@ def load_peft_model(model_path: str, base_model, hf_token: Optional[str] = None,
         logger.info("[PEFT] Adapters loaded successfully")
         return model
     except Exception as e:
-        logger.error(f"[PEFT] Failed to load PEFT model: {e}")
+        logger.exception(f"[PEFT] Failed to load PEFT model: {e}")
         raise
+
 
 def read_base_model_name(model_path: str) -> str:
     """
-    從 adapter_config.json 讀取 base model 名稱
-    
+    Read the base model name from adapter_config.json.
+
     Args:
-        model_path: PEFT 模型路徑
-    
+        model_path: PEFT model path
+
     Returns:
-        Base model 名稱或路徑
-    
+        Base model name or path
+
     Raises:
-        FileNotFoundError: 如果 adapter_config.json 不存在
-        ValueError: 如果無法找到 base_model_name_or_path
+        FileNotFoundError: If adapter_config.json does not exist
+        ValueError: If base_model_name_or_path cannot be found
     """
     adapter_config_path = Path(model_path) / "adapter_config.json"
-    
+
     if not adapter_config_path.exists():
         raise FileNotFoundError(f"adapter_config.json not found in {model_path}")
-    
+
     try:
-        with open(adapter_config_path, 'r') as f:
+        with open(adapter_config_path, encoding="utf-8") as f:
             adapter_config = json.load(f)
             base_model_name = adapter_config.get("base_model_name_or_path")
-            
+
             if not base_model_name:
                 raise ValueError("base_model_name_or_path not found in adapter_config.json")
-            
+
             logger.info(f"[PEFT] Base model from config: {base_model_name}")
             return base_model_name
-            
+
     except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON in adapter_config.json: {e}")
+        raise ValueError(f"Invalid JSON in adapter_config.json: {e}") from e

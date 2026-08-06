@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 停止 LLM 服務
+# Stop the LLM service
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 SERVICE_PORT="${TRUSTA_SERVICE_PORT:-8000}"
 
-echo "正在停止 LLM 服務..."
+echo "Stopping LLM service..."
 
 kill_found=false
 
-for pattern in "python .* -m service.app" "service.app:app" "uvicorn service.app:app"; do
+for pattern in "python.* -m service.app" "service.app:app" "uvicorn service.app:app"; do
     if PIDS=$(pgrep -f "$pattern" || true) && [[ -n "$PIDS" ]]; then
         kill_found=true
-        echo "✓ 已找到服務進程，送出終止信號: $PIDS"
+        echo "✓ Found service processes, sending terminate signal: $PIDS"
         while IFS= read -r pid; do
             [[ -n "$pid" ]] || continue
             kill "$pid" 2>/dev/null || true
@@ -23,7 +23,7 @@ for pattern in "python .* -m service.app" "service.app:app" "uvicorn service.app
 done
 
 if [[ "$kill_found" == false ]]; then
-    echo "⚠ 未找到運行中的服務進程"
+    echo "⚠ No running service process found"
 fi
 
 sleep 2
@@ -31,21 +31,21 @@ sleep 2
 if command -v lsof >/dev/null 2>&1; then
     PORT_PID=$(lsof -ti:"$SERVICE_PORT" || true)
     if [[ -n "$PORT_PID" ]]; then
-        echo "⚠ 端口 $SERVICE_PORT 仍被佔用，嘗試強制終止進程: $PORT_PID"
+        echo "⚠ Port $SERVICE_PORT still in use, force killing process: $PORT_PID"
         while IFS= read -r pid; do
             [[ -n "$pid" ]] || continue
             kill -9 "$pid" 2>/dev/null || true
         done <<< "$PORT_PID"
-        echo "✓ 已強制終止殘留進程"
+        echo "✓ Leftover process force killed"
     else
-        echo "✓ 端口 $SERVICE_PORT 已釋放"
+        echo "✓ Port $SERVICE_PORT released"
     fi
 else
-    echo "⚠ 系統未安裝 lsof，略過端口檢查"
+    echo "⚠ lsof not installed, skipping port check"
 fi
 
 echo ""
 echo "=========================================="
-echo "  服務已停止"
+echo "  Service stopped"
 echo "  Project Root: $PROJECT_ROOT"
 echo "=========================================="
