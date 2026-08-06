@@ -32,7 +32,7 @@ dependencies = [
   # RAG: vector retrieval (lazily imported inside rag_manager.py)
   "chromadb",
   "sentence-transformers", # Model backends loaded dynamically by transformers (not imported directly)
-  "deepspeed==0.19.2; sys_platform == 'linux'",
+  "deepspeed==0.19.3; sys_platform == 'linux'",
   "causal-conv1d==1.6.1; sys_platform == 'linux'",
   "flash-linear-attention==0.4.0",
   "fla-core==0.4.0",

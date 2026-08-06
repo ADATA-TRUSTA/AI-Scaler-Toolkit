@@ -23,15 +23,15 @@ name = "accelerate"
 version = "1.10.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "psutil" },
-    { name = "pyyaml" },
-    { name = "safetensors" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "extra == 'extra-7-service-cuda'" },
-    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "extra == 'extra-7-service-xpu'" },
+    { name = "huggingface-hub", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "psutil", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "safetensors", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b1/72/ff3961c19ee395c3d30ac630ee77bfb0e1b46b87edc504d4f83bb4a89705/accelerate-1.10.1.tar.gz", hash = "sha256:3dea89e433420e4bfac0369cae7e36dcd6a56adfcfd38cdda145c6225eab5df8", size = 392446, upload-time = "2025-08-25T13:57:06.21Z" }
 wheels = [
@@ -52,14 +52,14 @@ name = "aiohttp"
 version = "3.14.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohappyeyeballs" },
-    { name = "aiosignal" },
-    { name = "attrs" },
-    { name = "frozenlist" },
-    { name = "multidict" },
-    { name = "propcache" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "yarl" },
+    { name = "aiohappyeyeballs", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "aiosignal", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "attrs", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "frozenlist", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "multidict", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "propcache", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "(python_full_version < '3.13' and sys_platform == 'linux') or (python_full_version < '3.13' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "yarl", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/82/78/8ea7308cac6934de8c74a14f3d5f65d1c89287426688be79538d0e5c013d/aiohttp-3.14.1.tar.gz", hash = "sha256:307f2cff90a764d329e77040603fa032db89c5c24fdad50c4c15334cba744035", size = 7955794, upload-time = "2026-06-07T21:09:35.529Z" }
 wheels = [
@@ -136,8 +136,8 @@ name = "aiosignal"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "frozenlist" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "frozenlist", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "(python_full_version < '3.13' and sys_platform == 'linux') or (python_full_version < '3.13' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/62/06741b579156360248d1ec624842ad0edf697050bbaf7c3e46394e106ad1/aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7", size = 25007, upload-time = "2025-07-03T22:54:43.528Z" }
 wheels = [
@@ -167,8 +167,8 @@ name = "anyio"
 version = "4.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "idna" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "idna", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "(python_full_version < '3.13' and sys_platform == 'linux') or (python_full_version < '3.13' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/19/14/2c5dd9f512b66549ae92767a9c7b330ae88e1932ca57876909410251fe13/anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc", size = 231622, upload-time = "2026-03-24T12:59:09.671Z" }
 wheels = [
@@ -251,11 +251,11 @@ name = "bitsandbytes"
 version = "0.48.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "extra == 'extra-7-service-cuda'" },
-    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "extra == 'extra-7-service-xpu'" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f8/a1/c66a0d02091a9ef6704a153e09f541e70fc48db02df94fbbf1632b321aca/bitsandbytes-0.48.1-py3-none-manylinux_2_24_aarch64.whl", hash = "sha256:b7f440aee5ec8cb1d028b0d3b2d71e97c302766dc605232293f4a0f7e48b5c75", size = 34033906, upload-time = "2025-10-02T17:40:25.159Z" },
@@ -269,8 +269,8 @@ version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "(os_name == 'nt' and sys_platform == 'win32') or (os_name != 'nt' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform != 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "packaging" },
-    { name = "pyproject-hooks" },
+    { name = "packaging", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyproject-hooks", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/78/e0/df5e171f685f82f37b12e1f208064e24244911079d7b767447d1af7e0d70/build-1.5.0.tar.gz", hash = "sha256:302c22c3ba2a0fd5f3911918651341ebb3896176cbdec15bd421f80b1afc7647", size = 89796, upload-time = "2026-04-30T03:18:25.17Z" }
 wheels = [
@@ -282,11 +282,11 @@ name = "causal-conv1d"
 version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ninja", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "packaging", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform != 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform != 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "ninja", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/63/15/ec51d77a2df03ee93410f8ee97fceeb7181da213813c51243e9dd6d7e144/causal_conv1d-1.6.1.tar.gz", hash = "sha256:e4a697ec2db3906f012e675125569f8b510b4559bc53e3095143d91369e1221b", size = 29426, upload-time = "2026-03-10T08:56:35.305Z" }
 
@@ -352,33 +352,33 @@ name = "chromadb"
 version = "1.5.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "bcrypt" },
-    { name = "build" },
-    { name = "grpcio" },
-    { name = "httpx" },
-    { name = "importlib-resources" },
-    { name = "jsonschema" },
-    { name = "kubernetes" },
-    { name = "mmh3" },
-    { name = "numpy" },
-    { name = "onnxruntime" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc" },
-    { name = "opentelemetry-sdk" },
-    { name = "orjson" },
-    { name = "overrides" },
-    { name = "pybase64" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pypika" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "tenacity" },
-    { name = "tokenizers" },
-    { name = "tqdm" },
-    { name = "typer" },
-    { name = "typing-extensions" },
-    { name = "uvicorn", extra = ["standard"] },
+    { name = "bcrypt", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "build", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "grpcio", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "httpx", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "importlib-resources", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "jsonschema", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "kubernetes", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "mmh3", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onnxruntime", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "opentelemetry-api", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "opentelemetry-sdk", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "orjson", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "overrides", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pybase64", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pydantic", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pydantic-settings", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pypika", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "rich", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tenacity", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tokenizers", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tqdm", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typer", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "uvicorn", extra = ["standard"], marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/92/d1/5e33b26985f0c7046a0be1cee2158ada1748ee700d2545057fde1468d74d/chromadb-1.5.9.tar.gz", hash = "sha256:5c20e62a455c28bacac927f26116a73fd8e1799e0d908be8e8a4f02197a54731", size = 2595635, upload-time = "2026-05-05T05:54:51.713Z" }
 wheels = [
@@ -413,7 +413,7 @@ name = "cuda-bindings"
 version = "13.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cuda-pathfinder", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "cuda-pathfinder", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/52/c8/b2589d68acf7e3d63e2be330b84bc25712e97ed799affbca7edd7eae25d6/cuda_bindings-13.2.0-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e865447abfb83d6a98ad5130ed3c70b1fc295ae3eeee39fd07b4ddb0671b6788", size = 5722404, upload-time = "2026-03-11T00:12:44.041Z" },
@@ -448,37 +448,37 @@ wheels = [
 
 [package.optional-dependencies]
 cublas = [
-    { name = "nvidia-cublas", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cublas", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cuda-runtime", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 cufft = [
-    { name = "nvidia-cufft", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cufft", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 cufile = [
-    { name = "nvidia-cufile", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cufile", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cuda-cupti", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 curand = [
-    { name = "nvidia-curand", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-curand", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cusolver", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cusparse", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-nvjitlink", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cuda-nvrtc", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-nvtx", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 
 [[package]]
@@ -486,20 +486,20 @@ name = "datasets"
 version = "4.8.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "dill" },
-    { name = "filelock" },
-    { name = "fsspec", extra = ["http"] },
-    { name = "httpx" },
-    { name = "huggingface-hub" },
-    { name = "multiprocess" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-    { name = "pyyaml" },
-    { name = "requests" },
-    { name = "tqdm" },
-    { name = "xxhash" },
+    { name = "dill", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "filelock", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "fsspec", extra = ["http"], marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "httpx", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "huggingface-hub", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "multiprocess", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pandas", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyarrow", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "requests", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tqdm", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "xxhash", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/34/14cd8e76f907f7d4dca2334cfeec9f81d30fd15c25a015f99aaea694eaed/datasets-4.8.5.tar.gz", hash = "sha256:0f0c1c3d56ffff2c93b2f4c63c95bac94f3d7e8621aea2a2a576275233bba772", size = 605649, upload-time = "2026-04-27T15:43:57.384Z" }
 wheels = [
@@ -508,24 +508,24 @@ wheels = [
 
 [[package]]
 name = "deepspeed"
-version = "0.19.2"
+version = "0.19.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "einops", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "hjson", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "msgpack", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "ninja", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "numpy", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "packaging", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "psutil", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "py-cpuinfo", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "pydantic", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform != 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform != 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "tqdm", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "einops", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "hjson", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "msgpack", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "ninja", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "psutil", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "py-cpuinfo", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pydantic", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tqdm", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/62/cc/1bd9a0f1545fa57a45f98597a78ef6b39ae1fac1afb3e14c70cb8b02455e/deepspeed-0.19.2.tar.gz", hash = "sha256:7e854b6ebe3d2bfa239f82958372927631c74e5324c7f08f17ce7ff5f6b06969", size = 1756950, upload-time = "2026-06-16T20:53:22.919Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/2f/a1579adbdedaad56845e3b14263b8e12920bc3e52ab8ef7a6743fb7df657/deepspeed-0.19.3.tar.gz", hash = "sha256:82b4b92d0cd58f8fc461b80428a5be2838f4adad48ae3aef509495c640c9ed2f", size = 1817754, upload-time = "2026-07-23T01:09:16.523Z" }
 
 [[package]]
 name = "dill"
@@ -559,9 +559,9 @@ name = "dpcpp-cpp-rt"
 version = "2025.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "intel-opencl-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-openmp", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-sycl-rt", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "intel-opencl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-openmp", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-sycl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/d2/edcbe7995ae3fe18f709c8ae122da8978aee1311c3e8d3bdcd23fc684e69/dpcpp_cpp_rt-2025.3.2-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:7084cfa5dd43c609389b67615b212c5f5f633b44b79da1281893dbe3459f8e2d", size = 28803, upload-time = "2026-01-22T05:31:13.906Z" },
@@ -591,10 +591,10 @@ name = "fastapi"
 version = "0.120.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "annotated-doc" },
-    { name = "pydantic" },
-    { name = "starlette" },
-    { name = "typing-extensions" },
+    { name = "annotated-doc", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pydantic", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "starlette", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/40/cc/28aff6e246ee85bd571b26e4a793b84d42700e3bdc3008c3d747eda7b06d/fastapi-0.120.1.tar.gz", hash = "sha256:b5c6217e9ddca6dfcf54c97986180d4a1955e10c693d74943fc5327700178bff", size = 337616, upload-time = "2025-10-27T17:53:42.954Z" }
 wheels = [
@@ -615,10 +615,10 @@ name = "fla-core"
 version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "einops" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "extra == 'extra-7-service-cuda'" },
-    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "extra == 'extra-7-service-xpu'" },
+    { name = "einops", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/db/3d/79a9d5c8cd973c86f35403931031787dfc6cc97d838a42d4c62e8cbbb66f/fla_core-0.4.0.tar.gz", hash = "sha256:d975022b074e97bfd086dc6b767dccb35e27a9fe36f26f3b26b1c2b68b36a1c8", size = 316316, upload-time = "2025-10-27T08:18:51.673Z" }
 wheels = [
@@ -630,8 +630,8 @@ name = "flash-linear-attention"
 version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "fla-core" },
-    { name = "transformers" },
+    { name = "fla-core", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "transformers", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/44/9a/e546815da2bf149e0af58449ff1ca10074165af4384febead438ad46f74c/flash_linear_attention-0.4.0.tar.gz", hash = "sha256:c5d2bf6e1a766af3a4426f07f710b0b87809f7218de21eb313314be6ff1b0dba", size = 157646, upload-time = "2025-10-27T08:18:52.445Z" }
 wheels = [
@@ -731,7 +731,7 @@ wheels = [
 
 [package.optional-dependencies]
 http = [
-    { name = "aiohttp" },
+    { name = "aiohttp", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 
 [[package]]
@@ -739,9 +739,9 @@ name = "gguf"
 version = "0.17.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
-    { name = "pyyaml" },
-    { name = "tqdm" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tqdm", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/08/08/7de1ca4b71e7bf33b547f82bb22505e221b5fa42f67d635e200e0ad22ad6/gguf-0.17.1.tar.gz", hash = "sha256:36ad71aad900a3e75fc94ebe96ea6029f03a4e44be7627ef7ad3d03e8c7bcb53", size = 89338, upload-time = "2025-06-19T14:00:33.705Z" }
 wheels = [
@@ -753,7 +753,7 @@ name = "googleapis-common-protos"
 version = "1.75.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf" },
+    { name = "protobuf", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b5/c8/f439cffde755cffa462bfbb156278fa6f9d09119719af9814b858fd4f81f/googleapis_common_protos-1.75.0.tar.gz", hash = "sha256:53a062ff3c32552fbd62c11fe23768b78e4ddf0494d5e5fd97d3f4689c75fbbd", size = 151035, upload-time = "2026-05-07T08:04:49.423Z" }
 wheels = [
@@ -765,7 +765,7 @@ name = "grpcio"
 version = "1.82.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/90/bc/656b89387d6f4ed7e0686c7b64c2ae7e554a759aa58122c8e5fb99392c32/grpcio-1.82.1.tar.gz", hash = "sha256:707b24abd90fcb1e45bcc080577da1dbf9971d107490589b9539af8e1e77b4b5", size = 13187300, upload-time = "2026-07-08T12:36:16.588Z" }
 wheels = [
@@ -847,8 +847,8 @@ name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "certifi" },
-    { name = "h11" },
+    { name = "certifi", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "h11", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/06/94/82699a10bca87a5556c9c59b5963f2d039dbd239f25bc2a63907a05a14cb/httpcore-1.0.9.tar.gz", hash = "sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8", size = 85484, upload-time = "2025-04-24T22:06:22.219Z" }
 wheels = [
@@ -883,10 +883,10 @@ name = "httpx"
 version = "0.28.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio" },
-    { name = "certifi" },
-    { name = "httpcore" },
-    { name = "idna" },
+    { name = "anyio", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "certifi", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "httpcore", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "idna", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b1/df/48c586a5fe32a0f01324ee087459e112ebb7224f646c0b5023f5e79e9956/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc", size = 141406, upload-time = "2024-12-06T15:37:23.222Z" }
 wheels = [
@@ -898,15 +898,15 @@ name = "huggingface-hub"
 version = "1.10.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "filelock" },
-    { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "httpx" },
-    { name = "packaging" },
-    { name = "pyyaml" },
-    { name = "tqdm" },
-    { name = "typer" },
-    { name = "typing-extensions" },
+    { name = "filelock", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "fsspec", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "hf-xet", marker = "(platform_machine == 'AMD64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'amd64' and sys_platform == 'linux') or (platform_machine == 'arm64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'win32') or (platform_machine == 'amd64' and sys_platform == 'win32') or (platform_machine == 'arm64' and sys_platform == 'win32') or (platform_machine == 'x86_64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "httpx", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tqdm", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typer", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e4/28/baf5d745559503ce8d28cf5bc9551f5ac59158eafd7b6a6afff0bcdb0f50/huggingface_hub-1.10.1.tar.gz", hash = "sha256:696c53cf9c2ac9befbfb5dd41d05392a031c69fc6930d1ed9671debd405b6fff", size = 758094, upload-time = "2026-04-09T15:01:18.928Z" }
 wheels = [
@@ -972,7 +972,7 @@ name = "intel-cmplr-lib-ur"
 version = "2025.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "umf", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "umf", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/7e/bc668ee301350964b7be980db7d527a54a61b89a749d09bb430b4598ed3b/intel_cmplr_lib_ur-2025.3.2-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:175cdb0fbca5c3ef0db176f1cbd8b8f2c36d33eb774cf1d0cfa0404f748df634", size = 30763527, upload-time = "2026-01-22T05:31:10.942Z" },
@@ -993,8 +993,8 @@ name = "intel-opencl-rt"
 version = "2025.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "intel-cmplr-lic-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "tbb", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "intel-cmplr-lic-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tbb", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/40/6b/51459a9a6ac585ab8ca1accc58a580a23b91c5272a63ccf419c8f9d52f37/intel_opencl_rt-2025.3.2-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:2adc6a6450ca91b0a000d6443e91f565e29323a0f15f462d7be541f076a8c536", size = 201234841, upload-time = "2026-01-22T05:31:29.593Z" },
@@ -1006,7 +1006,7 @@ name = "intel-openmp"
 version = "2025.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "intel-cmplr-lib-ur", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "intel-cmplr-lib-ur", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/91/99/5ee1e9ae85ed3d10517d17d5a3a924fecc15b116385045a0a89eb2d5bc82/intel_openmp-2025.3.2-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:2de5f12fb282e7e275723539cba335ce1831e533f94b1c484062569e1bc57399", size = 74332532, upload-time = "2026-01-22T05:31:20.171Z" },
@@ -1027,9 +1027,9 @@ name = "intel-sycl-rt"
 version = "2025.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "intel-cmplr-lib-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-cmplr-lib-ur", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-cmplr-lic-rt", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "intel-cmplr-lib-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-cmplr-lib-ur", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-cmplr-lic-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/e4/047a0b42f8240a9c70f3ac120479aa1996f99cfe9fd97afb025d6bbd89a8/intel_sycl_rt-2025.3.2-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:3b19d9f64b56804a7bc58a91fe95daacf10bc906b94ce3c5b6416153367df972", size = 113878678, upload-time = "2026-01-22T05:31:00.355Z" },
@@ -1041,7 +1041,7 @@ name = "jinja2"
 version = "3.1.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "markupsafe" },
+    { name = "markupsafe", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d", size = 245115, upload-time = "2025-03-05T20:05:02.478Z" }
 wheels = [
@@ -1120,10 +1120,10 @@ name = "jsonschema"
 version = "4.26.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "attrs" },
-    { name = "jsonschema-specifications" },
-    { name = "referencing" },
-    { name = "rpds-py" },
+    { name = "attrs", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "jsonschema-specifications", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "referencing", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "rpds-py", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b3/fc/e067678238fa451312d4c62bf6e6cf5ec56375422aee02f9cb5f909b3047/jsonschema-4.26.0.tar.gz", hash = "sha256:0c26707e2efad8aa1bfc5b7ce170f3fccc2e4918ff85989ba9ffa9facb2be326", size = 366583, upload-time = "2026-01-07T13:41:07.246Z" }
 wheels = [
@@ -1135,7 +1135,7 @@ name = "jsonschema-specifications"
 version = "2025.9.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "referencing" },
+    { name = "referencing", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
@@ -1147,16 +1147,16 @@ name = "kubernetes"
 version = "36.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "aiohttp" },
-    { name = "certifi" },
-    { name = "durationpy" },
-    { name = "python-dateutil" },
-    { name = "pyyaml" },
-    { name = "requests" },
-    { name = "requests-oauthlib" },
-    { name = "six" },
-    { name = "urllib3" },
-    { name = "websocket-client" },
+    { name = "aiohttp", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "certifi", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "durationpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "python-dateutil", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "requests", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "requests-oauthlib", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "six", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "urllib3", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "websocket-client", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ca/57/b07b96353f902aa1bdbe00e878e3a12a137977d03a962479785576aa8ec9/kubernetes-36.0.3.tar.gz", hash = "sha256:36993ed25ce59b789c9341473a228fcf268504a2fec7c2b2b1531d73072e5ce7", size = 2337528, upload-time = "2026-07-13T20:38:12.128Z" }
 wheels = [
@@ -1168,7 +1168,7 @@ name = "markdown-it-py"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "mdurl" },
+    { name = "mdurl", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5b/f5/4ec618ed16cc4f8fb3b701563655a69816155e79e24a17b651541804721d/markdown_it_py-4.0.0.tar.gz", hash = "sha256:cb0a2b4aa34f932c007117b194e945bd74e0ec24133ceb5bac59009cda1cb9f3", size = 73070, upload-time = "2025-08-11T12:57:52.854Z" }
 wheels = [
@@ -1242,9 +1242,9 @@ name = "mkl"
 version = "2025.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "intel-openmp", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "onemkl-license", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "tbb", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "intel-openmp", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onemkl-license", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tbb", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/ee/76755ca0ec9626835e0d024c369b968f24eadce2106a7884404720670623/mkl-2025.3.1-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:db31e59fa368dd4fa45b494351f4b7e0e6204b08d7db27836118c4e1370eb011", size = 195022933, upload-time = "2026-01-22T05:35:09.804Z" },
@@ -1451,7 +1451,7 @@ name = "multiprocess"
 version = "0.70.16"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "dill" },
+    { name = "dill", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b5/ae/04f39c5d0d0def03247c2893d6f2b83c136bf3320a2154d7b8858f2ba72d/multiprocess-0.70.16.tar.gz", hash = "sha256:161af703d4652a0e1410be6abccecde4a7ddffd19341be0a7011b94aeb171ac1", size = 1772603, upload-time = "2024-01-28T18:52:34.85Z" }
 wheels = [
@@ -1573,7 +1573,7 @@ name = "nvidia-cudnn-cu13"
 version = "9.19.0.56"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cublas", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/84/26025437c1e6b61a707442184fa0c03d083b661adf3a3eecfd6d21677740/nvidia_cudnn_cu13-9.19.0.56-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:6ed29ffaee1176c612daf442e4dd6cfeb6a0caa43ddcbeb59da94953030b1be4", size = 433781201, upload-time = "2026-02-03T20:40:53.805Z" },
@@ -1586,7 +1586,7 @@ name = "nvidia-cufft"
 version = "12.0.0.61"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-nvjitlink", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8b/ae/f417a75c0259e85c1d2f83ca4e960289a5f814ed0cea74d18c353d3e989d/nvidia_cufft-12.0.0.61-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:2708c852ef8cd89d1d2068bdbece0aa188813a0c934db3779b9b1faa8442e5f5", size = 214053554, upload-time = "2025-09-04T08:31:38.196Z" },
@@ -1618,9 +1618,9 @@ name = "nvidia-cusolver"
 version = "12.0.4.66"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "nvidia-cusparse", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "nvidia-nvjitlink", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cublas", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cusparse", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-nvjitlink", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/c3/b30c9e935fc01e3da443ec0116ed1b2a009bb867f5324d3f2d7e533e776b/nvidia_cusolver-12.0.4.66-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:02c2457eaa9e39de20f880f4bd8820e6a1cfb9f9a34f820eb12a155aa5bc92d2", size = 223467760, upload-time = "2025-09-04T08:33:04.222Z" },
@@ -1633,7 +1633,7 @@ name = "nvidia-cusparse"
 version = "12.6.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (sys_platform != 'win32' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-nvjitlink", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'linux' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f8/94/5c26f33738ae35276672f12615a64bd008ed5be6d1ebcb23579285d960a9/nvidia_cusparse-12.6.3.3-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:80bcc4662f23f1054ee334a15c72b8940402975e0eab63178fc7e670aa59472c", size = 162155568, upload-time = "2025-09-04T08:33:42.864Z" },
@@ -1712,8 +1712,8 @@ name = "oneccl"
 version = "2021.17.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "impi-rt", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "intel-sycl-rt", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "impi-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-sycl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/73/9b/2932b6b128924ba96712ea1c807c1618b9963518eb8ec80cf834ffc3c684/oneccl-2021.17.2-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:a77c2c56eeba1c78379a530a2ba2bbd33407f6440b44476f83292d1694100373", size = 157647983, upload-time = "2026-01-22T05:34:10.902Z" },
@@ -1724,7 +1724,7 @@ name = "oneccl-devel"
 version = "2021.17.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "oneccl", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "oneccl", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/a1/4fad3108825e2d65d812ba69a9fd3664181cfe8860e49110c92431d1629f/oneccl_devel-2021.17.2-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:6cdaaf12f04fa8eb7934f3b23c202410fece7ae05dfd3b8cc4219701726f1999", size = 47391093, upload-time = "2026-01-22T05:34:26.3Z" },
@@ -1744,9 +1744,9 @@ name = "onemkl-sycl-blas"
 version = "2025.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "dpcpp-cpp-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-opencl-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "mkl", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "dpcpp-cpp-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-opencl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "mkl", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/17/497d29cd13029f4835383d95e644d1602dafa9b7887d298ba9ea77734dce/onemkl_sycl_blas-2025.3.1-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:b956c14db44990579cf376eb72ba6010b0c83ae27fc132f66752b1b337d9e728", size = 22611940, upload-time = "2026-01-22T05:35:51.858Z" },
@@ -1758,9 +1758,9 @@ name = "onemkl-sycl-dft"
 version = "2025.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "dpcpp-cpp-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-opencl-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "mkl", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "dpcpp-cpp-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-opencl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "mkl", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/ae/46fe3ca4fcf715cfef35b239abe705d32f355c3be4b9e94aca782a4720ae/onemkl_sycl_dft-2025.3.1-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:39f43a334d05ab5989b22ceb46243eacce4571d016c9f67923179ff4e427b88a", size = 6841746, upload-time = "2026-01-22T05:35:56.099Z" },
@@ -1772,10 +1772,10 @@ name = "onemkl-sycl-lapack"
 version = "2025.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "dpcpp-cpp-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-opencl-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "mkl", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "onemkl-sycl-blas", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "dpcpp-cpp-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-opencl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "mkl", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onemkl-sycl-blas", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/24/f6/f4e38bb1a81fbda3afa2d79aa95b5a5d73c838977c1f86fbf73e7dafe676/onemkl_sycl_lapack-2025.3.1-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:360fc636bc0832d5a2ee2d3c4f440145ec43d94c170a351d588a9af7a84849ce", size = 9552263, upload-time = "2026-01-22T05:35:33.098Z" },
@@ -1787,9 +1787,9 @@ name = "onemkl-sycl-rng"
 version = "2025.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "dpcpp-cpp-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-opencl-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "mkl", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "dpcpp-cpp-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-opencl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "mkl", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/f9/1f3b6ce37848c721462b4f30de08482dc27d6ffbcbba621b61ef53e28d3c/onemkl_sycl_rng-2025.3.1-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:3b0d89c6d38cfbeccc00d2ebe95d6ad81637d62e146e4f3f2101952bc836c39d", size = 24793212, upload-time = "2026-01-22T05:35:15.707Z" },
@@ -1801,10 +1801,10 @@ name = "onemkl-sycl-sparse"
 version = "2025.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "dpcpp-cpp-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-opencl-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "mkl", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "onemkl-sycl-blas", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "dpcpp-cpp-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-opencl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "mkl", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onemkl-sycl-blas", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5d/88/4b7e2095f5d16ce1d8425efb2bf0126dd60ef659e24619bdeea85c10ef74/onemkl_sycl_sparse-2025.3.1-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:4a27ded81ab3826a839dc1ce66e44cbb739f0f7109a1dccd1aa77cc9a6663d08", size = 23047845, upload-time = "2026-01-22T05:35:24.503Z" },
@@ -1816,10 +1816,10 @@ name = "onnxruntime"
 version = "1.27.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "flatbuffers" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "protobuf" },
+    { name = "flatbuffers", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "protobuf", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/84/86/c3b6b17745a1997d784dadc9bd88d713d2e6721139a5a0e885b28cfb79b1/onnxruntime-1.27.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c6fddce0539a4898c7bef35b052ffd37935b2190e35488eab99ce91887743ea1", size = 16438140, upload-time = "2026-06-15T22:42:40.666Z" },
@@ -1845,14 +1845,14 @@ name = "openai"
 version = "1.108.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio" },
-    { name = "distro" },
-    { name = "httpx" },
-    { name = "jiter" },
-    { name = "pydantic" },
-    { name = "sniffio" },
-    { name = "tqdm" },
-    { name = "typing-extensions" },
+    { name = "anyio", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "distro", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "httpx", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "jiter", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pydantic", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "sniffio", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tqdm", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/25/7a/3f2fbdf82a22d48405c1872f7c3176a705eee80ff2d2715d29472089171f/openai-1.108.1.tar.gz", hash = "sha256:6648468c1aec4eacfa554001e933a9fa075f57bacfc27588c2e34456cee9fef9", size = 563735, upload-time = "2025-09-19T16:52:20.399Z" }
 wheels = [
@@ -1864,7 +1864,7 @@ name = "openai-harmony"
 version = "0.0.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pydantic" },
+    { name = "pydantic", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3e/92/2d038d096f29179c7c9571b431f9e739f87a487121901725e23fe338dd9d/openai_harmony-0.0.8.tar.gz", hash = "sha256:6e43f98e6c242fa2de6f8ea12eab24af63fa2ed3e89c06341fb9d92632c5cbdf", size = 284777, upload-time = "2025-11-05T19:07:06.727Z" }
 wheels = [
@@ -1886,7 +1886,7 @@ name = "opentelemetry-api"
 version = "1.44.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ee/8b/aa9e2d8b8dfa7c946f7dec5d1f8f6ba8eca062f43509a06bdb5ce93d26c0/opentelemetry_api-1.44.0.tar.gz", hash = "sha256:67647e5e9566edcf421166fdf022b3537f818635daa852b289e34604dc6fb33a", size = 72406, upload-time = "2026-07-16T15:25:32.678Z" }
 wheels = [
@@ -1898,7 +1898,7 @@ name = "opentelemetry-exporter-otlp-proto-common"
 version = "1.44.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "opentelemetry-proto" },
+    { name = "opentelemetry-proto", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/09/4d717852c1cf3f854b76c7110a5d00883bc3c99288b9b0dbcbeb9e306eb6/opentelemetry_exporter_otlp_proto_common-1.44.0.tar.gz", hash = "sha256:dc87a5a5bc58f149a56d1547e4691588fa12994cdc3bc039a694ccb3375862ac", size = 20202, upload-time = "2026-07-16T15:25:37.658Z" }
 wheels = [
@@ -1910,13 +1910,13 @@ name = "opentelemetry-exporter-otlp-proto-grpc"
 version = "1.44.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "googleapis-common-protos" },
-    { name = "grpcio" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-common" },
-    { name = "opentelemetry-proto" },
-    { name = "opentelemetry-sdk" },
-    { name = "typing-extensions" },
+    { name = "googleapis-common-protos", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "grpcio", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "opentelemetry-api", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "opentelemetry-exporter-otlp-proto-common", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "opentelemetry-proto", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "opentelemetry-sdk", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1f/47/80d9e9d468dc5de3af5096f5ccdb065fa4dd1470f74495cc53e59e397f47/opentelemetry_exporter_otlp_proto_grpc-1.44.0.tar.gz", hash = "sha256:40d1ae9e03fcc36de3cbac610cc99f35894938bff9cfd90fc4ec68bd85448463", size = 27225, upload-time = "2026-07-16T15:25:38.308Z" }
 wheels = [
@@ -1928,7 +1928,7 @@ name = "opentelemetry-proto"
 version = "1.44.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf" },
+    { name = "protobuf", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/64/01/40ac4ae9a149263cc52c2cee200ddd80cb6d8db1a4610abf8eabce0fe771/opentelemetry_proto-1.44.0.tar.gz", hash = "sha256:c547a79c2f8c0c515d31509154682e5921c7cfd5ca67b70e1f9266e2c3e103f3", size = 46488, upload-time = "2026-07-16T15:25:45.34Z" }
 wheels = [
@@ -1940,9 +1940,9 @@ name = "opentelemetry-sdk"
 version = "1.44.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-semantic-conventions" },
-    { name = "typing-extensions" },
+    { name = "opentelemetry-api", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "opentelemetry-semantic-conventions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5d/77/a6592cbc7c8d9bcc9d6757a9df45e04a7c585e3e6e7a13456da522b21109/opentelemetry_sdk-1.44.0.tar.gz", hash = "sha256:cebe7f65dc12f26ead75c6064de12fd2a9052e5060c0272d402cfa203aae123b", size = 208624, upload-time = "2026-07-16T15:25:46.078Z" }
 wheels = [
@@ -1954,8 +1954,8 @@ name = "opentelemetry-semantic-conventions"
 version = "0.65b0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "opentelemetry-api" },
-    { name = "typing-extensions" },
+    { name = "opentelemetry-api", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8f/73/0cbdebcb4cf545fdd328da14f5137e37d0770c3f26185e478b0d15d94f50/opentelemetry_semantic_conventions-0.65b0.tar.gz", hash = "sha256:f9b2b81e9d5b64f11bc952075e7e9c7fb0aab075c7fd1c46d597f1b919852d60", size = 148774, upload-time = "2026-07-16T15:25:46.902Z" }
 wheels = [
@@ -2032,10 +2032,10 @@ name = "pandas"
 version = "2.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
-    { name = "python-dateutil" },
-    { name = "pytz" },
-    { name = "tzdata" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "python-dateutil", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pytz", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tzdata", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/33/01/d40b85317f86cf08d853a4f495195c73815fdf205eef3993821720274518/pandas-2.3.3.tar.gz", hash = "sha256:e05e1af93b977f7eafa636d043f9f94c7ee3ac81af99c13508215942e64c993b", size = 4495223, upload-time = "2025-09-29T23:34:51.853Z" }
 wheels = [
@@ -2069,18 +2069,18 @@ name = "peft"
 version = "0.18.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "accelerate" },
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "psutil" },
-    { name = "pyyaml" },
-    { name = "safetensors" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "extra == 'extra-7-service-cuda'" },
-    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "extra == 'extra-7-service-xpu'" },
-    { name = "tqdm" },
-    { name = "transformers" },
+    { name = "accelerate", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "huggingface-hub", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "psutil", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "safetensors", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tqdm", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "transformers", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4b/0c/f2938db546ac7fc961ab5917cd50fcf5d0d70b406de93e3faccaa504e152/peft-0.18.0.tar.gz", hash = "sha256:c81c80b2056ab40c23d58ef25f74daab417ac653970718589a11a8af28218588", size = 634141, upload-time = "2025-11-13T11:13:06.603Z" }
 wheels = [
@@ -2169,11 +2169,11 @@ name = "pre-commit"
 version = "4.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cfgv" },
-    { name = "identify" },
-    { name = "nodeenv" },
-    { name = "pyyaml" },
-    { name = "virtualenv" },
+    { name = "cfgv", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "identify", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nodeenv", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "virtualenv", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/25/3a/ddb78f32a0814e66b18a099377a106a2dcdce92d86a034d69d65df9b256e/pre_commit-4.6.1.tar.gz", hash = "sha256:03e809865c7d178b9979d06c761fcbfe6808fdaded8581a745bb110e52050421", size = 198646, upload-time = "2026-07-21T20:56:58.225Z" }
 wheels = [
@@ -2416,10 +2416,10 @@ name = "pydantic"
 version = "2.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "annotated-types" },
-    { name = "pydantic-core" },
-    { name = "typing-extensions" },
-    { name = "typing-inspection" },
+    { name = "annotated-types", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pydantic-core", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-inspection", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c3/da/b8a7ee04378a53f6fefefc0c5e05570a3ebfdfa0523a878bcd3b475683ee/pydantic-2.12.0.tar.gz", hash = "sha256:c1a077e6270dbfb37bfd8b498b3981e2bb18f68103720e51fa6c306a5a9af563", size = 814760, upload-time = "2025-10-07T15:58:03.467Z" }
 wheels = [
@@ -2431,7 +2431,7 @@ name = "pydantic-core"
 version = "2.41.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7d/14/12b4a0d2b0b10d8e1d9a24ad94e7bbb43335eaf29c0c4e57860e8a30734a/pydantic_core-2.41.1.tar.gz", hash = "sha256:1ad375859a6d8c356b7704ec0f547a58e82ee80bb41baa811ad710e124bc8f2f", size = 454870, upload-time = "2025-10-07T10:50:45.974Z" }
 wheels = [
@@ -2484,9 +2484,9 @@ name = "pydantic-settings"
 version = "2.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "typing-inspection" },
+    { name = "pydantic", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "python-dotenv", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-inspection", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5c/b5/8f48e906c3e0205276e8bd8cb7512217a87b2685304d64be27cad5b3019f/pydantic_settings-2.14.2.tar.gz", hash = "sha256:c19dd64b19097f1de80184f0cc7b0272a13ae6e170cbf240a3e27e381ed14a5f", size = 237700, upload-time = "2026-06-19T13:44:56.324Z" }
 wheels = [
@@ -2535,9 +2535,9 @@ version = "8.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "iniconfig" },
-    { name = "packaging" },
-    { name = "pluggy" },
+    { name = "iniconfig", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pluggy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cf/4e/0ceea141f0e5d09de4053c5338c62615ae2bd9bd3f013813f5ec62e3cf97/pytest-8.2.1.tar.gz", hash = "sha256:5046e5b46d8e4cac199c373041f26be56fdb81eb4e67dc11d4e10811fc3408fd", size = 1424649, upload-time = "2024-05-19T19:08:03.507Z" }
 wheels = [
@@ -2549,7 +2549,7 @@ name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "six" },
+    { name = "six", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
 wheels = [
@@ -2561,8 +2561,8 @@ name = "python-discovery"
 version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "filelock" },
-    { name = "platformdirs" },
+    { name = "filelock", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "platformdirs", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f1/51/276f964496a5714ab9f320896195639086881c2b39c03b5ad13de84acbb8/python_discovery-1.5.0.tar.gz", hash = "sha256:3e014c6327154d3dda27939a9a0dc9c5c000439f1906d3f303b48f984bd2ecef", size = 72483, upload-time = "2026-07-21T13:14:14.641Z" }
 wheels = [
@@ -2648,9 +2648,9 @@ name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "attrs" },
-    { name = "rpds-py" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "attrs", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "rpds-py", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "(python_full_version < '3.13' and sys_platform == 'linux') or (python_full_version < '3.13' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/f5/df4e9027acead3ecc63e50fe1e36aca1523e1719559c499951bb4b53188f/referencing-0.37.0.tar.gz", hash = "sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8", size = 78036, upload-time = "2025-10-13T15:30:48.871Z" }
 wheels = [
@@ -2735,10 +2735,10 @@ name = "requests"
 version = "2.32.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "certifi" },
-    { name = "charset-normalizer" },
-    { name = "idna" },
-    { name = "urllib3" },
+    { name = "certifi", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "charset-normalizer", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "idna", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "urllib3", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c9/74/b3ff8e6c8446842c3f5c837e9c3dfcfe2018ea6ecef224c710c85ef728f4/requests-2.32.5.tar.gz", hash = "sha256:dbba0bac56e100853db0ea71b82b4dfd5fe2bf6d3754a8893c3af500cec7d7cf", size = 134517, upload-time = "2025-08-18T20:46:02.573Z" }
 wheels = [
@@ -2750,8 +2750,8 @@ name = "requests-oauthlib"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "oauthlib" },
-    { name = "requests" },
+    { name = "oauthlib", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "requests", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/f2/05f29bc3913aea15eb670be136045bf5c5bbf4b99ecb839da9b422bb2c85/requests-oauthlib-2.0.0.tar.gz", hash = "sha256:b3dffaebd884d8cd778494369603a9e7b58d29111bf6b41bdc2dcd87203af4e9", size = 55650, upload-time = "2024-03-22T20:32:29.939Z" }
 wheels = [
@@ -2763,8 +2763,8 @@ name = "rich"
 version = "14.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "markdown-it-py" },
-    { name = "pygments" },
+    { name = "markdown-it-py", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pygments", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b3/c6/f3b320c27991c46f43ee9d856302c70dc2d0fb2dba4842ff739d5f46b393/rich-14.3.3.tar.gz", hash = "sha256:b8daa0b9e4eef54dd8cf7c86c03713f53241884e814f4e2f5fb342fe520f639b", size = 230582, upload-time = "2026-02-19T17:23:12.474Z" }
 wheels = [
@@ -2903,11 +2903,11 @@ name = "scikit-learn"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "joblib" },
-    { name = "narwhals" },
-    { name = "numpy" },
-    { name = "scipy" },
-    { name = "threadpoolctl" },
+    { name = "joblib", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "narwhals", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "scipy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "threadpoolctl", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fa/6f/37092bdb25f712817231799fc5674d8e704066a8a70c1d2d40517e18b4ab/scikit_learn-1.9.0.tar.gz", hash = "sha256:8833266989d3a5110178a9fae30783675460724d0e1efb13b14901d2c660c557", size = 7750767, upload-time = "2026-06-02T11:54:32.706Z" }
 wheels = [
@@ -2934,7 +2934,7 @@ name = "scipy"
 version = "1.17.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
@@ -2975,16 +2975,16 @@ name = "sentence-transformers"
 version = "5.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "scikit-learn" },
-    { name = "scipy" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "extra == 'extra-7-service-cuda'" },
-    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "extra == 'extra-7-service-xpu'" },
-    { name = "tqdm" },
-    { name = "transformers" },
-    { name = "typing-extensions" },
+    { name = "huggingface-hub", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "scikit-learn", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "scipy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tqdm", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "transformers", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f9/56/d2cb00765a6b15c994a7fccf20f9032f16e8193ca49147cb5155166ad744/sentence_transformers-5.6.0.tar.gz", hash = "sha256:0e7164d051e416c1853ade7c274ff52af3f9da0f4be7f0b83d734c27699e1057", size = 453194, upload-time = "2026-06-16T14:01:56.42Z" }
 wheels = [
@@ -3024,58 +3024,58 @@ name = "service"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "accelerate" },
-    { name = "bitsandbytes" },
-    { name = "causal-conv1d", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "chromadb" },
-    { name = "datasets" },
-    { name = "deepspeed", marker = "sys_platform != 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "fastapi" },
-    { name = "fla-core" },
-    { name = "flash-linear-attention" },
-    { name = "gguf" },
-    { name = "httpx" },
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "nvidia-ml-py" },
-    { name = "openai" },
-    { name = "openai-harmony" },
-    { name = "orjson" },
-    { name = "peft" },
-    { name = "pillow" },
-    { name = "psutil" },
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "python-multipart" },
-    { name = "redis" },
-    { name = "safetensors" },
-    { name = "sentence-transformers" },
-    { name = "sentencepiece" },
-    { name = "starlette" },
-    { name = "tiktoken" },
-    { name = "transformers" },
-    { name = "trl" },
-    { name = "uvicorn", extra = ["standard"] },
+    { name = "accelerate", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "bitsandbytes", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "causal-conv1d", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "chromadb", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "datasets", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "deepspeed", marker = "sys_platform == 'linux' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "fastapi", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "fla-core", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "flash-linear-attention", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "gguf", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "httpx", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "huggingface-hub", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-ml-py", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "openai", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "openai-harmony", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "orjson", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "peft", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pillow", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "psutil", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pydantic", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "python-dotenv", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "python-multipart", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "redis", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "safetensors", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "sentence-transformers", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "sentencepiece", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "starlette", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tiktoken", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "transformers", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "trl", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "uvicorn", extra = ["standard"], marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 
 [package.optional-dependencies]
 cuda = [
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
-    { name = "torchaudio", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
-    { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torchaudio", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torchvision", version = "0.26.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 xpu = [
-    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" } },
-    { name = "torchaudio", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" } },
-    { name = "torchvision", version = "0.26.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" } },
-    { name = "triton-xpu" },
+    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torchaudio", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torchvision", version = "0.26.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "triton-xpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "ruff" },
+    { name = "pre-commit", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pytest", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "ruff", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 
 [package.metadata]
@@ -3085,7 +3085,7 @@ requires-dist = [
     { name = "causal-conv1d", marker = "sys_platform == 'linux'", specifier = "==1.6.1" },
     { name = "chromadb" },
     { name = "datasets", specifier = "==4.8.5" },
-    { name = "deepspeed", marker = "sys_platform == 'linux'", specifier = "==0.19.2" },
+    { name = "deepspeed", marker = "sys_platform == 'linux'", specifier = "==0.19.3" },
     { name = "fastapi", specifier = "==0.120.1" },
     { name = "fla-core", specifier = "==0.4.0" },
     { name = "flash-linear-attention", specifier = "==0.4.0" },
@@ -3170,8 +3170,8 @@ name = "starlette"
 version = "0.48.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "anyio", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "(python_full_version < '3.13' and sys_platform == 'linux') or (python_full_version < '3.13' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a7/a5/d6f429d43394057b67a6b5bbe6eae2f77a6bf7459d961fdb224bf206eee6/starlette-0.48.0.tar.gz", hash = "sha256:7e8cee469a8ab2352911528110ce9088fdc6a37d9876926e73da7ce4aa4c7a46", size = 2652949, upload-time = "2025-09-13T08:41:05.699Z" }
 wheels = [
@@ -3183,7 +3183,7 @@ name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "mpmath" },
+    { name = "mpmath", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
@@ -3195,7 +3195,7 @@ name = "tbb"
 version = "2022.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "tcmlib", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "tcmlib", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/08/59/8d381a2cfe8d36c4f4ff9f94769ff2809bfc16014d888360b0e24c7e5c6b/tbb-2022.3.1-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:534c089eca6bcf148408684c156229d5f09c01d323b685b15739f41985b529d7", size = 4178630, upload-time = "2026-01-22T05:30:20.589Z" },
@@ -3234,8 +3234,8 @@ name = "tiktoken"
 version = "0.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "regex" },
-    { name = "requests" },
+    { name = "regex", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "requests", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7d/ab/4d017d0f76ec3171d469d80fc03dfbb4e48a4bcaddaa831b31d526f05edc/tiktoken-0.12.0.tar.gz", hash = "sha256:b18ba7ee2b093863978fcb14f74b3707cdc8d4d4d3836853ce7ec60772139931", size = 37806, upload-time = "2025-10-06T20:22:45.419Z" }
 wheels = [
@@ -3271,7 +3271,7 @@ name = "tokenizers"
 version = "0.22.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/73/6f/f80cfef4a312e1fb34baf7d85c72d4411afde10978d4657f8cdd811d3ccc/tokenizers-0.22.2.tar.gz", hash = "sha256:473b83b915e547aa366d1eee11806deaf419e17be16310ac0a14077f1e28f917", size = 372115, upload-time = "2026-01-05T10:45:15.988Z" }
 wheels = [
@@ -3303,20 +3303,20 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform == 'win32'",
 ]
 dependencies = [
-    { name = "cuda-bindings", marker = "(sys_platform != 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform != 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "filelock", marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "fsspec", marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "jinja2", marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "networkx", marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "nvidia-cudnn-cu13", marker = "(sys_platform != 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "nvidia-cusparselt-cu13", marker = "(sys_platform != 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "nvidia-nccl-cu13", marker = "(sys_platform != 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "nvidia-nvshmem-cu13", marker = "(sys_platform != 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "setuptools", marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "sympy", marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
-    { name = "triton", marker = "(sys_platform != 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "typing-extensions", marker = "(extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu')" },
+    { name = "cuda-bindings", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "filelock", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "fsspec", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "jinja2", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "networkx", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cudnn-cu13", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cusparselt-cu13", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-nccl-cu13", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-nvshmem-cu13", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "setuptools", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "sympy", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "triton", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "(sys_platform == 'linux' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (sys_platform == 'win32' and extra != 'extra-7-service-cuda' and extra != 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/13/16/42e5915ebe4868caa6bac83a8ed59db57f12e9a61b7d749d584776ed53d5/torch-2.11.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:f99924682ef0aa6a4ab3b1b76f40dc6e273fca09f367d15a524266db100a723f", size = 419731115, upload-time = "2026-03-23T18:11:06.944Z" },
@@ -3349,20 +3349,20 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform == 'win32'",
 ]
 dependencies = [
-    { name = "cuda-bindings", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "filelock", marker = "extra == 'extra-7-service-cuda'" },
-    { name = "fsspec", marker = "extra == 'extra-7-service-cuda'" },
-    { name = "jinja2", marker = "extra == 'extra-7-service-cuda'" },
-    { name = "networkx", marker = "extra == 'extra-7-service-cuda'" },
-    { name = "nvidia-cudnn-cu13", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "nvidia-cusparselt-cu13", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "nvidia-nccl-cu13", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "nvidia-nvshmem-cu13", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "setuptools", marker = "extra == 'extra-7-service-cuda'" },
-    { name = "sympy", marker = "extra == 'extra-7-service-cuda'" },
-    { name = "triton", marker = "(sys_platform != 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "typing-extensions", marker = "extra == 'extra-7-service-cuda'" },
+    { name = "cuda-bindings", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "filelock", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "fsspec", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "jinja2", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "networkx", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cudnn-cu13", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-cusparselt-cu13", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-nccl-cu13", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "nvidia-nvshmem-cu13", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "setuptools", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "sympy", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "triton", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-cuda') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:252f237d417fac3ba59b1635815c1f035a8241f2af038f2c076ed430932d89f1", upload-time = "2026-04-27T20:01:46Z" },
@@ -3395,35 +3395,35 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform == 'win32'",
 ]
 dependencies = [
-    { name = "dpcpp-cpp-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "filelock", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "fsspec", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "impi-rt", marker = "(platform_machine == 'x86_64' and sys_platform != 'win32' and extra == 'extra-7-service-xpu') or (platform_machine != 'x86_64' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "intel-cmplr-lib-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-cmplr-lib-ur", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-cmplr-lic-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-opencl-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-openmp", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-pti", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "intel-sycl-rt", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "jinja2", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "mkl", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "networkx", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "oneccl", marker = "(platform_machine == 'x86_64' and sys_platform != 'win32' and extra == 'extra-7-service-xpu') or (platform_machine != 'x86_64' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "oneccl-devel", marker = "(platform_machine == 'x86_64' and sys_platform != 'win32' and extra == 'extra-7-service-xpu') or (platform_machine != 'x86_64' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "onemkl-license", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "onemkl-sycl-blas", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "onemkl-sycl-dft", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "onemkl-sycl-lapack", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "onemkl-sycl-rng", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "onemkl-sycl-sparse", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "setuptools", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "sympy", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "tbb", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "tcmlib", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "triton-xpu", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "typing-extensions", marker = "extra == 'extra-7-service-xpu'" },
-    { name = "umf", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "dpcpp-cpp-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "filelock", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "fsspec", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "impi-rt", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (platform_machine != 'x86_64' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform != 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-cmplr-lib-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-cmplr-lib-ur", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-cmplr-lic-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-opencl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-openmp", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-pti", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "intel-sycl-rt", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "jinja2", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "mkl", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "networkx", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "oneccl", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (platform_machine != 'x86_64' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform != 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "oneccl-devel", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (platform_machine != 'x86_64' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform != 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onemkl-license", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onemkl-sycl-blas", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onemkl-sycl-dft", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onemkl-sycl-lapack", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onemkl-sycl-rng", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "onemkl-sycl-sparse", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "setuptools", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "sympy", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tbb", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tcmlib", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "triton-xpu", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typing-extensions", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "umf", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/xpu/torch-2.11.0%2Bxpu-cp312-cp312-linux_x86_64.whl", upload-time = "2026-03-23T15:12:18Z" },
@@ -3506,9 +3506,9 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform == 'win32'",
 ]
 dependencies = [
-    { name = "numpy" },
-    { name = "pillow" },
-    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "pillow", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu130/torchvision-0.26.0%2Bcu130-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:e2b39db78be674ee4ce7e921f54b70e5c281594c9267d981c061684ed38df936", upload-time = "2026-03-23T15:36:26Z" },
@@ -3541,9 +3541,9 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform == 'win32'",
 ]
 dependencies = [
-    { name = "numpy" },
-    { name = "pillow" },
-    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" } },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "pillow", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torch", version = "2.11.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/xpu/torchvision-0.26.0%2Bxpu-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:e204d14be6f0f84d5f0e6e9213556e80326c3ab682cac108bcbef340bf45297b", upload-time = "2026-03-23T15:36:39Z" },
@@ -3575,15 +3575,15 @@ name = "transformers"
 version = "5.5.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "pyyaml" },
-    { name = "regex" },
-    { name = "safetensors" },
-    { name = "tokenizers" },
-    { name = "tqdm" },
-    { name = "typer" },
+    { name = "huggingface-hub", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "numpy", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "packaging", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "regex", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "safetensors", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tokenizers", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "tqdm", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "typer", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/af/35/cd5b0d1288e65d2c12db4ce84c1ec1074f7ee9bced040de6c9d69e70d620/transformers-5.5.3.tar.gz", hash = "sha256:3f60128e840b40d352655903552e1eed4f94ed49369a4d43e1bc067bd32d3f50", size = 8226047, upload-time = "2026-04-09T15:52:56.231Z" }
 wheels = [
@@ -3612,7 +3612,7 @@ name = "triton-xpu"
 version = "3.7.0"
 source = { registry = "https://download.pytorch.org/whl" }
 dependencies = [
-    { name = "pyelftools", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "pyelftools", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/triton_xpu-3.7.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a6663ebe43e3c0d560ff774708632d7a75208ee64a291c1724ed5c16a92d1c72", upload-time = "2026-05-12T14:50:36Z" },
@@ -3632,9 +3632,9 @@ name = "trl"
 version = "0.26.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "accelerate" },
-    { name = "datasets" },
-    { name = "transformers" },
+    { name = "accelerate", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "datasets", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "transformers", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/93/7c/467c22f1bf6953e089343ac04ee61b7cc6fe07952f8151d31a63eae78d39/trl-0.26.1.tar.gz", hash = "sha256:8a6f41c9a2098164dd731d6a4befe1a7e50974de94e5d55fd846023826c23de7", size = 434832, upload-time = "2025-12-12T17:46:16.28Z" }
 wheels = [
@@ -3646,10 +3646,10 @@ name = "typer"
 version = "0.24.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "annotated-doc" },
-    { name = "click" },
-    { name = "rich" },
-    { name = "shellingham" },
+    { name = "annotated-doc", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "click", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "rich", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "shellingham", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f5/24/cb09efec5cc954f7f9b930bf8279447d24618bb6758d4f6adf2574c41780/typer-0.24.1.tar.gz", hash = "sha256:e39b4732d65fbdcde189ae76cf7cd48aeae72919dea1fdfc16593be016256b45", size = 118613, upload-time = "2026-02-21T16:54:40.609Z" }
 wheels = [
@@ -3670,7 +3670,7 @@ name = "typing-inspection"
 version = "0.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/55/e3/70399cb7dd41c10ac53367ae42139cf4b1ca5f36bb3dc6c9d33acdb43655/typing_inspection-0.4.2.tar.gz", hash = "sha256:ba561c48a67c5958007083d386c3295464928b01faa735ab8547c5692e87f464", size = 75949, upload-time = "2025-10-01T02:14:41.687Z" }
 wheels = [
@@ -3691,7 +3691,7 @@ name = "umf"
 version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "tcmlib", marker = "extra == 'extra-7-service-xpu'" },
+    { name = "tcmlib", marker = "(sys_platform == 'linux' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-xpu') or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4c/b9/fe8c54eab5a3fdfdff1839d9299d90bfce5c467186b5c9ff9fd95d55ad64/umf-1.0.3-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:c89c0974daed30a1cac77fb7ce5ff9140d178e286bb2dd91b751486d5d0a65b0", size = 359879, upload-time = "2026-01-22T05:32:44.433Z" },
@@ -3712,8 +3712,8 @@ name = "uvicorn"
 version = "0.38.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click" },
-    { name = "h11" },
+    { name = "click", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "h11", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cb/ce/f06b84e2697fef4688ca63bdb2fdf113ca0a3be33f94488f2cadb690b0cf/uvicorn-0.38.0.tar.gz", hash = "sha256:fd97093bdd120a2609fc0d3afe931d4d4ad688b6e75f0f929fde1bc36fe0e91d", size = 80605, upload-time = "2025-10-18T13:46:44.63Z" }
 wheels = [
@@ -3723,12 +3723,12 @@ wheels = [
 [package.optional-dependencies]
 standard = [
     { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "httptools" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "uvloop", marker = "(platform_python_implementation != 'PyPy' and sys_platform != 'win32') or (platform_python_implementation == 'PyPy' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform == 'win32' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
-    { name = "watchfiles" },
-    { name = "websockets" },
+    { name = "httptools", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "python-dotenv", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "pyyaml", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "uvloop", marker = "(platform_python_implementation != 'PyPy' and sys_platform == 'linux') or (platform_python_implementation == 'PyPy' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu') or (sys_platform != 'linux' and extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "watchfiles", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "websockets", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 
 [[package]]
@@ -3760,10 +3760,10 @@ name = "virtualenv"
 version = "21.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "distlib" },
-    { name = "filelock" },
-    { name = "platformdirs" },
-    { name = "python-discovery" },
+    { name = "distlib", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "filelock", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "platformdirs", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "python-discovery", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fe/25/e367a7229b0914772ca8d81b41fde012d9feda68523b52644a571bb21ce8/virtualenv-21.7.0.tar.gz", hash = "sha256:7f9519b9432ff11b6e1a3e94061664efc2ff99ea21780e3cf4f6bd0a5da8b37c", size = 5527510, upload-time = "2026-07-21T13:12:14.109Z" }
 wheels = [
@@ -3775,7 +3775,7 @@ name = "watchfiles"
 version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio" },
+    { name = "anyio", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c2/c9/8869df9b2a2d6c59d79220a4db37679e74f807c559ffe5265e08b227a210/watchfiles-1.1.1.tar.gz", hash = "sha256:a173cb5c16c4f40ab19cecf48a534c409f7ea983ab8fed0741304a1c0a31b3f2", size = 94440, upload-time = "2025-10-14T15:06:21.08Z" }
 wheels = [
@@ -3950,9 +3950,9 @@ name = "yarl"
 version = "1.22.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "idna" },
-    { name = "multidict" },
-    { name = "propcache" },
+    { name = "idna", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "multidict", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
+    { name = "propcache", marker = "sys_platform == 'linux' or sys_platform == 'win32' or (extra == 'extra-7-service-cuda' and extra == 'extra-7-service-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/57/63/0c6ebca57330cd313f6102b16dd57ffaf3ec4c83403dcb45dbd15c6f3ea1/yarl-1.22.0.tar.gz", hash = "sha256:bebf8557577d4401ba8bd9ff33906f1376c877aa78d1fe216ad01b4d6745af71", size = 187169, upload-time = "2025-10-06T14:12:55.963Z" }
 wheels = [
