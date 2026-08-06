@@ -575,7 +575,15 @@ class TrainingConfig(BaseModel):
         ..., description="Model name label (the label from the models registry config)"
     )
     method: TrainingMethod = Field(..., description="Training method: lora / qlora / full")
-    dataset_path: str = Field(..., description="Training dataset file path; must be JSON or JSONL")
+    dataset_path: str = Field(
+        ...,
+        description=(
+            "Training dataset: a path to a local .json / .jsonl file, or any other value, "
+            "which is treated as a Hugging Face Hub dataset id. A Hub id cannot carry a "
+            "config/subset or split selector, and skips the local-file format sniffing — set "
+            "prompt_field/completion_field/text_field to match its columns"
+        ),
+    )
     output_dir: str = Field(..., description="Output folder path for the fine-tuned model files")
     offload_folder: str | None = Field(
         default="./deepspeed_offload",

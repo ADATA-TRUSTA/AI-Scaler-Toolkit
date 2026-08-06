@@ -15,13 +15,11 @@ from dotenv import load_dotenv
 SETTINGS_FILE = Path(__file__).resolve()
 SERVICE_DIR = SETTINGS_FILE.parent
 PROJECT_ROOT = SERVICE_DIR.parent
-# The uv project root is the repo root, so the venv normally sits beside it;
-# older layouts kept it under service/. Probe both so _prepend_cuda_library_paths()
-# actually finds the bundled CUDA libraries instead of silently globbing nothing.
-VENV_DIR = next(
-    (p for p in (PROJECT_ROOT / ".venv", SERVICE_DIR / ".venv") if p.is_dir()),
-    PROJECT_ROOT / ".venv",
-)
+# The uv project root is the repo root, so the venv is created beside it —
+# see scripts/{linux/run_service.sh,windows/run_service.bat}, which launch from
+# this same path. _prepend_cuda_library_paths() globs here for the bundled
+# CUDA shared libraries.
+VENV_DIR = PROJECT_ROOT / ".venv"
 UTILS_DIR = SERVICE_DIR / "utils"
 LLAMA_CPP_DIR = UTILS_DIR / "llama.cpp"
 

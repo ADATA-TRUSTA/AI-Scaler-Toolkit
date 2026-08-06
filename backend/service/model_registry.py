@@ -94,57 +94,7 @@ def _get_max_context_length_from_hf(model_id: str, hf_token: str | None = None) 
 
 # Seed models used only to initialize the registry file when it does not exist yet.
 # After creation, the JSON file is the single source of truth.
-SEED_BASE_MODELS: list[dict] = [
-    {
-        "base_model_name": "openai/gss-opt-20b",
-        "label": "OPENAI GSS-Opt-20B",
-        "source": "hf",
-        "size": "~20B",
-        "max_context_length": None,
-    },
-    {
-        "base_model_name": "openai/gss-opt-120b",
-        "label": "OPENAI GSS-Opt-120B",
-        "source": "hf",
-        "size": "~120B",
-        "max_context_length": None,
-    },
-    {
-        "base_model_name": "google/gemma-3-4b-it",
-        "label": "Gemma 3 4B",
-        "source": "hf",
-        "size": "~4B",
-        "max_context_length": None,
-    },
-    {
-        "base_model_name": "google/gemma-3-12b-it",
-        "label": "Gemma 3 12B",
-        "source": "hf",
-        "size": "~12B",
-        "max_context_length": None,
-    },
-    {
-        "base_model_name": "Qwen/Qwen3-4B",
-        "label": "Qwen3 4B",
-        "source": "hf",
-        "size": "~4B",
-        "max_context_length": None,
-    },
-    {
-        "base_model_name": "Qwen/Qwen3-14B",
-        "label": "Qwen3 14B",
-        "source": "hf",
-        "size": "~14B",
-        "max_context_length": None,
-    },
-    {
-        "base_model_name": "Qwen/Qwen3-32B",
-        "label": "Qwen3 32B",
-        "source": "hf",
-        "size": "~32B",
-        "max_context_length": None,
-    },
-]
+SEED_BASE_MODELS: list[dict] = []
 
 
 @dataclass
