@@ -39,7 +39,9 @@ Offload is not a single custom module; instead it uses the capabilities of exist
 
 > Quantization benchmarking: the VRAM-reduction and tok/s figures below come from in-house measurement.
 >
-> Measured example (RTX 5060 Ti, 16 GB): Qwen3-14B bf16 (~27.5 GB of weights) ran via `device_map=auto` + `offload_folder` at a peak of **~13.4 GB GPU VRAM** (**~51% less** than the ~27.5 GB it would need fully on GPU), at **~0.5 tok/s** under heavy CPU/disk offload — i.e. offload trades throughput to fit a model that otherwise would not load.
+> Measured example (RTX 5060 Ti, 16 GB): Qwen3-14B bf16 (~27.5 GB of weights) ran via `device_map=auto` + `offload_folder` at a peak of **~11.7 GB GPU VRAM** attributable to the model — the device peaked at ~13.4 GB, of which ~1.7 GB was already held before the load — which is **~57% less** than the ~27.5 GB it would need fully on GPU, at **~0.5 tok/s** under heavy CPU/disk offload. Offload trades throughput to fit a model that otherwise would not load.
+>
+> The tok/s figure predates the benchmark's switch to server-reported token counts and is pending confirmation on the next run.
 
 ## Benefits
 
