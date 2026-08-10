@@ -39,7 +39,9 @@ Offload 並非單一自訂模組，而是依引擎/情境使用既有框架能�
 
 > 量化實測：下方 VRAM 降幅與 tok/s 由內部實測產生。
 >
-> 實測範例（RTX 5060 Ti，16GB）：Qwen3-14B bf16（權重約 27.5GB）透過 `device_map=auto` + `offload_folder` 執行，峰值 **~13.4GB GPU VRAM**（比全程放 GPU 的 ~27.5GB **少約 51%**），在大量 CPU/磁碟 offload 下約 **0.5 tok/s**——即以吞吐換取「讓原本載不進來的模型能跑」。
+> 實測範例（RTX 5060 Ti，16GB）：Qwen3-14B bf16（權重約 27.5GB）透過 `device_map=auto` + `offload_folder` 執行，可歸屬於模型的峰值為 **~11.7GB GPU VRAM**——整張卡的峰值是 ~13.4GB，其中 ~1.7GB 在載入前就已被佔用——比全程放 GPU 的 ~27.5GB **少約 57%**，在大量 CPU/磁碟 offload 下約 **0.5 tok/s**。即以吞吐換取「讓原本載不進來的模型能跑」。
+>
+> 其中 tok/s 是在 benchmark 改用 server 回報的 token 數之前量的，待下次重跑確認。
 
 ## 帶來的效益
 
