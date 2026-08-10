@@ -108,8 +108,6 @@ AI-Scaler-Toolkit/
 │  ├─ dist/
 │  └─ dist_client/
 ├─ docs/
-├─ examples/
-│  └─ datasets/
 ├─ wiki/
 ├─ .github/
 ├─ LICENSE
@@ -123,11 +121,6 @@ AI-Scaler-Toolkit/
 
 - **[Installation & Setup](docs/installation.en.md)** — system requirements, download, `.env`, Python environment, starting the service
 - **[Usage & Verification](docs/usage.en.md)** — health check, loading a model, common API routes, frontend & logging notes
-- **[Performance Benchmarks](docs/benchmarks.en.md)** — TPS / TTFT across GPUs and quantizations
 - **[Maintenance & FAQ](docs/faq.en.md)** — updates and troubleshooting
-- **[Site Map](docs/site-map.html)** — the frontend SPA's pages and which backend endpoints each one calls
 
-Reference manuals (bilingual, HTML): [Inference](docs/inference_manual.en.html) ·
-[Fine-tune](docs/finetune_manual.en.html)
-
-> 中文文件：[安裝](docs/installation.md) · [使用](docs/usage.md) · [效能](docs/benchmarks.md) · [FAQ](docs/faq.md) · [推理手冊](docs/inference_manual.html) · [微調手冊](docs/finetune_manual.html)
+> 中文文件：[安裝](docs/installation.md) · [使用](docs/usage.md) · [FAQ](docs/faq.md)

@@ -37,8 +37,7 @@ Offload 並非單一自訂模組，而是依引擎/情境使用既有框架能�
   - `zero3_offload_cpu_cpu`、`zero3_offload_cpu_disk`、`zero3_offload_disk_cpu`、`zero3_offload_disk_disk`
 - 注意：Disk offload 會顯著拉長訓練時間，屬於「極低記憶體環境」的手段。
 
-> 量化實測：VRAM 降幅與 tok/s 可用 `backend/tests/benchmark_offload_vram.py` 實測產生，
-> 結果寫入 `backend/tests/benchmark_offload_vram_results.json`；本頁若引用數字應以該實測為準。
+> 量化實測：下方 VRAM 降幅與 tok/s 由內部實測產生。
 >
 > 實測範例（RTX 5060 Ti，16GB）：Qwen3-14B bf16（權重約 27.5GB）透過 `device_map=auto` + `offload_folder` 執行，峰值 **~13.4GB GPU VRAM**（比全程放 GPU 的 ~27.5GB **少約 51%**），在大量 CPU/磁碟 offload 下約 **0.5 tok/s**——即以吞吐換取「讓原本載不進來的模型能跑」。
 
