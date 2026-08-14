@@ -102,7 +102,8 @@ AI-Scaler-Toolkit/
 │     ├─ windows/
 │     │  ├─ run_service.bat
 │     │  └─ setup_env.ps1
-│     └─ docker/
+│     ├─ docker/
+│     └─ xpu_smoke.py       # Intel XPU install check, run by setup_env
 ├─ console/                 # Headless Python client
 ├─ frontend/                # Prebuilt web UI (served by the backend)
 │  ├─ dist/

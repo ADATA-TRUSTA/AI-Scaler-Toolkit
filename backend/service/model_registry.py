@@ -19,7 +19,10 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-REGISTRY_PATH = Path("service/configs/models_registry.json")
+# Anchored to the repo root, like every other path in service/settings.py. A CWD-relative
+# path would silently select a different registry file per launch directory, and the mkdir
+# below would create a stray service/configs/ wherever this module happens to be imported.
+REGISTRY_PATH = Path(__file__).resolve().parent / "configs" / "models_registry.json"
 REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 

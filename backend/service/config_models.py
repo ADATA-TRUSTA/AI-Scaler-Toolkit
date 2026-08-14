@@ -151,6 +151,13 @@ class InferenceSharedFields(BaseModel):
         default=None,
         description="[vLLM] --chat-template",
     )
+    vllm_tool_call_parser: str | None = Field(
+        default=None,
+        description=(
+            "[vLLM] Tool-call parser: 'auto' infers it from the model's chat template, "
+            "'off' serves chat only, any other value is passed to vLLM as-is"
+        ),
+    )
 
 
 class InferenceConfig(InferenceSharedFields):
@@ -344,6 +351,18 @@ class InferenceConfig(InferenceSharedFields):
             "[vLLM] --chat-template, path to a custom chat template file (.jinja); needed "
             "to support /v1/chat/completions when tokenizer_config.json has no "
             "chat_template field (e.g. some base or quantized builds)"
+        ),
+    )
+    vllm_tool_call_parser: str = Field(
+        default="auto",
+        description=(
+            "[vLLM] Tool-call parser. 'auto' (default) infers it from the model's chat "
+            "template and enables tool calling; 'off' serves chat only; any other value "
+            "is passed to vLLM as-is (e.g. hermes/qwen3_coder/qwen3_xml/gemma4/"
+            "llama3_json/mistral/deepseek_v3). vLLM requires --enable-auto-tool-choice "
+            "and --tool-call-parser together, so they are emitted as a pair or not at all. "
+            "When auto-detection finds no recognised tool-call syntax, tool calling stays "
+            "off and the reason is logged"
         ),
     )
 

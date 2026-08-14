@@ -74,11 +74,14 @@ from .inference.gguf_estimator import (
     gguf_memory_estimator,
 )
 from .inference.memory_estimator import memory_estimator
+from .inference.model_family import is_qwen35_family
 from .model_manager import model_manager
 from .model_registry import model_registry
 from .rag_manager import rag_manager
 from .session_manager import session_manager
 from .settings import (
+    LLAMA_SERVER_BINARY,
+    LLAMA_SERVER_BINARY_SOURCE,
     LOG_LEVEL,
     MAX_CONCURRENT_GENERATIONS,
     SERVICE_HOST,
@@ -96,6 +99,7 @@ from .utils.openai_request_parser import (
     parse_openai_chat_request_payload,
     sanitize_openai_request_for_logging,
 )
+from .utils.path_safety import is_protected_system_path
 from .utils.system_monitor import system_monitor
 
 
@@ -174,9 +178,20 @@ def _resolve_loaded_model_name() -> str:
     return str(config.model_path or config.model_name or "")
 
 
-def _is_qwen35_model(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return "qwen3.5" in normalized
+def _is_qwen35_model(model_name: str | None = None) -> bool:
+    """
+    Detect the Qwen3.5-generation family from the loaded model's declared architecture.
+
+    Keyed on arch, not on the name: vendors ship later marketing versions (Qwen3.6 and
+    on) built on the same ``qwen35moe`` architecture, and those still need the same
+    sampling/thinking policy. ``model_name`` is only a fallback for callers that have a
+    name but no loaded config.
+    """
+    config = model_manager.config
+    return is_qwen35_family(
+        model_path=getattr(config, "model_path", None) if config else None,
+        model_name=model_name or (getattr(config, "model_name", None) if config else None),
+    )
 
 
 def _resolve_model_aware_generation_options(
@@ -206,7 +221,7 @@ def _resolve_model_aware_generation_options(
     # 35B-A3B) produces mixed-language gibberish. It must be forced to 1.0 **unconditionally**.
     if resolved["repetition_penalty"] > 1.0:
         logger.warning(
-            "Qwen3.5 detected: forcing repetition_penalty from %.2f → 1.0 "
+            "Qwen3.5-family arch detected: forcing repetition_penalty from %.2f → 1.0 "
             "(values > 1.0 cause mixed-language gibberish for MoE models)",
             resolved["repetition_penalty"],
         )
@@ -218,21 +233,21 @@ def _resolve_model_aware_generation_options(
     # degrades sampling and instead yields cross-language gibberish and unnatural output.
     if resolved["temperature"] != 1.0:
         logger.warning(
-            "Qwen3.5 detected: forcing temperature from %s -> 1.0 for official sampling behavior",
+            "Qwen3.5-family arch detected: forcing temperature from %s -> 1.0 for official sampling behavior",
             resolved["temperature"],
         )
         resolved["temperature"] = 1.0
 
     if resolved["top_p"] != 0.95:
         logger.warning(
-            "Qwen3.5 detected: forcing top_p from %s -> 0.95 for official sampling behavior",
+            "Qwen3.5-family arch detected: forcing top_p from %s -> 0.95 for official sampling behavior",
             resolved["top_p"],
         )
         resolved["top_p"] = 0.95
 
     if resolved["top_k"] != 20:
         logger.warning(
-            "Qwen3.5 detected: forcing top_k from %s -> 20 for official sampling behavior",
+            "Qwen3.5-family arch detected: forcing top_k from %s -> 20 for official sampling behavior",
             resolved["top_k"],
         )
         resolved["top_k"] = 20
@@ -244,7 +259,9 @@ def _resolve_model_aware_generation_options(
     # verified working end-to-end against llama-server (--jinja) via
     # chat_template_kwargs.enable_thinking.
     if resolved["enable_thinking"] is None:
-        logger.info("Qwen3.5 detected: enable_thinking unspecified; defaulting to False")
+        logger.info(
+            "Qwen3.5-family arch detected: enable_thinking unspecified; defaulting to False"
+        )
         resolved["enable_thinking"] = False
 
     logger.info(
@@ -542,6 +559,14 @@ signal.signal(signal.SIGTERM, signal_handler)  # kill command
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifecycle management."""
     logger.info("🚀 Starting LLM Service...")
+    # Name the llama binary and where it came from. setup_env records what it resolved in
+    # .env, so "env/.env" means setup and the service agree by construction; anything else
+    # means the service resolved it on its own and the two could differ.
+    logger.info(
+        "llama binary: %s (source: %s)",
+        LLAMA_SERVER_BINARY,
+        LLAMA_SERVER_BINARY_SOURCE,
+    )
 
     # Sweep leftover vLLM serve processes at startup so later load_model calls do not hit port conflicts.
     try:
@@ -830,7 +855,9 @@ async def load_model(
 async def unload_model() -> dict[str, Any]:
     """Unload the model."""
     try:
-        return model_manager.unload_model()
+        # Waits on the worker process (sleeps up to ~5.5s); guarded by the manager's own
+        # lock, so a worker thread keeps concurrent callers serialised.
+        return await asyncio.to_thread(model_manager.unload_model)
 
     except Exception as e:
         logger.exception(f"Failed to unload model: {str(e)}")
@@ -1070,12 +1097,14 @@ async def estimate_gguf_memory(
             result["notes"].extend(parsed_args["warnings"])
 
         if request.verify:
-            exact = gguf_memory_estimator.probe_exact(model_path, **kwargs)
+            # Shells out to the fit-params probe (120s default timeout), so it must not
+            # run on the event loop.
+            exact = await asyncio.to_thread(gguf_memory_estimator.probe_exact, model_path, **kwargs)
             if exact is None:
                 result["notes"].append(
                     "Exact verification was requested but the fit-params probe is unavailable; "
-                    "install the prebuilt llama (setup_env with TRUSTA_INSTALL_LLAMA=1 / "
-                    "-InstallLlama) or set LLAMA_FIT_PARAMS_BIN to enable it."
+                    "run setup_env (it installs the prebuilt llama by default) or set "
+                    "LLAMA_FIT_PARAMS_BIN to enable it."
                 )
             else:
                 result["verification"] = exact
@@ -1234,12 +1263,14 @@ async def check_gguf_config(
 
         verification = None
         if verify:
-            exact = gguf_memory_estimator.probe_exact(model_path, **kwargs)
+            # Shells out to the fit-params probe (120s default timeout), so it must not
+            # run on the event loop.
+            exact = await asyncio.to_thread(gguf_memory_estimator.probe_exact, model_path, **kwargs)
             if exact is None:
                 notes.append(
                     "Exact verification was requested but the fit-params probe is unavailable; "
-                    "install the prebuilt llama (setup_env with TRUSTA_INSTALL_LLAMA=1 / "
-                    "-InstallLlama) or set LLAMA_FIT_PARAMS_BIN to enable it."
+                    "run setup_env (it installs the prebuilt llama by default) or set "
+                    "LLAMA_FIT_PARAMS_BIN to enable it."
                 )
             else:
                 verification = exact
@@ -2032,6 +2063,21 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
         )
 
     if _has_tooling_payload():
+        # The transformers worker path has no tool-calling support: `tools` is
+        # dropped by validate_and_prepare_params and never reaches
+        # apply_chat_template, so the model cannot even see the tools and its
+        # output is never parsed into tool_calls. Refuse instead of answering in
+        # prose as if no tools had been requested.
+        if not model_manager.uses_async_http():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Tool calling is not supported by the transformers engine. "
+                    "Load the model with the llama_server or vllm engine to use tools "
+                    "(for vllm, also set vllm_tool_call_parser), or retry without "
+                    "tools/tool_choice/tool messages."
+                ),
+            )
         return await _handle_tool_passthrough()
 
     if not model_manager.is_loaded():
@@ -2140,7 +2186,9 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                 {
                     "index": 0,
                     "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
+                    # Honour the backend's reason (e.g. "length" when max_tokens
+                    # truncated the answer); only assume "stop" when unreported.
+                    "finish_reason": internal_resp.get("finish_reason") or "stop",
                 }
             ],
         }
@@ -2217,7 +2265,13 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                             "object": "chat.completion.chunk",
                             "created": created,
                             "model": model_name,
-                            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": item.get("finish_reason") or "stop",
+                                }
+                            ],
                         }
                         yield f"data: {json.dumps(done_payload)}\n\n"
 
@@ -2906,24 +2960,6 @@ async def delete_model(label: str, delete_files: bool = False) -> dict[str, Any]
             if path_to_delete:
                 # Guard against deleting OS system directories via a poisoned
                 # registry entry (e.g. output_dir="/etc" from a malicious config).
-                _BLOCKED_DELETE_PREFIXES = (
-                    "/etc",
-                    "/bin",
-                    "/sbin",
-                    "/usr/bin",
-                    "/usr/sbin",
-                    "/usr/lib",
-                    "/lib",
-                    "/lib64",
-                    "/boot",
-                    "/sys",
-                    "/proc",
-                    "/dev",
-                    "/run",
-                    "/root",
-                    "/home",
-                )
-                _resolved_delete = os.path.realpath(path_to_delete)  # noqa: ASYNC240 - cheap stat; the actual delete already runs in to_thread
                 if not os.path.lexists(path_to_delete):  # noqa: ASYNC240 - cheap stat
                     result["files_removed"] = True
                     result["path"] = path_to_delete
@@ -2931,10 +2967,7 @@ async def delete_model(label: str, delete_files: bool = False) -> dict[str, Any]
                     logger.info(
                         f"Model files for {label} already missing at {path_to_delete}; treated as deleted"
                     )
-                elif any(
-                    _resolved_delete == p or _resolved_delete.startswith(p + "/")
-                    for p in _BLOCKED_DELETE_PREFIXES
-                ):
+                elif is_protected_system_path(path_to_delete):  # noqa: ASYNC240 - cheap stat; the delete itself runs in to_thread
                     logger.error(
                         f"Blocked attempt to delete protected system path: {path_to_delete}"
                     )
@@ -2996,33 +3029,18 @@ async def get_system_resources(
         # calc_size triggers a recursive os.walk; block OS system directories
         # that are never valid data/model paths to prevent filesystem enumeration.
         if calc_size:
-            _BLOCKED_CALC_PREFIXES = (
-                "/etc",
-                "/bin",
-                "/sbin",
-                "/usr/bin",
-                "/usr/sbin",
-                "/usr/lib",
-                "/lib",
-                "/lib64",
-                "/boot",
-                "/sys",
-                "/proc",
-                "/dev",
-                "/run",
-                "/root",
-                "/home",
-            )
-            _resolved = os.path.realpath(disk_path)  # noqa: ASYNC240 - cheap stat
-            if any(_resolved == p or _resolved.startswith(p + "/") for p in _BLOCKED_CALC_PREFIXES):
+            if is_protected_system_path(disk_path):  # noqa: ASYNC240 - cheap stat
                 raise HTTPException(
                     status_code=400,
                     detail=f"calc_size is not allowed for system directory: {disk_path}",
                 )
 
-        cpu_res = system_monitor.get_cpu_resource(mode)
-        gpu_res = system_monitor.get_gpu_resource(mode)
-        # calc_size triggers a recursive os.walk; move it off the event loop to avoid blocking
+        # All three shell out (powershell / lscpu / nvidia-smi) or walk the filesystem, so none
+        # of them may run on the event loop: a blocking call here stalls every other request,
+        # including in-flight token streams. Measured on one dev box: cpu ~950ms, gpu ~1850ms.
+        cpu_res = await asyncio.to_thread(system_monitor.get_cpu_resource, mode)
+        gpu_res = await asyncio.to_thread(system_monitor.get_gpu_resource, mode)
+        # calc_size triggers a recursive os.walk
         disk_res = await asyncio.to_thread(
             system_monitor.get_disk_resource, path=disk_path, calc_size=calc_size, mode=mode
         )

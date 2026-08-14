@@ -23,6 +23,7 @@ os.environ["MASTER_ADDR"] = "127.0.0.1"
 os.environ["MASTER_PORT"] = "29500"
 
 import json
+import subprocess
 import time
 import uuid
 from collections.abc import Callable
@@ -30,6 +31,8 @@ from multiprocessing import Event, Process, Queue
 from multiprocessing.synchronize import Event as EventClass
 from queue import Empty
 from typing import TYPE_CHECKING, Any, cast
+
+import psutil
 
 from ..config_models import TrainingConfig, TrainingStatus
 
@@ -41,6 +44,7 @@ if TYPE_CHECKING:
 # Import settings BEFORE torch/transformers (sets HF_HOME environment variable)
 from ..settings import REDIS_DB, REDIS_HOST, REDIS_PORT, configure_logging
 from ..utils.conversion_manager import conversion_manager
+from ..utils.path_safety import is_protected_system_path
 from ..utils.system_monitor import system_monitor
 from ..utils.token_utils import load_hf_token
 
@@ -214,21 +218,8 @@ def _resolve_deepspeed_config(training_config: TrainingConfig) -> str | None:
 
         # Block paths that are clearly system directories — never valid offload targets.
         # Any absolute path the user deliberately configured is allowed (other disk, NVMe, etc.).
-        _BLOCKED_SYSTEM_PREFIXES = (
-            "/etc",
-            "/bin",
-            "/sbin",
-            "/usr/bin",
-            "/usr/sbin",
-            "/usr/lib",
-            "/lib",
-            "/lib64",
-            "/boot",
-            "/sys",
-            "/proc",
-            "/dev",
-            "/run",
-        )
+        # The check below empties the directory, so it must hold on Windows too, where an
+        # inline POSIX prefix list would match nothing at all.
 
         for nvme_path in nvme_paths:
             if not nvme_path:
@@ -242,10 +233,7 @@ def _resolve_deepspeed_config(training_config: TrainingConfig) -> str | None:
                     "only absolute paths are allowed for nvme offload directories"
                 )
                 continue
-            if any(
-                str(nvme_dir) == p or str(nvme_dir).startswith(p + "/")
-                for p in _BLOCKED_SYSTEM_PREFIXES
-            ):
+            if is_protected_system_path(nvme_dir):
                 logger.warning(
                     f"[TrainingWorker] Skipping nvme path '{nvme_path}': "
                     "path resolves to a protected system directory"
@@ -428,6 +416,50 @@ def _convert_training_output_to_q4_k_m(
 _DS_STATUS_PREFIX = "__STATUS__:"
 # Terminal states that are also written to Redis as crash-safe backup.
 _DS_TERMINAL_STATES = frozenset({"saved", "error"})
+
+
+def _terminate_deepspeed_tree(proc: subprocess.Popen | None, timeout: float = 5.0) -> None:
+    """
+    Tear down the deepspeed launcher together with its rank children.
+
+    ``deepspeed --num_gpus=N`` runs every rank as a separate child process, so signalling only
+    the launcher handle leaves N ranks alive still holding their GPU memory — the exact leak the
+    process-per-job design exists to prevent, and it happens on the error path where this runs.
+    Escalates terminate -> wait -> kill, matching the teardown used everywhere else here.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+
+    try:
+        launcher = psutil.Process(proc.pid)
+        victims = [*launcher.children(recursive=True), launcher]
+    except psutil.Error:
+        victims = []
+
+    for victim in victims:
+        try:
+            victim.terminate()
+        except psutil.Error:  # already gone between listing and signalling
+            pass
+
+    if victims:
+        _, alive = psutil.wait_procs(victims, timeout=timeout)
+        for victim in alive:
+            logger.warning(f"[DeepSpeed] pid {victim.pid} ignored terminate, killing it")
+            try:
+                victim.kill()
+            except psutil.Error:
+                pass
+        psutil.wait_procs(alive, timeout=timeout)
+
+    # Reap the launcher through its own handle so no zombie is left behind.
+    try:
+        proc.wait(timeout=timeout)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 class _DeepSpeedTrainingError(RuntimeError):
@@ -637,8 +669,7 @@ def _run_deepspeed_subprocess(
             os.unlink(cfg_path)
         except Exception:
             pass
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
+        _terminate_deepspeed_tree(proc)
 
 
 def _training_worker_process(
