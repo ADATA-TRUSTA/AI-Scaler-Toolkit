@@ -27,6 +27,11 @@ from ..config_models import (
 
 logger = logging.getLogger(__name__)
 
+# Every external probe (nvidia-smi, lscpu, powershell) is capped: nvidia-smi blocks forever
+# when the driver is wedged, which is exactly the state someone is checking resources in.
+# A missing number is better than a stuck sampler, and each caller already degrades gracefully.
+_PROBE_TIMEOUT_SEC = 10
+
 PDH_FMT_DOUBLE = 0x00000200
 PDH_MORE_DATA = 0x800007D2
 
@@ -316,7 +321,9 @@ class SystemMonitor:
         uuid_map = {}
         try:
             u_cmd = ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"]
-            u_out = subprocess.check_output(u_cmd, stderr=subprocess.STDOUT, text=True)
+            u_out = subprocess.check_output(
+                u_cmd, stderr=subprocess.STDOUT, text=True, timeout=_PROBE_TIMEOUT_SEC
+            )
         except Exception:
             return uuid_map
 
@@ -775,6 +782,7 @@ class SystemMonitor:
             out = subprocess.check_output(
                 ["powershell", "-NoProfile", "-Command", cmd],
                 text=True,
+                timeout=_PROBE_TIMEOUT_SEC,
                 creationflags=subprocess.CREATE_NO_WINDOW,  # pyright: ignore[reportAttributeAccessIssue]  # Windows-only flag
             )
             import json
@@ -854,7 +862,9 @@ class SystemMonitor:
                     # Fallback lscpu
                     if not cpu_data.get("model"):
                         try:
-                            lscpu_out = subprocess.check_output(["lscpu"], text=True)
+                            lscpu_out = subprocess.check_output(
+                                ["lscpu"], text=True, timeout=_PROBE_TIMEOUT_SEC
+                            )
                             for line in lscpu_out.splitlines():
                                 if "Model name:" in line:
                                     cpu_data["model"] = line.split(":", 1)[1].strip()
@@ -1154,7 +1164,9 @@ class SystemMonitor:
                     "--query-gpu=name,memory.total,memory.used,temperature.gpu,utilization.gpu",
                     "--format=csv,noheader,nounits",
                 ]
-                out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
+                out = subprocess.check_output(
+                    cmd, stderr=subprocess.STDOUT, text=True, timeout=_PROBE_TIMEOUT_SEC
+                )
 
                 # Fetch nvidia-smi process list if force_by_process is True
                 pid_gpu_mem_by_idx = {}

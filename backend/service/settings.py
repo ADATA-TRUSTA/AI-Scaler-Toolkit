@@ -5,6 +5,7 @@ Contains all configurable parameters for logging, debugging, and service behavio
 
 import logging
 import os
+import shutil
 import time
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -214,14 +215,35 @@ _DEFAULT_LLAMA_SERVER_URL: str = "http://127.0.0.1:5001"
 LLAMA_SERVER_URL: str = os.getenv("LLAMA_SERVER_URL", _DEFAULT_LLAMA_SERVER_URL)
 
 
+# Where LLAMA_SERVER_BINARY came from, so a mismatch between what setup_env resolved and
+# what the service resolved is visible in the startup log instead of only surfacing later
+# as "binary not found". setup_env records its answer in .env precisely so that the common
+# case is "env", and the service never has to guess from a possibly different PATH.
+LLAMA_SERVER_BINARY_SOURCE: str = "default"
+
+
 def _default_llama_server_binary() -> str:
     # The official prebuilt unified `llama` from ggml-org/llama-install.sh
     # (install.ps1 → WindowsApps, install.sh → ~/.local/bin). Point
     # LLAMA_SERVER_BINARY at a custom/source-built llama-server to override.
+    global LLAMA_SERVER_BINARY_SOURCE
     if os.name == "nt":
         local_app = os.environ.get("LOCALAPPDATA", "")
-        return str(Path(local_app) / "Microsoft" / "WindowsApps" / "llama.exe")
-    return str(Path.home() / ".local" / "bin" / "llama")
+        installed = Path(local_app) / "Microsoft" / "WindowsApps" / "llama.exe"
+    else:
+        installed = Path.home() / ".local" / "bin" / "llama"
+    if installed.is_file():
+        LLAMA_SERVER_BINARY_SOURCE = "installer default"
+        return str(installed)
+    # Fall back to PATH, matching what setup_env accepts as "already installed": it treats
+    # `llama` on PATH as present and skips the install, so resolving only the default location
+    # here would make setup report success while the engine reports a missing binary.
+    on_path = shutil.which("llama")
+    if on_path:
+        LLAMA_SERVER_BINARY_SOURCE = "PATH"
+        return on_path
+    LLAMA_SERVER_BINARY_SOURCE = "installer default (absent)"
+    return str(installed)
 
 
 # Defaults to the prebuilt llama from install.sh/install.ps1; overridable via env var
@@ -230,6 +252,9 @@ LLAMA_SERVER_BINARY: str = _get_env_path(
     "LLAMA_SERVER_BINARY",
     _DEFAULT_LLAMA_SERVER_BINARY,
 )
+if os.getenv("LLAMA_SERVER_BINARY", "").strip():
+    # Set explicitly, or written into .env by setup_env; either way it is a recorded decision.
+    LLAMA_SERVER_BINARY_SOURCE = "env/.env"
 
 LLAMA_SERVER_API_KEY: str | None = os.getenv("LLAMA_SERVER_API_KEY", None)
 

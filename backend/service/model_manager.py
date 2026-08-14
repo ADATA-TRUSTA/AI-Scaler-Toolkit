@@ -597,6 +597,7 @@ class ModelManager:
             "vllm_mm_video_limit": cfg.vllm_mm_video_limit if cfg else None,
             "vllm_hf_overrides": cfg.vllm_hf_overrides if cfg else None,
             "vllm_chat_template": cfg.vllm_chat_template if cfg else None,
+            "vllm_tool_call_parser": cfg.vllm_tool_call_parser if cfg else None,
         }
 
         # GPU memory usage: prefer the numbers reported by the worker process

@@ -33,6 +33,7 @@ from ..settings import (
     VLLM_SERVED_MODEL_NAME,
     configure_logging,
 )
+from .model_family import is_qwen35_family
 
 logger = configure_logging(__name__)
 
@@ -98,6 +99,7 @@ def client_for_config(config: InferenceConfig, *, model: str | None = None) -> "
         api_key=endpoint["api_key"],
         model=model,
         engine=engine,
+        model_path=getattr(config, "model_path", None),
     )
 
 
@@ -113,35 +115,6 @@ _MEDIA_PART_TYPES = {
 _TEXT_PART_TYPES = {"text"}
 
 
-def normalize_messages(prompt: Any) -> list[dict[str, Any]]:  # noqa: ANN401 - arbitrary client-supplied prompt payload
-    """
-    Coerce a prompt into OpenAI chat messages, preserving multi-part content.
-
-    Ported from ``VllmEngine._normalize_messages``: list content (multimodal
-    multi-part) must be kept as-is — never ``str()``-flattened, or images are
-    lost.
-    """
-    if isinstance(prompt, list):
-        normalized: list[dict[str, Any]] = []
-        for msg in prompt:
-            if not isinstance(msg, dict):
-                continue
-            role = str(msg.get("role", "user"))
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                normalized.append({"role": role, "content": content})
-            elif isinstance(content, dict):
-                normalized.append({"role": role, "content": [content]})
-            else:
-                normalized.append({"role": role, "content": str(content)})
-        if normalized:
-            return normalized
-
-    if isinstance(prompt, str):
-        return [{"role": "user", "content": prompt}]
-    return [{"role": "user", "content": str(prompt)}]
-
-
 def reorder_multimodal_content(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -152,8 +125,16 @@ def reorder_multimodal_content(
     with the worker generate path; this is now the only implementation).
     Gemma best practice: media before text. Only reorders when both media and
     text are present; unknown parts kept last.
+
+    Copy-on-write: callers reuse their message list (app.py's passthrough
+    messages also feed session history), so a reordered message is replaced with
+    a copy instead of being mutated in place. This used to be masked by a
+    normalization pass that handed over freshly built dicts; that pass is gone
+    because it silently dropped tool_calls / tool_call_id / name, which made the
+    model imitate a broken history and stop after a preamble.
     """
-    for msg in messages:
+    out = messages
+    for idx, msg in enumerate(messages):
         content = msg.get("content")
         if not isinstance(content, list):
             continue
@@ -172,22 +153,26 @@ def reorder_multimodal_content(
             else:
                 other_parts.append(p)
         if media_parts and text_parts:
-            msg["content"] = media_parts + text_parts + other_parts
-    return messages
+            if out is messages:
+                out = list(messages)
+            out[idx] = {**msg, "content": media_parts + text_parts + other_parts}
+    return out
 
 
 def _is_qwen_model(model_name: Any) -> bool:  # noqa: ANN401 - accepts model id of any incoming type
     return "qwen" in str(model_name or "").lower()
 
 
-def _is_qwen35_model(model_name: Any) -> bool:  # noqa: ANN401 - accepts model id of any incoming type
-    return "qwen3.5" in str(model_name or "").lower()
+def _is_qwen35_model(model_name: Any, model_path: str | None = None) -> bool:  # noqa: ANN401 - accepts model id of any incoming type
+    """Detect the Qwen3.5-generation family from declared arch, name as fallback."""
+    return is_qwen35_family(model_path=model_path, model_name=model_name)
 
 
 def _apply_thinking_tag(
     messages: list[dict[str, Any]],
     enable_thinking: bool | None,
     model_name: str,
+    model_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Append ``/think`` or ``/no_think`` to the last user message for Qwen.
@@ -206,7 +191,7 @@ def _apply_thinking_tag(
     if (
         enable_thinking is None
         or not _is_qwen_model(model_name)
-        or _is_qwen35_model(model_name)
+        or _is_qwen35_model(model_name, model_path)
         or not messages
     ):
         return messages
@@ -294,6 +279,7 @@ def build_chat_payload(
     params: dict[str, Any] | None,
     stream: bool,
     engine: InferenceEngine | None = None,
+    model_path: str | None = None,
 ) -> dict[str, Any]:
     """
     Map internal generation params to an OpenAI chat-completions payload.
@@ -306,8 +292,8 @@ def build_chat_payload(
     params = params or {}
     enable_thinking = params.get("enable_thinking")
 
-    messages = reorder_multimodal_content(normalize_messages(messages))
-    messages = _apply_thinking_tag(messages, enable_thinking, model)
+    messages = reorder_multimodal_content(messages)
+    messages = _apply_thinking_tag(messages, enable_thinking, model, model_path)
 
     payload: dict[str, Any] = {
         "model": model,
@@ -419,12 +405,16 @@ class AsyncServerClient:
         api_key: str = "EMPTY",
         model: str | None = None,
         engine: InferenceEngine | None = None,
+        model_path: str | None = None,
     ) -> None:
         # ``base_url`` is expected to already include the ``/v1`` suffix.
         self.base_url = base_url
         self.api_key = api_key or "EMPTY"
         self._model = model
         self.engine = engine
+        # Local path to the weights, when known: model-family detection reads the
+        # declared architecture from the file instead of guessing from the name.
+        self.model_path = model_path
         self.client = AsyncOpenAI(base_url=base_url, api_key=self.api_key)
 
     async def aclose(self) -> None:
@@ -463,7 +453,9 @@ class AsyncServerClient:
         """
         params = params or {}
         model = await self.resolve_model()
-        payload = build_chat_payload(model, messages, params, stream=True, engine=self.engine)
+        payload = build_chat_payload(
+            model, messages, params, stream=True, engine=self.engine, model_path=self.model_path
+        )
         timeout_s = float(params.get("total_timeout", 300))
 
         # Reasoning models (e.g. gpt-oss) emit reasoning_content while thinking
@@ -480,6 +472,7 @@ class AsyncServerClient:
         total_tokens: int | None = None
         stopped = False
         tool_call_acc: dict[int, dict[str, Any]] = {}
+        server_finish_reason: str | None = None
 
         try:
             stream = await self.client.chat.completions.create(
@@ -499,7 +492,16 @@ class AsyncServerClient:
 
                 out_parts: list[str] = []
                 if event.choices:
-                    delta = event.choices[0].delta
+                    choice = event.choices[0]
+                    # The server reports why it stopped only on the final choice
+                    # delta; keep the last non-null value so the done payload can
+                    # distinguish a real EOS from "length" (max_tokens truncation)
+                    # or a tool-call stop. Without this every stop looks like "stop".
+                    chunk_finish_reason = getattr(choice, "finish_reason", None)
+                    if isinstance(chunk_finish_reason, str) and chunk_finish_reason:
+                        server_finish_reason = chunk_finish_reason
+
+                    delta = choice.delta
                     _accumulate_tool_call_deltas(tool_call_acc, getattr(delta, "tool_calls", None))
                     reasoning_chunk = _extract_reasoning(delta)
                     content_chunk = delta.content
@@ -565,6 +567,8 @@ class AsyncServerClient:
                 done_payload["total_tokens"] = int(prompt_tokens) + int(gen_tokens)
             else:
                 done_payload["total_tokens"] = gen_tokens
+            if server_finish_reason is not None:
+                done_payload["finish_reason"] = server_finish_reason
             assembled_tool_calls = _assemble_tool_calls(tool_call_acc)
             if assembled_tool_calls is not None:
                 done_payload["tool_calls"] = assembled_tool_calls
@@ -572,6 +576,15 @@ class AsyncServerClient:
                     done_payload["finish_reason"] = "tool_calls"
             if stopped:
                 done_payload["stopped"] = True
+            logger.info(
+                "[AsyncServerClient] stream finished: finish_reason=%s (server=%s) "
+                "gen_tokens=%s tool_calls=%s client_stopped=%s",
+                done_payload.get("finish_reason"),
+                server_finish_reason,
+                gen_tokens,
+                len(assembled_tool_calls) if assembled_tool_calls else 0,
+                stopped,
+            )
             yield done_payload
         except (APIError, OSError, ValueError, TypeError, RuntimeError) as e:
             logger.exception("[AsyncServerClient] generate_stream error: %s", e)
@@ -595,7 +608,9 @@ class AsyncServerClient:
         """Non-stream chat completion, returning a manager-level result dict."""
         params = params or {}
         model = await self.resolve_model()
-        payload = build_chat_payload(model, messages, params, stream=False, engine=self.engine)
+        payload = build_chat_payload(
+            model, messages, params, stream=False, engine=self.engine, model_path=self.model_path
+        )
         timeout_s = float(params.get("total_timeout", 300))
 
         start = time.perf_counter()
@@ -640,4 +655,10 @@ class AsyncServerClient:
             result["finish_reason"] = finish_reason
         if tool_calls is not None:
             result["tool_calls"] = tool_calls
+        logger.info(
+            "[AsyncServerClient] completion finished: finish_reason=%s gen_tokens=%s tool_calls=%s",
+            finish_reason,
+            gen_tokens,
+            len(tool_calls) if tool_calls else 0,
+        )
         return result

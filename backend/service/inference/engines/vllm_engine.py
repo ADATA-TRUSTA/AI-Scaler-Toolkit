@@ -33,13 +33,26 @@ from ...settings import (
     VLLM_SWEEP_PORTS,
     configure_logging,
 )
+from ..model_family import read_chat_template
 from .base_engine import BaseEngine
+from .llama_server_engine import resolve_local_model_path
 from .vllm_error_classifier import (
     VllmErrorReport,
     classify_stderr,
 )
 
 logger = configure_logging(__name__)
+
+# Values of vllm_tool_call_parser that mean "serve chat only".
+_TOOL_PARSER_OFF_VALUES = frozenset({"off", "none", "disabled", "false", "0"})
+
+# Name of the probe helper run inside the isolated vllm_server venv, and the
+# marker it prints. A marker is needed because importing the parsers makes vLLM
+# log INFO lines to stdout alongside the answer.
+_TOOL_PARSER_PROBE_SCRIPT = "vllm_tool_parser_probe.py"
+_TOOL_PARSER_PROBE_MARKER = "TRUSTA_TOOL_PARSER="
+_TOOL_PARSER_PROBE_TIMEOUT_S = 120
+
 
 _REQUIRED_NVIDIA_RUNTIME_LIBS = (
     ("libcudnn.so.9", "nvidia-cudnn-cu13"),
@@ -474,7 +487,126 @@ class VllmEngine(BaseEngine):
         if chat_template:
             args.extend(["--chat-template", str(chat_template)])
 
+        # vLLM only parses tool calls into `tool_calls` when auto tool choice is
+        # on, and it rejects --enable-auto-tool-choice without a parser
+        # ("requires --tool-call-parser"), so emit the pair together or not at all.
+        tool_call_parser = self._resolve_tool_call_parser(config)
+        if tool_call_parser:
+            args.extend(["--enable-auto-tool-choice", "--tool-call-parser", tool_call_parser])
+
         return args
+
+    def _resolve_tool_call_parser(self, config: InferenceConfig) -> str | None:
+        """
+        Decide which vLLM tool-call parser to launch with.
+
+        ``auto`` (the default) infers it from the model's chat template, an explicit
+        name is passed through untouched, and ``off`` disables tool calling. Returning
+        None means no flags are emitted and vLLM serves chat only.
+        """
+        raw = str(getattr(config, "vllm_tool_call_parser", None) or "auto").strip()
+        if raw.lower() in _TOOL_PARSER_OFF_VALUES:
+            logger.info("[Worker] vLLM tool calling disabled by config (%s)", raw)
+            return None
+        if raw.lower() != "auto":
+            return raw
+
+        model_ref = getattr(config, "model_path", None) or getattr(config, "model_name", None)
+        if not model_ref:
+            return None
+
+        # Cheap pre-check: no chat template at all (a base checkpoint) means there
+        # is nothing to detect, so skip spawning the probe.
+        local = resolve_local_model_path(str(model_ref)) or str(model_ref)
+        if read_chat_template(local) is None:
+            logger.warning(
+                "[Worker] vLLM tool calling off: no chat template found for %s. "
+                "Set vllm_tool_call_parser explicitly to force one.",
+                model_ref,
+            )
+            return None
+
+        parser = self._probe_tool_call_parser(str(model_ref))
+        if parser is None:
+            logger.warning(
+                "[Worker] vLLM tool calling off: no vLLM tool-call parser could read this "
+                "model's tool-call syntax (%s). Set vllm_tool_call_parser explicitly.",
+                model_ref,
+            )
+            return None
+
+        logger.info("[Worker] vLLM tool-call parser auto-detected: %s", parser)
+        return parser
+
+    def _probe_tool_call_parser(self, model_ref: str) -> str | None:
+        """
+        Ask vLLM's own parsers which one understands this model's tool-call syntax.
+
+        Runs a helper in the isolated vllm_server venv, which renders one tool call
+        through the model's chat template and then offers the result to every
+        registered parser. That derives the answer from the model and from vLLM
+        itself, so nothing here has to track parser names or their syntax, and it
+        keeps working when vLLM adds or renames parsers.
+
+        Returns None whenever the answer is not unambiguous -- no match, several
+        matches, a template that cannot render a tool call, or a probe failure --
+        because launching with the wrong parser mangles output, which is worse than
+        serving chat only.
+        """
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), _TOOL_PARSER_PROBE_SCRIPT)
+        if not os.path.isfile(script):
+            logger.warning("[Worker] tool-parser probe missing at %s", script)
+            return None
+
+        interpreter = self._resolve_venv_python()
+        if not interpreter:
+            logger.warning("[Worker] tool-parser probe skipped: no vllm_server venv interpreter")
+            return None
+
+        # Only the hub cache location matters here, so build a minimal env rather
+        # than reusing the server's: none of its vLLM/LMCache settings apply, and
+        # not depending on _build_server_env keeps this off that signature.
+        env = os.environ.copy()
+        env["HF_HUB_OFFLINE"] = "1"
+        env.setdefault("VLLM_LOGGING_LEVEL", "ERROR")
+
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, model_ref is not shell-interpreted
+                [interpreter, script, model_ref],
+                capture_output=True,
+                text=True,
+                timeout=_TOOL_PARSER_PROBE_TIMEOUT_S,
+                env=env,
+                check=False,
+            )
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning("[Worker] tool-parser probe failed to run: %s", e)
+            return None
+
+        for line in (proc.stdout or "").splitlines():
+            if line.startswith(_TOOL_PARSER_PROBE_MARKER):
+                return line[len(_TOOL_PARSER_PROBE_MARKER) :].strip() or None
+
+        detail = (proc.stderr or "").strip().splitlines()
+        logger.info(
+            "[Worker] tool-parser probe found no parser for %s (rc=%s%s)",
+            model_ref,
+            proc.returncode,
+            f", {detail[-1]}" if detail else "",
+        )
+        return None
+
+    def _resolve_venv_python(self) -> str | None:
+        """Path to the isolated vllm_server venv interpreter, or None if absent."""
+        try:
+            venv_bin = os.path.join(self._resolve_vllm_server_dir(), ".venv", "bin")
+        except RuntimeError:
+            return None
+        for py_name in ("python", "python3"):
+            candidate = os.path.join(venv_bin, py_name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        return None
 
     def _build_server_cmd(self, config: InferenceConfig) -> list[str]:
         """
