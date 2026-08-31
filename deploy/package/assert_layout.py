@@ -36,14 +36,19 @@ SOURCE_MUST_EXIST: tuple[str, ...] = (
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--into", default=str(REPO_ROOT), help="layout to check")
+    parser.add_argument("--into", default=str(REPO_ROOT), help="assembled layout to check")
+    parser.add_argument("--root", default=str(REPO_ROOT),
+                        help="repository whose root content must have survived. Differs from --into "
+                             "when assembling to a scratch directory, where there is no root content "
+                             "to preserve in the first place")
     args = parser.parse_args()
     root = Path(args.into).resolve()
+    repo = Path(args.root).resolve()
 
     failures: list[str] = []
 
     for rel in layout.ROOT_MUST_EXIST:
-        if not (root / rel).exists():
+        if not (repo / rel).exists():
             failures.append(f"root content went missing: {rel}")
 
     for rel in SOURCE_MUST_EXIST:

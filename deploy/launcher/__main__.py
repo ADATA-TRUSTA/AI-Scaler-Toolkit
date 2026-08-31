@@ -33,12 +33,22 @@ UI_DIR = config.resource_root() / "launcher" / "ui"
 
 
 def _icon_path() -> Path | None:
-    """The application icon travels with the frontend package, so the installed build
-    shows the brand it actually shipped rather than one chosen here."""
-    dist = config.payload_dir() / "frontend" / "dist"
-    if not dist.is_dir():
-        return None
-    return next(iter(sorted(dist.glob("*.ico"))), None)
+    """The icon packaging chose, under the fixed name it writes.
+
+    Falling back to the frontend package keeps a source checkout looking right, but the
+    packaged build must use app.ico: only one frontend package survives into a payload,
+    and its icon is not necessarily the brand the application is meant to show.
+    """
+    packaged = config.payload_dir() / "app.ico"
+    if packaged.is_file():
+        return packaged
+    for package in ("dist", "dist_client"):
+        directory = config.payload_dir() / "frontend" / package
+        if not directory.is_dir():
+            continue
+        for icon in sorted(directory.glob("*.ico")):
+            return icon
+    return None
 
 
 class SettingsApi:

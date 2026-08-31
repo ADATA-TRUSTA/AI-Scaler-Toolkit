@@ -66,3 +66,6 @@ data/metrics/
 /sources/
 /ci-tools/
 /deploy/build/
+
+# Generated from uv.lock by build_launcher.py; uv.lock is the record that matters.
+/deploy/launcher/requirements.txt

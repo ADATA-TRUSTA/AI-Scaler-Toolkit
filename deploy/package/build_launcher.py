@@ -51,17 +51,9 @@ def export_requirements(out: Path) -> None:
     print(f"[launcher] wrote {out} ({len(result.stdout.splitlines())} lines)")
 
 
-def find_icon() -> Path | None:
-    """Use the icon from whichever frontend package was assembled, so the executable
-    carries the brand that actually shipped."""
-    for package in ("dist_client", "dist"):
-        directory = REPO_ROOT / "frontend" / package
-        if not directory.is_dir():
-            continue
-        icon = next(iter(sorted(directory.glob("*.ico"))), None)
-        if icon:
-            return icon
-    return None
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import layout  # noqa: E402
 
 
 def main() -> int:
@@ -69,6 +61,8 @@ def main() -> int:
     parser.add_argument("--out", default=str(DEPLOY_DIR / "build" / "launcher"),
                         help="where to put the built executable")
     parser.add_argument("--icon", default="", help="override the icon file")
+    parser.add_argument("--source", default=str(REPO_ROOT),
+                        help="assembled layout to take the icon from (default: this repository)")
     args = parser.parse_args()
 
     out_dir = Path(args.out).resolve()
@@ -77,7 +71,7 @@ def main() -> int:
 
     export_requirements(DEPLOY_DIR / "launcher" / "requirements.txt")
 
-    icon = Path(args.icon) if args.icon else find_icon()
+    icon = Path(args.icon) if args.icon else layout.find_icon(Path(args.source).resolve())
     if icon and not icon.is_file():
         raise SystemExit(f"icon not found: {icon}")
     if not icon:

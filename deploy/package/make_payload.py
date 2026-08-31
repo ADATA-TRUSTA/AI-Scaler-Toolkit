@@ -19,6 +19,10 @@ import shutil
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import layout  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PORT = 8571
 
@@ -95,6 +99,17 @@ def main() -> int:
     # Support can tell which package a payload carries without unpacking the bundle;
     # the directory is called dist either way.
     (dest_dist / "BRAND.txt").write_text(f"{brand}\nsource: frontend/{package}\n", encoding="utf-8")
+
+    # The application icon, under a fixed name. Both frontend packages are present in
+    # the assembled layout but only one reaches the payload, so the running app cannot
+    # find the icon by package -- and picking the surviving package's icon would show
+    # the other brand.
+    icon = layout.find_icon(source)
+    if icon:
+        shutil.copy2(icon, payload / layout.PAYLOAD_ICON)
+        print(f"[payload] icon: {icon.name} -> {layout.PAYLOAD_ICON}")
+    else:
+        print("[payload] no .ico found in the assembled layout; the app will use a generic icon")
 
     for name in PAYLOAD_DIRS:
         src = source / name
