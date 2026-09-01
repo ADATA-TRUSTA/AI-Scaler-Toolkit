@@ -32,6 +32,10 @@ DEFAULTS: dict[str, Any] = {
     "accelerator": None,
     "installed_version": None,
     "last_update_check": None,
+    # How many packages a complete install has on this machine. Used as the
+    # denominator for the setup progress bar; until a run records one, a shipped
+    # estimate stands in.
+    "package_count": None,
 }
 
 

@@ -44,7 +44,8 @@ def _remove(path: Path, label: str, *, dry_run: bool) -> bool:
 def purge(*, keep_model_cache: bool, dry_run: bool) -> None:
     print("Removing provisioning output:")
     _remove(config.venv_dir(), "virtual environment", dry_run=dry_run)
-    _remove(config.llama_binary(), "llama binary", dry_run=dry_run)
+    _remove(config.llama_dir(), "llama runtime", dry_run=dry_run)
+    _remove(config.legacy_llama_binary(), "llama binary (legacy location)", dry_run=dry_run)
     _remove(config.gguf_tools_dir(), "GGUF conversion tooling", dry_run=dry_run)
     _remove(config.llama_staging_dir(), "llama installer staging", dry_run=dry_run)
 

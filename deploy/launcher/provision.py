@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import applog, config, env_file, state
+from . import applog, config, env_file, progress, state
 
 log = applog.get("provision")
 
@@ -38,11 +38,11 @@ class Phase:
 
 
 PHASES: tuple[Phase, ...] = (
-    Phase("detect", "Detecting the accelerator"),
-    Phase("sync", "Installing Python packages (several GB, this is the long one)"),
-    Phase("xpu", "Verifying the GPU can actually compute"),
-    Phase("llama", "Installing the llama runtime"),
-    Phase("convert", "Fetching the GGUF conversion tools"),
+    Phase("detect", "Detecting your GPU"),
+    Phase("sync", "Installing Python packages"),
+    Phase("xpu", "Checking the GPU can compute"),
+    Phase("llama", "Downloading the GPU runtime"),
+    Phase("convert", "Fetching conversion tools"),
     Phase("done", "Finishing up"),
 )
 
@@ -64,6 +64,10 @@ PHASE_HINTS: tuple[tuple[str, str], ...] = (
     ("convert tooling ready", "done"),
     ("convert tooling already present", "done"),
 )
+
+
+def label_for(key: str) -> str:
+    return next((p.label for p in PHASES if p.key == key), key)
 
 
 def phase_for(message: str) -> str | None:
@@ -116,7 +120,8 @@ def build_env() -> dict[str, str]:
 
 
 def run(on_line: Callable[[str], None] | None = None,
-        on_phase: Callable[[str, str], None] | None = None) -> str:
+        on_phase: Callable[[str, str], None] | None = None,
+        on_progress: Callable[[progress.Progress], None] | None = None) -> str:
     """Run provisioning to completion. Returns the accelerator setup_env settled on.
 
     Raises RuntimeError with the tail of the output if it fails; the full log is kept
@@ -143,6 +148,16 @@ def run(on_line: Callable[[str], None] | None = None,
     log.info("HF_HOME=%s", environment.get("HF_HOME"))
     log.info("output goes to %s", log_path)
 
+    meter = progress.Meter(on_progress) if on_progress else None
+
+    try:
+        return _run_setup(command, environment, log_path, meter, on_line, on_phase)
+    finally:
+        if meter:
+            meter.close()
+
+
+def _run_setup(command, environment, log_path, meter, on_line, on_phase) -> str:
     seen_phase: str | None = None
     accelerator = ""
     tail: list[str] = []
@@ -182,6 +197,8 @@ def run(on_line: Callable[[str], None] | None = None,
             if phase and phase != seen_phase:
                 seen_phase = phase
                 log.info("phase -> %s", phase)
+                if meter:
+                    meter.set_phase(phase, label_for(phase))
                 if on_phase:
                     label = next((p.label for p in PHASES if p.key == phase), phase)
                     on_phase(phase, label)
@@ -200,6 +217,7 @@ def run(on_line: Callable[[str], None] | None = None,
         # install reaches a user.
         raise RuntimeError(f"Provisioning ended without reporting completion. Full log: {log_path}")
 
+    progress.record_package_count()
     state.save({"provisioned": True, "accelerator": accelerator or None})
     log.info("provisioning complete, accelerator=%s", accelerator or "unknown")
     return accelerator

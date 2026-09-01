@@ -18,6 +18,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -26,6 +27,8 @@ from . import applog, config, env_file, state
 log = applog.get("service")
 
 PortStatus = Literal["free", "ours", "foreign"]
+
+SERVICE_LOG = "service.log"
 
 # Fields only this backend's /health returns. Used to tell our own leftover process
 # from an unrelated service that happens to sit on the port.
@@ -69,9 +72,25 @@ def venv_python() -> Path:
     return venv / ("Scripts/python.exe" if config.IS_WINDOWS else "bin/python")
 
 
+def _log_tail(path: Path, lines: int = 12) -> str:
+    """Put the end of the service log in the error itself.
+
+    "The service did not start" with nothing else is unactionable, and the person
+    reading it may not know a log file exists.
+    """
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return f"(no output captured; see {path})"
+    if not content:
+        return f"(it produced no output; see {path})"
+    return f"Last lines of {path}:\n" + "\n".join(content[-lines:])
+
+
 class ServiceManager:
     def __init__(self) -> None:
         self._process: subprocess.Popen | None = None
+        self._log_handle = None
 
     @property
     def port(self) -> int:
@@ -83,11 +102,21 @@ class ServiceManager:
     def is_running(self) -> bool:
         return self.status() == "ours"
 
-    def start(self, wait_sec: int = 120) -> None:  # noqa: D401
+    def start(self, wait_sec: int = 900, on_wait: Callable[[int], None] | None = None) -> None:  # noqa: D401
         """Start the service, or adopt one that is already answering.
 
         Adoption is the common case after an unclean shutdown, and it is safe: the
         fingerprint check has already established that what is on the port is ours.
+
+        The wait is generous on purpose. A first start imports torch and transformers
+        against a cold file cache, on Windows with a virus scanner reading every
+        newly written extension for the first time, and the backend spends most of a
+        minute timing out on an optional Redis connection before it binds. Two minutes
+        looked like plenty and was not: it gave up on a service that was starting
+        normally and would have been ready shortly after.
+
+        So the deadline is a backstop, not the real condition -- what actually matters
+        is whether the process is still alive, which is checked every second.
         """
         status = self.status()
         log.info("start requested on port %s, current status: %s", self.port, status)
@@ -115,28 +144,47 @@ class ServiceManager:
         merged = os.environ.copy()
         merged.update({k: v for k, v in env.items() if v})
 
+        # Its output goes to a file, not to nowhere. Discarding it meant a service that
+        # failed to start left no explanation at all.
+        config.log_dir().mkdir(parents=True, exist_ok=True)
+        service_log = config.log_dir() / SERVICE_LOG
         log.info("spawning %s -m service.app (cwd=%s)", python, config.backend_dir())
+        log.info("service output -> %s", service_log)
+
         creation = subprocess.CREATE_NO_WINDOW if config.IS_WINDOWS else 0
+        self._log_handle = service_log.open("w", encoding="utf-8", errors="replace")
         self._process = subprocess.Popen(
             [str(python), "-m", "service.app"],
             cwd=config.backend_dir(),
             env=merged,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=self._log_handle,
+            stderr=subprocess.STDOUT,
             creationflags=creation,
         )
 
-        deadline = time.monotonic() + wait_sec
+        started = time.monotonic()
+        deadline = started + wait_sec
+        last_report = 0.0
         while time.monotonic() < deadline:
             if self.status() == "ours":
+                elapsed = time.monotonic() - started
+                log.info("service healthy after %.0fs", elapsed)
                 return
             if self._process.poll() is not None:
                 raise RuntimeError(
-                    f"The service exited immediately (code {self._process.returncode}). "
-                    f"See {config.log_dir()}."
+                    f"The service stopped while starting (exit code {self._process.returncode}).\n\n"
+                    + _log_tail(service_log)
                 )
+            elapsed = time.monotonic() - started
+            if on_wait and elapsed - last_report >= 5:
+                last_report = elapsed
+                on_wait(int(elapsed))
             time.sleep(1.0)
-        raise RuntimeError(f"The service did not become healthy within {wait_sec}s.")
+
+        raise RuntimeError(
+            f"The service did not answer within {wait_sec}s, and is still running.\n\n"
+            + _log_tail(service_log)
+        )
 
     def stop(self, timeout: float = 20.0) -> None:
         """Only called from Quit. Everything else leaves the service running."""
@@ -149,6 +197,9 @@ class ServiceManager:
         except subprocess.TimeoutExpired:
             self._process.kill()
         self._process = None
+        if self._log_handle is not None:
+            self._log_handle.close()
+            self._log_handle = None
 
     def restart(self) -> None:
         self.stop()

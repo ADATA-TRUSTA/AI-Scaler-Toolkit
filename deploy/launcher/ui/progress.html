@@ -1,73 +1,224 @@
-<!doctype html>
-<meta charset="utf-8">
 <title>Setting up</title>
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #ffffff; --fg: #16181d; --muted: #5b6270;
-    --line: #e3e6ec; --accent: #2f6fed; --log-bg: #f6f7f9;
+    --bg: #ffffff;
+    --fg: #14161a;
+    --muted: #626a78;
+    --faint: #9aa2b1;
+    --line: #e5e8ee;
+    --track: #eef0f5;
+    --accent: #2f6fed;
+    --accent-soft: #dbe6ff;
+    --ok: #1a9a5f;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#14161a; --fg:#e8eaee; --muted:#9aa1ae; --line:#2a2e36; --accent:#5b8dff; --log-bg:#1b1e24; }
+    :root {
+      --bg: #101215; --fg: #e9ebef; --muted: #98a0ae; --faint: #6b7280;
+      --line: #262a31; --track: #1c2026; --accent: #5b8dff; --accent-soft: #1e2c4a;
+      --ok: #3fbc82;
+    }
   }
+
   * { box-sizing: border-box; }
-  body { margin:0; padding:28px 32px; background:var(--bg); color:var(--fg);
-         font:14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  h1 { margin:0 0 4px; font-size:19px; font-weight:600; }
-  p.sub { margin:0 0 22px; color:var(--muted); }
-  ol { list-style:none; margin:0 0 20px; padding:0; }
-  li { display:flex; align-items:center; gap:10px; padding:5px 0; color:var(--muted); }
-  li .dot { width:8px; height:8px; border-radius:50%; background:var(--line); flex:none; }
-  li.active { color:var(--fg); font-weight:550; }
-  li.active .dot { background:var(--accent); }
-  li.done { color:var(--fg); }
-  li.done .dot { background:var(--accent); }
-  #log { height:190px; overflow:auto; background:var(--log-bg); border:1px solid var(--line);
-         border-radius:8px; padding:10px 12px; font:12px/1.5 ui-monospace, Consolas, monospace;
-         white-space:pre-wrap; word-break:break-word; color:var(--muted); }
-  #error { display:none; margin-top:16px; padding:12px 14px; border-radius:8px;
-           border:1px solid #d9534f; color:#d9534f; white-space:pre-wrap; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    display: grid;
+    place-items: center;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  main { width: min(560px, 88vw); }
+
+  /* Header: icon beside the title, not above it -- the window is wide, not tall. */
+  .head { display: flex; align-items: center; gap: 14px; margin-bottom: 34px; }
+  .head img { width: 40px; height: 40px; border-radius: 9px; flex: none; }
+  .head .fallback {
+    width: 40px; height: 40px; border-radius: 9px; flex: none;
+    background: var(--accent-soft); display: grid; place-items: center;
+    color: var(--accent); font-weight: 700; font-size: 17px;
+  }
+  h1 { margin: 0; font-size: 19px; font-weight: 620; letter-spacing: -0.01em; }
+  .sub { margin: 2px 0 0; color: var(--muted); font-size: 13.5px; }
+
+  /* The current step is the subject of the screen; everything else is context. */
+  .step { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+  .step-name { font-size: 17px; font-weight: 560; }
+  .step-detail { color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  .track {
+    margin-top: 12px; height: 6px; border-radius: 99px;
+    background: var(--track); overflow: hidden; position: relative;
+  }
+  .fill {
+    height: 100%; width: 0%; border-radius: 99px; background: var(--accent);
+    transition: width 0.4s ease;
+  }
+  /* No measurable progress: say so by moving, rather than by showing a number that
+     would have to be invented. */
+  .track.indeterminate .fill {
+    width: 34%; animation: slide 1.5s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(320%); }
+  }
+
+  .meta { margin-top: 10px; display: flex; justify-content: space-between; gap: 12px;
+          color: var(--faint); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
+  /* Remaining phases as a quiet row, so the shape of the whole job is visible
+     without turning it into a checklist that sits still for minutes. */
+  .phases { margin-top: 30px; display: flex; gap: 8px; }
+  .pip { flex: 1; height: 3px; border-radius: 99px; background: var(--track); transition: background 0.3s; }
+  .pip.done { background: var(--accent); }
+  .pip.active { background: var(--accent); opacity: 0.55; }
+  .phase-names { margin-top: 9px; display: flex; justify-content: space-between;
+                 color: var(--faint); font-size: 11.5px; }
+
+  .note { margin-top: 30px; color: var(--faint); font-size: 12.5px; line-height: 1.55; }
+
+  /* Finished */
+  #done { display: none; }
+  #done.show { display: block; }
+  .tick { width: 40px; height: 40px; border-radius: 9px; flex: none;
+          background: var(--ok); display: grid; place-items: center; color: #fff; font-size: 21px; }
+  button {
+    margin-top: 26px; padding: 10px 20px; border: 0; border-radius: 8px;
+    background: var(--accent); color: #fff; font: inherit; font-weight: 560; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+
+  #error { display: none; margin-top: 26px; padding: 14px 16px; border-radius: 9px;
+           border: 1px solid #d9534f; color: #d9534f; font-size: 13.5px;
+           white-space: pre-wrap; max-height: 240px; overflow: auto; user-select: text; }
+  #error.show { display: block; }
 </style>
 
-<h1>Setting up AI Scaler Toolkit</h1>
-<p class="sub">First run only. The GPU runtime is downloaded now rather than bundled, so this takes a while.</p>
+<main>
+  <div id="setup">
+    <div class="head">
+      <img id="icon" alt="" hidden>
+      <div class="fallback" id="fallback">AI</div>
+      <div>
+        <h1>Setting up AI Scaler Toolkit</h1>
+        <p class="sub">One-time setup. The GPU runtime is downloaded now rather than bundled.</p>
+      </div>
+    </div>
 
-<ol id="phases"></ol>
-<div id="log"></div>
-<div id="error"></div>
+    <div class="step">
+      <span class="step-name" id="step-name">Starting</span>
+      <span class="step-detail" id="step-detail"></span>
+    </div>
+    <div class="track indeterminate" id="track"><div class="fill" id="fill"></div></div>
+    <div class="meta">
+      <span id="elapsed"></span>
+      <span id="total-elapsed"></span>
+    </div>
+
+    <div class="phases" id="phases"></div>
+    <div class="phase-names"><span id="first-phase"></span><span id="last-phase"></span></div>
+
+    <p class="note">You can leave this running. Setup usually takes five to ten minutes
+      depending on your connection.</p>
+  </div>
+
+  <div id="done">
+    <div class="head">
+      <div class="tick">✓</div>
+      <div>
+        <h1>Setup complete</h1>
+        <p class="sub" id="done-sub"></p>
+      </div>
+    </div>
+    <button id="open" type="button">Open AI Scaler Toolkit</button>
+  </div>
+
+  <div id="error"></div>
+</main>
 
 <script>
-  var phasesEl = document.getElementById('phases');
-  var logEl = document.getElementById('log');
   var keys = [];
+  var startedAt = Date.now();
+
+  function clock(seconds) {
+    var m = Math.floor(seconds / 60);
+    var s = seconds % 60;
+    return m > 0 ? m + "m " + (s < 10 ? "0" : "") + s + "s" : s + "s";
+  }
+
+  setInterval(function () {
+    var el = document.getElementById("total-elapsed");
+    if (document.getElementById("done").classList.contains("show")) { return; }
+    el.textContent = clock(Math.floor((Date.now() - startedAt) / 1000)) + " elapsed";
+  }, 1000);
+
+  window.setIcon = function (dataUri) {
+    if (!dataUri) { return; }
+    var img = document.getElementById("icon");
+    img.src = dataUri;
+    img.hidden = false;
+    document.getElementById("fallback").remove();
+  };
 
   window.setPhases = function (items) {
     keys = items.map(function (i) { return i.key; });
-    var html = '';
-    for (var n = 0; n < items.length; n++) {
-      html += '<li><span class="dot"></span><span>' + items[n].label + '</span></li>';
-    }
-    phasesEl.innerHTML = html;
+    var row = document.getElementById("phases");
+    row.innerHTML = items.map(function () { return '<span class="pip"></span>'; }).join("");
+    document.getElementById("first-phase").textContent = items.length ? items[0].label : "";
+    document.getElementById("last-phase").textContent =
+      items.length ? items[items.length - 1].label : "";
   };
 
   window.setPhase = function (key) {
     var at = keys.indexOf(key);
-    var items = phasesEl.querySelectorAll('li');
-    for (var n = 0; n < items.length; n++) {
-      items[n].className = n < at ? 'done' : (n === at ? 'active' : '');
+    var pips = document.getElementById("phases").querySelectorAll(".pip");
+    for (var n = 0; n < pips.length; n++) {
+      pips[n].className = "pip" + (n < at ? " done" : n === at ? " active" : "");
     }
   };
 
-  window.appendLog = function (line) {
-    // Keep the node count bounded: provisioning emits thousands of lines.
-    if (logEl.childNodes.length > 400) { logEl.removeChild(logEl.firstChild); }
-    logEl.appendChild(document.createTextNode(line + '\n'));
-    logEl.scrollTop = logEl.scrollHeight;
+  // fraction === null means this step has nothing measurable to report.
+  window.setProgress = function (name, fraction, detail, elapsed) {
+    document.getElementById("step-name").textContent = name || "";
+    document.getElementById("step-detail").textContent = detail || "";
+    document.getElementById("elapsed").textContent =
+      typeof elapsed === "number" ? "this step: " + clock(elapsed) : "";
+
+    var track = document.getElementById("track");
+    var fill = document.getElementById("fill");
+    if (typeof fraction === "number") {
+      track.classList.remove("indeterminate");
+      fill.style.width = Math.max(2, Math.round(fraction * 100)) + "%";
+    } else {
+      track.classList.add("indeterminate");
+      fill.style.width = "";
+    }
+  };
+
+  window.showDone = function (summary) {
+    document.getElementById("setup").style.display = "none";
+    document.getElementById("done-sub").textContent = summary || "";
+    document.getElementById("done").classList.add("show");
   };
 
   window.showError = function (message) {
-    var box = document.getElementById('error');
+    var box = document.getElementById("error");
     box.textContent = message;
-    box.style.display = 'block';
+    box.classList.add("show");
   };
+
+  document.getElementById("open").addEventListener("click", function () {
+    this.disabled = true;
+    this.textContent = "Opening…";
+    // Handled by the launcher, which navigates this window to the interface.
+    if (window.pywebview && window.pywebview.api && window.pywebview.api.open_app) {
+      window.pywebview.api.open_app();
+    }
+  });
 </script>

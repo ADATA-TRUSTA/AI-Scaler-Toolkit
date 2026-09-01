@@ -15,8 +15,8 @@ import argparse
 import contextlib
 import sys
 import threading
+import time
 import webbrowser
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,7 @@ from . import (
     config,
     env_file,
     preflight,
+    progress,
     provision,
     service_manager,
     state,
@@ -36,6 +37,20 @@ from . import (
 UI_DIR = config.resource_root() / "launcher" / "ui"
 
 log = applog.get("main")
+
+
+def _icon_data_uri() -> str:
+    """The window is HTML, so the icon has to travel as data -- a file:// reference
+    from a page loaded over http would be blocked."""
+    path = _icon_path()
+    if path is None:
+        return ""
+    try:
+        import base64
+
+        return "data:image/x-icon;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError:
+        return ""
 
 
 def _icon_path() -> Path | None:
@@ -57,49 +72,14 @@ def _icon_path() -> Path | None:
     return None
 
 
-class LineBuffer:
-    """Collect provisioning output and push it to the page in batches.
+class WindowApi:
+    """Exposed to the setup page. It only needs one thing: the button at the end."""
 
-    evaluate_js is a blocking round-trip to the webview -- the first one has to wait
-    for the page to finish loading, and every one after that still costs a hop. uv sync
-    emits thousands of lines, so pushing one at a time makes the window unresponsive
-    for the whole install, which looks exactly like a hang and is nearly as bad.
-    """
+    def __init__(self, launcher: Launcher) -> None:
+        self._launcher = launcher
 
-    def __init__(self, flush: Callable[[str], None], interval: float = 0.3) -> None:
-        self._flush = flush
-        self._interval = interval
-        self._lines: list[str] = []
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._loop, name="log-flush", daemon=True)
-        self._thread.start()
-
-    def add(self, line: str) -> None:
-        with self._lock:
-            self._lines.append(line)
-            # Bound the buffer: a burst should not turn into one enormous evaluate_js.
-            if len(self._lines) > 500:
-                del self._lines[:-500]
-
-    def _drain(self) -> None:
-        with self._lock:
-            if not self._lines:
-                return
-            batch = self._lines
-            self._lines = []
-        # Losing progress text must never stop provisioning.
-        with contextlib.suppress(Exception):
-            self._flush("\n".join(batch))
-
-    def _loop(self) -> None:
-        while not self._stop.wait(self._interval):
-            self._drain()
-
-    def close(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=2)
-        self._drain()
+    def open_app(self) -> None:
+        self._launcher.reload_window()
 
 
 class SettingsApi:
@@ -204,30 +184,48 @@ class Launcher:
             self.window.show()
 
     def open_in_browser(self) -> None:
-        """The same interface, in the system browser.
+        """The full interface, in the system browser.
 
-        Both entry points reach the full WebUI; this one exists for people who want it
-        in a real browser tab, with their own extensions and zoom.
+        The ?ui=full marker matters. config.json asks for the collapsed view because
+        that is right for the desktop window, and the page has no other way to tell
+        the two apart -- without it, "open the full interface" would open the narrow
+        one and offer a button to expand it, which is absurd in a browser tab.
         """
-        webbrowser.open(config.service_url(self.service.port))
+        webbrowser.open(config.service_url(self.service.port) + "/?ui=full")
 
     def open_settings(self) -> None:
+        """Open the settings window, or raise the one already open.
+
+        The reference has to be cleared when the window closes. Calling show() on a
+        closed pywebview window does not raise -- it quietly does nothing -- so
+        relying on an exception to detect it meant settings could be opened exactly
+        once per session.
+        """
         import webview
 
         if self.settings_window is not None:
-            try:
+            log.info("settings window already open; raising it")
+            with contextlib.suppress(Exception):
                 self.settings_window.show()
-                return
-            except Exception:
-                self.settings_window = None
+                self.settings_window.restore()
+            return
 
-        self.settings_window = webview.create_window(
+        log.info("opening the settings window")
+        window = webview.create_window(
             f"{config.APP_TITLE} — Settings",
             str(UI_DIR / "settings.html"),
             js_api=SettingsApi(self),
-            width=680,
-            height=760,
+            width=720,
+            height=820,
+            min_size=(600, 560),
         )
+        self.settings_window = window
+
+        def _forget() -> None:
+            log.info("settings window closed")
+            self.settings_window = None
+
+        window.events.closed += _forget
 
     def _on_closing(self) -> bool:
         """Hide instead of exiting.
@@ -240,6 +238,15 @@ class Launcher:
         if self.window is not None:
             self.window.hide()
         return False
+
+    def _set_step(self, name: str, fraction: float | None, detail: str, elapsed: int) -> None:
+        value = "null" if fraction is None else f"{fraction:.4f}"
+        self._js(
+            f"window.setProgress({_js_string(name)}, {value}, {_js_string(detail)}, {elapsed})"
+        )
+
+    def _report_progress(self, update: progress.Progress) -> None:
+        self._set_step(update.label, update.fraction, update.detail, update.elapsed)
 
     # ------------------------------------------------------------- first run
 
@@ -274,8 +281,11 @@ class Launcher:
                 self._report_blocking(report)
                 return
 
+            self._js(f"window.setIcon({_js_string(_icon_data_uri())})")
+
             provisioned = provision.is_provisioned()
             log.info("bootstrap: already provisioned = %s", provisioned)
+            started_at = time.monotonic()
 
             if not provisioned:
                 phases = [{"key": p.key, "label": p.label} for p in provision.iter_phases()]
@@ -293,20 +303,39 @@ class Launcher:
                     log.info("bootstrap: rewriting the frontend config for port %s", port)
                     service_manager.set_port(port)
 
-                buffer = LineBuffer(lambda text: self._js(f"window.appendLog({_js_string(text)})"))
-                try:
-                    log.info("bootstrap: handing over to provisioning")
-                    provision.run(
-                        on_line=buffer.add,
-                        on_phase=lambda key, _label: self._js(f"window.setPhase({_js_string(key)})"),
-                    )
-                finally:
-                    buffer.close()
+                log.info("bootstrap: handing over to provisioning")
+                provision.run(
+                    on_phase=lambda key, _label: self._js(f"window.setPhase({_js_string(key)})"),
+                    on_progress=self._report_progress,
+                )
 
             log.info("bootstrap: starting the service")
-            self.service.start()
-            log.info("bootstrap: loading the interface")
-            self.reload_window()
+            self._js(f"window.setPhase({_js_string('done')})")
+            self._set_step("Starting the service", None, "loading the GPU runtime", 0)
+            self.service.start(
+                on_wait=lambda seconds: self._set_step(
+                    "Starting the service", None, "loading the GPU runtime", seconds
+                )
+            )
+
+            if provisioned:
+                # Not a first run: there is nothing to celebrate and nobody waiting,
+                # so go straight to the interface.
+                log.info("bootstrap: loading the interface")
+                self.reload_window()
+            else:
+                # After a wait this long, finishing silently by swapping the page reads
+                # as one more thing happening rather than as "done".
+                total = int(time.monotonic() - started_at)
+                minutes, seconds = divmod(total, 60)
+                spent = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+                accelerator = state.get("accelerator") or "your CPU"
+                log.info("bootstrap: setup finished in %s, waiting for the user", spent)
+                self._js(
+                    "window.showDone("
+                    + _js_string(f"Ready in {spent}, using {accelerator}.")
+                    + ")"
+                )
             log.info("bootstrap: done")
 
         except Exception as exc:
@@ -460,6 +489,7 @@ def main(argv: list[str] | None = None) -> int:
     launcher.window = webview.create_window(
         config.APP_TITLE,
         str(UI_DIR / "progress.html"),
+        js_api=WindowApi(launcher),
         width=1280,
         height=860,
         min_size=(940, 620),

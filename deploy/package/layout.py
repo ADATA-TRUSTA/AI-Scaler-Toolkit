@@ -107,6 +107,13 @@ EXCLUDE_FILE_GLOBS = ("*.log", ".env", "CLAUDE.md")
 PER_SOURCE_EXCLUDES: dict[str, tuple[str, ...]] = {
     "backend": (
         ".github/copilot-instructions.md",
+        # Provisioning output, not source. Both are ignored by the backend's own
+        # .gitignore, so a fresh clone never has them -- but assembly walks the file
+        # system, so a developer's working copy would ship them and produce a payload
+        # unlike the one CI builds. llama-bin alone is 178 MB, and shipping it defeats
+        # the decision to download the runtime on first launch rather than bundle it.
+        "service/utils/llama-bin",
+        "service/utils/llama.cpp",
         "service/configs/current_inference_config.json",
         "service/configs/current_training_config.json",
         "service/configs/last_finetuned_model.json",
@@ -146,6 +153,29 @@ MUST_NOT_EXIST: tuple[str, ...] = (
     "console/app_settings",
     "console/requirements.txt",
 )
+
+
+def force_rmtree(path) -> None:
+    """Remove a tree even when it contains read-only files.
+
+    Provisioning leaves a git checkout inside the payload, and git marks its pack
+    files read-only -- on Windows that makes shutil.rmtree fail partway, leaving a
+    half-deleted directory that still looks complete enough to pass a check.
+    """
+    import os
+    import shutil
+    import stat
+    from pathlib import Path as _Path
+
+    target = _Path(path)
+    if not target.exists():
+        return
+
+    def clear_readonly(func, name, _exc):
+        os.chmod(name, stat.S_IWRITE)
+        func(name)
+
+    shutil.rmtree(target, onerror=clear_readonly)
 
 
 def is_excluded(rel: str, source_key: str) -> bool:

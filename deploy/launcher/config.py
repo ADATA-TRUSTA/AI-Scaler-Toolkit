@@ -119,10 +119,25 @@ def hf_home() -> Path:
     return Path.home() / ".cache" / "huggingface"
 
 
+def llama_dir() -> Path:
+    """Where setup_env installs the llama runtime: inside the backend project.
+
+    It used to land in a per-user directory on PATH, which is why the legacy location
+    below is still cleaned up -- a purge that misses the real one leaves the next run
+    reporting "already present" and skipping the step it was supposed to exercise.
+    """
+    return backend_dir() / "service" / "utils" / "llama-bin"
+
+
 def llama_binary() -> Path:
-    """Where the official llama installer puts the binary, which is also the backend's
-    default for LLAMA_SERVER_BINARY. setup_env records the resolved path in .env; this
-    is only used for detection."""
+    """The executable itself. setup_env records the resolved path in .env; this is
+    only used for detection and cleanup."""
+    return llama_dir() / ("llama-server.exe" if IS_WINDOWS else "llama-server")
+
+
+def legacy_llama_binary() -> Path:
+    """Earlier installs put it on PATH. Still removed on purge so an old machine ends
+    up in the same state as a new one."""
     if IS_WINDOWS:
         return _win_local_appdata() / "Microsoft" / "WindowsApps" / "llama.exe"
     return Path.home() / ".local" / "bin" / "llama"

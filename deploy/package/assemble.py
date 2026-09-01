@@ -28,7 +28,7 @@ def replace(dest_root: Path) -> None:
     """Wipe and recreate. Done explicitly so the destructive step is visible rather
     than implied by a copy flag."""
     if dest_root.exists():
-        shutil.rmtree(dest_root)
+        layout.force_rmtree(dest_root)
     dest_root.mkdir(parents=True)
 
 

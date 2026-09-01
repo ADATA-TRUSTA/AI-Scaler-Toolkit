@@ -79,7 +79,7 @@ def main() -> int:
     source = Path(args.source).resolve()
     payload = Path(args.out).resolve()
     if payload.exists():
-        shutil.rmtree(payload)
+        layout.force_rmtree(payload)
     payload.mkdir(parents=True)
 
     package, brand = BRAND_BY_PLATFORM[args.platform]
