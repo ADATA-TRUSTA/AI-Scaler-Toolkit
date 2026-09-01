@@ -20,13 +20,18 @@
     }
   }
 
+  /* The brand wash is built for a white page; the dark theme keeps its own ground. */
+  @media (prefers-color-scheme: dark) {
+    body { background: var(--bg) !important; }
+  }
+
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
     margin: 0;
     display: grid;
     place-items: center;
-    background: var(--bg);
+    background: var(--brand-bg, var(--bg));
     color: var(--fg);
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
     -webkit-user-select: none;
@@ -39,7 +44,8 @@
   .head { display: flex; align-items: center; gap: 13px; margin-bottom: 26px; }
   .head .mark {
     width: 38px; height: 38px; border-radius: 9px; flex: none;
-    background: var(--accent-soft); display: grid; place-items: center;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    display: grid; place-items: center;
     color: var(--accent); font-weight: 700; font-size: 17px;
   }
   h1 { margin: 0; font-size: 19px; font-weight: 620; letter-spacing: -0.01em; }
@@ -52,7 +58,11 @@
 
   .track {
     margin-top: 12px; height: 6px; border-radius: 99px;
-    background: var(--track); overflow: hidden; position: relative;
+    /* Derived from the text colour rather than a fixed grey: the page sits on the
+       brand's own background, which is a pale wash in one brand and near-white in
+       the other, and a fixed track disappears against the first. */
+    background: color-mix(in srgb, var(--fg) 9%, transparent);
+    overflow: hidden; position: relative;
   }
   .fill {
     height: 100%; width: 0%; border-radius: 99px; background: var(--accent);
@@ -74,7 +84,11 @@
   /* Remaining phases as a quiet row, so the shape of the whole job is visible
      without turning it into a checklist that sits still for minutes. */
   .phases { margin-top: 24px; display: flex; gap: 8px; }
-  .pip { flex: 1; height: 3px; border-radius: 99px; background: var(--track); transition: background 0.3s; }
+  .pip {
+    flex: 1; height: 3px; border-radius: 99px;
+    background: color-mix(in srgb, var(--fg) 9%, transparent);
+    transition: background 0.3s;
+  }
   .pip.done { background: var(--accent); }
   .pip.active { background: var(--accent); opacity: 0.55; }
   .phase-names { margin-top: 9px; display: flex; justify-content: space-between;
@@ -141,6 +155,16 @@
 </main>
 
 <script>
+
+  // The page background is the shipped brand's own, read from the stylesheet that
+  // came with this payload. Only the background: the brand's action colour is a
+  // saturated magenta sized for buttons, and on a progress bar it shouts and reads
+  // as a warning. Applied through a variable the dark theme overrides, because the
+  // brand wash is designed for a white page.
+  window.setBrandBackground = function (value) {
+    if (!value) { return; }
+    document.documentElement.style.setProperty("--brand-bg", value);
+  };
   var keys = [];
   var startedAt = Date.now();
 

@@ -45,13 +45,23 @@ class Progress:
 
 
 def installed_packages() -> int:
-    """Packages present in the environment, counted by their metadata directories."""
-    site = config.venv_dir() / ("Lib/site-packages" if config.IS_WINDOWS else "lib")
-    if not site.is_dir():
+    """Packages present in the environment, counted by their metadata directories.
+
+    This reads a directory that uv is actively writing hundreds of entries into, so
+    the scan can fail part-way -- on Windows a directory that disappears mid-iteration
+    raises rather than being skipped. A failed count is reported as "no reading yet",
+    never as an exception: the progress display is not worth interrupting an install
+    for, and a single bad poll should not end the measurement.
+    """
+    try:
+        site = config.venv_dir() / ("Lib/site-packages" if config.IS_WINDOWS else "lib")
+        if not site.is_dir():
+            return 0
+        if config.IS_WINDOWS:
+            return sum(1 for _ in site.glob("*.dist-info"))
+        return sum(1 for _ in site.glob("*/site-packages/*.dist-info"))
+    except OSError:
         return 0
-    if config.IS_WINDOWS:
-        return sum(1 for _ in site.glob("*.dist-info"))
-    return sum(1 for _ in site.glob("*/site-packages/*.dist-info"))
 
 
 def expected_packages() -> int:
@@ -130,16 +140,27 @@ class Meter:
             phase, label, started = self._phase, self._label, self._phase_started
         if not phase:
             return
-        source = SOURCES.get(phase)
-        fraction, detail = source() if source else (None, "")
+        # Reading the source is inside the guard, not outside it. It was outside, and
+        # an OSError from scanning site-packages while uv wrote to it escaped this
+        # method, ended the polling thread, and left the display frozen on whatever it
+        # had last said -- which looked exactly like the install being stuck on
+        # "Installing Python packages" while it was in fact several steps further on.
         try:
+            source = SOURCES.get(phase)
+            fraction, detail = source() if source else (None, "")
             self._report(Progress(phase, label, fraction, detail, int(time.monotonic() - started)))
         except Exception:
-            log.debug("progress report failed", exc_info=True)
+            log.debug("progress poll failed", exc_info=True)
 
     def _loop(self) -> None:
+        # Belt and braces: _emit already swallows its own failures, but this thread
+        # must outlive anything unexpected. Losing it costs the user the only signal
+        # that the install is still moving.
         while not self._stop.wait(POLL_SECONDS):
-            self._emit()
+            try:
+                self._emit()
+            except Exception:
+                log.debug("progress loop iteration failed", exc_info=True)
 
     def close(self) -> None:
         self._stop.set()

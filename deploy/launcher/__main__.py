@@ -23,6 +23,7 @@ from typing import Any
 from . import (
     applog,
     autostart,
+    brand,
     component_manager,
     config,
     env_file,
@@ -271,6 +272,14 @@ class Launcher:
 
         window.events.closed += _forget
 
+        def _paint() -> None:
+            with contextlib.suppress(Exception):
+                window.evaluate_js(
+                    f"window.setBrandBackground({_js_string(brand.page_background())})"
+                )
+
+        window.events.loaded += _paint
+
     def _on_closing(self) -> bool:
         """Hide instead of exiting.
 
@@ -331,6 +340,8 @@ class Launcher:
     def bootstrap(self) -> None:
         """Everything between launch and a usable window. Runs off the main thread."""
         try:
+            self._js(f"window.setBrandBackground({_js_string(brand.page_background())})")
+
             log.info("bootstrap: preflight")
             report = preflight.run()
             if not report.ok:

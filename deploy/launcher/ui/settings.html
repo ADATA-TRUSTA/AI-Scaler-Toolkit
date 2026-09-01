@@ -18,11 +18,16 @@
     }
   }
 
+  /* The brand wash is built for a white page; the dark theme keeps its own ground. */
+  @media (prefers-color-scheme: dark) {
+    body { background: var(--bg) !important; }
+  }
+
   * { box-sizing: border-box; }
   body {
     margin: 0;
     padding: 40px 44px 56px;
-    background: var(--bg);
+    background: var(--brand-bg, var(--bg));
     color: var(--fg);
     font: 14.5px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
@@ -165,6 +170,16 @@
 </main>
 
 <script>
+
+  // The page background is the shipped brand's own, read from the stylesheet that
+  // came with this payload. Only the background: the brand's action colour is a
+  // saturated magenta sized for buttons, and on a progress bar it shouts and reads
+  // as a warning. Applied through a variable the dark theme overrides, because the
+  // brand wash is designed for a white page.
+  window.setBrandBackground = function (value) {
+    if (!value) { return; }
+    document.documentElement.style.setProperty("--brand-bg", value);
+  };
   var api = window.pywebview.api;
 
   function escapeHtml(value) {
