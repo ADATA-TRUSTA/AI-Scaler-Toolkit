@@ -31,7 +31,7 @@ def is_enabled() -> bool:
     if config.IS_WINDOWS:
         proc = subprocess.run(
             ["reg", "query", rf"HKCU\{RUN_KEY}", "/v", RUN_VALUE],
-            capture_output=True, text=True,
+            capture_output=True, text=True, creationflags=config.subprocess_flags(),
         )
         return proc.returncode == 0
     return config.autostart_target().is_file()
@@ -42,7 +42,7 @@ def enable() -> None:
         subprocess.run(
             ["reg", "add", rf"HKCU\{RUN_KEY}", "/v", RUN_VALUE, "/t", "REG_SZ",
              "/d", _launch_command(), "/f"],
-            check=True, capture_output=True,
+            check=True, capture_output=True, creationflags=config.subprocess_flags(),
         )
         return
 
@@ -69,7 +69,7 @@ def disable() -> None:
     if config.IS_WINDOWS:
         subprocess.run(
             ["reg", "delete", rf"HKCU\{RUN_KEY}", "/v", RUN_VALUE, "/f"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, creationflags=config.subprocess_flags(),
         )
         return
     config.autostart_target().unlink(missing_ok=True)

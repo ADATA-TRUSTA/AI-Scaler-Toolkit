@@ -31,6 +31,16 @@ VLLM_PORT = 5000
 MIN_FREE_DISK_GB = 10
 
 
+# Windows only. Without it every helper this launcher runs -- reg query, the
+# provisioning script, the service -- flashes or holds open a console window, which
+# in a windowed application looks like something has gone wrong.
+NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
+
+
+def subprocess_flags() -> int:
+    return NO_WINDOW
+
+
 def _win_local_appdata() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
 

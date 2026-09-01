@@ -62,6 +62,7 @@ def _reg_value_exists(root: str, key: str, value: str) -> bool:
             capture_output=True,
             text=True,
             timeout=15,
+            creationflags=config.subprocess_flags(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False

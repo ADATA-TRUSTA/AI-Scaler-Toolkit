@@ -165,7 +165,7 @@ class ServiceManager:
         log.info("spawning %s -m service.app (cwd=%s)", python, config.backend_dir())
         log.info("service output -> %s", service_log)
 
-        creation = subprocess.CREATE_NO_WINDOW if config.IS_WINDOWS else 0
+        creation = config.subprocess_flags()
         self._log_handle = service_log.open("w", encoding="utf-8", errors="replace")
         self._process = subprocess.Popen(
             [str(python), "-m", "service.app"],

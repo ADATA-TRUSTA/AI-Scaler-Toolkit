@@ -36,6 +36,9 @@ DEFAULTS: dict[str, Any] = {
     # denominator for the setup progress bar; until a run records one, a shipped
     # estimate stands in.
     "package_count": None,
+    # How long setup took and on which accelerator. The completion screen no longer
+    # waits to be dismissed, so this is where that information stays available.
+    "last_setup": None,
 }
 
 

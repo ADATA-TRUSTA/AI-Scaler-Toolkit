@@ -36,21 +36,29 @@ from . import (
 
 UI_DIR = config.resource_root() / "launcher" / "ui"
 
+# Setup needs a small window: it shows one heading, one bar and a row of pips. The
+# interface that follows needs a large one, and the shape depends on whether the chat
+# panel is showing -- a column laid out for 480px in a 1320px frame is mostly empty.
+SETUP_SIZE = (660, 580)
+COMPACT_SIZE = (640, 880)
+EXPANDED_SIZE = (1320, 880)
+
+# Long enough to read "Setup complete" and the time it took, short enough not to be a
+# step. The button was removed: after a nine-minute wait, asking for a click before
+# showing the thing that was being installed is friction, not ceremony.
+DONE_PAUSE_SECONDS = 2.2
+
+# Injected into every page the window loads, so the interface can tell the window to
+# change shape without knowing anything about how the window is implemented.
+HOST_HOOK = """
+window.__hostViewChange = function (compact) {
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.set_compact) {
+    window.pywebview.api.set_compact(!!compact);
+  }
+};
+"""
+
 log = applog.get("main")
-
-
-def _icon_data_uri() -> str:
-    """The window is HTML, so the icon has to travel as data -- a file:// reference
-    from a page loaded over http would be blocked."""
-    path = _icon_path()
-    if path is None:
-        return ""
-    try:
-        import base64
-
-        return "data:image/x-icon;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
-    except OSError:
-        return ""
 
 
 def _icon_path() -> Path | None:
@@ -73,13 +81,17 @@ def _icon_path() -> Path | None:
 
 
 class WindowApi:
-    """Exposed to the setup page. It only needs one thing: the button at the end."""
+    """Exposed to every page the main window loads."""
 
     def __init__(self, launcher: Launcher) -> None:
         self._launcher = launcher
 
     def open_app(self) -> None:
         self._launcher.reload_window()
+
+    def set_compact(self, compact: bool) -> None:
+        """The interface hid or showed its chat panel; match the window to it."""
+        self._launcher.set_window_size(COMPACT_SIZE if compact else EXPANDED_SIZE)
 
 
 class SettingsApi:
@@ -96,6 +108,7 @@ class SettingsApi:
             "service_port": stored["service_port"],
             "installed_version": stored["installed_version"],
             "accelerator": stored["accelerator"],
+            "last_setup": stored["last_setup"],
             "platform": sys.platform,
         }
 
@@ -175,9 +188,36 @@ class Launcher:
         with contextlib.suppress(Exception):
             self.window.evaluate_js(script)
 
+    def set_window_size(self, size: tuple[int, int]) -> None:
+        if self.window is None:
+            return
+        width, height = size
+        log.info("resizing the window to %dx%d", width, height)
+        with contextlib.suppress(Exception):
+            self.window.resize(width, height)
+
     def reload_window(self) -> None:
-        if self.window is not None:
-            self.window.load_url(config.service_url(self.service.port))
+        if self.window is None:
+            return
+        # Sized before the page loads rather than after, so the interface does not
+        # appear at the setup window's size and then jump.
+        self.set_window_size(COMPACT_SIZE if self._starts_compact() else EXPANDED_SIZE)
+        self.window.load_url(config.service_url(self.service.port))
+
+    def _starts_compact(self) -> bool:
+        """What the packaged config.json asks for. The interface may be toggled away
+        from it later, which is what set_compact is for."""
+        try:
+            import json
+
+            data = json.loads(config.frontend_config().read_text(encoding="utf-8"))
+            return data.get("hideChatPanel") is True
+        except (OSError, ValueError):
+            return False
+
+    def _inject_host_hook(self) -> None:
+        """Re-injected on every page load, because navigation clears it."""
+        self._js(HOST_HOOK)
 
     def show_window(self) -> None:
         if self.window is not None:
@@ -281,8 +321,6 @@ class Launcher:
                 self._report_blocking(report)
                 return
 
-            self._js(f"window.setIcon({_js_string(_icon_data_uri())})")
-
             provisioned = provision.is_provisioned()
             log.info("bootstrap: already provisioned = %s", provisioned)
             started_at = time.monotonic()
@@ -324,20 +362,18 @@ class Launcher:
                 log.info("bootstrap: loading the interface")
                 self.reload_window()
             else:
-                # After a wait this long, finishing silently by swapping the page reads
-                # as one more thing happening rather than as "done".
+                # Say it finished, then go. Swapping the page silently after a
+                # nine-minute wait reads as one more thing happening rather than as
+                # done; making the user click reads as a chore.
                 total = int(time.monotonic() - started_at)
                 minutes, seconds = divmod(total, 60)
                 spent = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
                 accelerator = state.get("accelerator") or "your CPU"
-                log.info("bootstrap: setup finished in %s, waiting for the user", spent)
-                self._js(
-                    "window.showDone("
-                    + _js_string(f"Ready in {spent}, using {accelerator}.")
-                    + ", "
-                    + _js_string(config.service_url(self.service.port))
-                    + ")"
-                )
+                state.set("last_setup", f"{spent} ({accelerator})")
+                log.info("bootstrap: setup finished in %s", spent)
+                self._js("window.showDone(" + _js_string(f"Ready in {spent}, using {accelerator}.") + ")")
+                time.sleep(DONE_PAUSE_SECONDS)
+                self.reload_window()
             log.info("bootstrap: done")
 
         except Exception as exc:
@@ -492,11 +528,13 @@ def main(argv: list[str] | None = None) -> int:
         config.APP_TITLE,
         str(UI_DIR / "progress.html"),
         js_api=WindowApi(launcher),
-        width=1280,
-        height=860,
-        min_size=(940, 620),
+        width=SETUP_SIZE[0],
+        height=SETUP_SIZE[1],
+        min_size=(520, 480),
     )
     launcher.window.events.closing += launcher._on_closing
+    # Navigation clears injected globals, so the hook is put back after every load.
+    launcher.window.events.loaded += launcher._inject_host_hook
 
     launcher.tray = launcher.build_tray()
     # pywebview needs the main thread on Windows, so the tray goes to a worker. It is

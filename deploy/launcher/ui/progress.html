@@ -33,13 +33,12 @@
     user-select: none;
   }
 
-  main { width: min(560px, 88vw); }
+  main { width: min(520px, 86vw); }
 
   /* Header: icon beside the title, not above it -- the window is wide, not tall. */
-  .head { display: flex; align-items: center; gap: 14px; margin-bottom: 34px; }
-  .head img { width: 40px; height: 40px; border-radius: 9px; flex: none; }
-  .head .fallback {
-    width: 40px; height: 40px; border-radius: 9px; flex: none;
+  .head { display: flex; align-items: center; gap: 13px; margin-bottom: 26px; }
+  .head .mark {
+    width: 38px; height: 38px; border-radius: 9px; flex: none;
     background: var(--accent-soft); display: grid; place-items: center;
     color: var(--accent); font-weight: 700; font-size: 17px;
   }
@@ -74,14 +73,14 @@
 
   /* Remaining phases as a quiet row, so the shape of the whole job is visible
      without turning it into a checklist that sits still for minutes. */
-  .phases { margin-top: 30px; display: flex; gap: 8px; }
+  .phases { margin-top: 24px; display: flex; gap: 8px; }
   .pip { flex: 1; height: 3px; border-radius: 99px; background: var(--track); transition: background 0.3s; }
   .pip.done { background: var(--accent); }
   .pip.active { background: var(--accent); opacity: 0.55; }
   .phase-names { margin-top: 9px; display: flex; justify-content: space-between;
                  color: var(--faint); font-size: 11.5px; }
 
-  .note { margin-top: 30px; color: var(--faint); font-size: 12.5px; line-height: 1.55; }
+  .note { margin-top: 24px; color: var(--faint); font-size: 12.5px; line-height: 1.55; }
 
   /* Finished */
   #done { display: none; }
@@ -94,7 +93,7 @@
   }
   button:hover { filter: brightness(1.08); }
 
-  #error { display: none; margin-top: 26px; padding: 14px 16px; border-radius: 9px;
+  #error { display: none; margin-top: 20px; padding: 14px 16px; border-radius: 9px;
            border: 1px solid #d9534f; color: #d9534f; font-size: 13.5px;
            white-space: pre-wrap; max-height: 240px; overflow: auto; user-select: text; }
   #error.show { display: block; }
@@ -103,8 +102,7 @@
 <main>
   <div id="setup">
     <div class="head">
-      <img id="icon" alt="" hidden>
-      <div class="fallback" id="fallback">AI</div>
+      <div class="mark" aria-hidden="true">AI</div>
       <div>
         <h1>Setting up AI Scaler Toolkit</h1>
         <p class="sub">One-time setup. The GPU runtime is downloaded now rather than bundled.</p>
@@ -136,7 +134,7 @@
         <p class="sub" id="done-sub"></p>
       </div>
     </div>
-    <button id="open" type="button">Open AI Scaler Toolkit</button>
+    <p class="note" style="margin-top:18px">Opening the interface…</p>
   </div>
 
   <div id="error"></div>
@@ -157,14 +155,6 @@
     if (document.getElementById("done").classList.contains("show")) { return; }
     el.textContent = clock(Math.floor((Date.now() - startedAt) / 1000)) + " elapsed";
   }, 1000);
-
-  window.setIcon = function (dataUri) {
-    if (!dataUri) { return; }
-    var img = document.getElementById("icon");
-    img.src = dataUri;
-    img.hidden = false;
-    document.getElementById("fallback").remove();
-  };
 
   window.setPhases = function (items) {
     keys = items.map(function (i) { return i.key; });
@@ -207,10 +197,7 @@
     }
   };
 
-  var appUrl = "";
-
-  window.showDone = function (summary, url) {
-    appUrl = url || "";
+  window.showDone = function (summary) {
     document.getElementById("setup").style.display = "none";
     document.getElementById("done-sub").textContent = summary || "";
     document.getElementById("done").classList.add("show");
@@ -222,16 +209,4 @@
     box.classList.add("show");
   };
 
-  document.getElementById("open").addEventListener("click", function () {
-    this.disabled = true;
-    this.textContent = "Opening…";
-    // The launcher navigates this window itself, which keeps the transition in one
-    // place. Navigating directly is the fallback: after a nine-minute wait, a button
-    // that does nothing because a bridge was not ready is not an acceptable outcome.
-    if (window.pywebview && window.pywebview.api && window.pywebview.api.open_app) {
-      window.pywebview.api.open_app();
-    } else if (appUrl) {
-      window.location.href = appUrl;
-    }
-  });
 </script>

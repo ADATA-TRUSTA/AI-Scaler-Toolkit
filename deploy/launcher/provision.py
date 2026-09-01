@@ -188,6 +188,8 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase) -> str:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            # Otherwise a PowerShell console sits open for the whole install.
+            creationflags=config.subprocess_flags(),
         )
         assert process.stdout is not None
         for raw in process.stdout:
