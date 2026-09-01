@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# AppImage entry point.
+#
+# WebKitGTK is deliberately not bundled. It is large, and a bundled copy conflicts with
+# the system one often enough that shipping it causes more breakage than depending on
+# it does -- so this checks for it and says what to install instead of failing with a
+# Python traceback about a missing GObject library.
+
+set -euo pipefail
+
+HERE="$(dirname "$(readlink -f "${0}")")"
+APP_ID="ai-scaler-toolkit"
+APP_ROOT="$HERE/usr/share/$APP_ID"
+
+export PATH="$HERE/usr/bin:$PATH"
+export PYTHONPATH="$APP_ROOT:${PYTHONPATH:-}"
+
+have_webkitgtk() {
+  local dir
+  for dir in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu; do
+    [[ -d "$dir" ]] || continue
+    compgen -G "$dir/libwebkit2gtk-*.so*" >/dev/null && return 0
+  done
+  return 1
+}
+
+if ! have_webkitgtk; then
+  # The exact package name differs per distribution, so name the common ones rather
+  # than guessing one and being wrong.
+  cat >&2 <<'MSG'
+AI Scaler Toolkit needs WebKitGTK to draw its window, and it is not installed.
+
+  Debian / Ubuntu   sudo apt install libwebkit2gtk-4.1-0
+  Fedora            sudo dnf install webkit2gtk4.1
+  Arch              sudo pacman -S webkit2gtk-4.1
+  openSUSE          sudo zypper install libwebkit2gtk-4_1-0
+
+It is not bundled on purpose: a bundled copy conflicts with the system one more
+often than the dependency itself causes trouble.
+MSG
+  exit 1
+fi
+
+# uv bootstraps its own Python, so the AppImage does not carry an interpreter and does
+# not depend on the host having a suitable one.
+if ! command -v uv >/dev/null 2>&1; then
+  cat >&2 <<'MSG'
+AI Scaler Toolkit needs uv to create its environment on first run.
+
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+It installs into your home directory and needs no administrator rights.
+MSG
+  exit 1
+fi
+
+cd "$APP_ROOT"
+exec uv run --no-project python -m launcher "$@"

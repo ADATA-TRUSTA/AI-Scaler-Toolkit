@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=AI Scaler Toolkit
+GenericName=LLM fine-tuning and inference
+Comment=Fine-tune and serve language models locally
+Exec=AppRun %U
+Icon=ai-scaler-toolkit
+Terminal=false
+Categories=Development;Science;Utility;
+Keywords=LLM;AI;fine-tuning;inference;GPU;
+StartupWMClass=ai-scaler-toolkit

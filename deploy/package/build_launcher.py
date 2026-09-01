@@ -1,0 +1,119 @@
+"""Turn the launcher into something the installer can create a shortcut to.
+
+A shortcut has to point at an executable with an icon and no console window, so the
+launcher is frozen rather than shipped as scripts. Only the launcher is frozen -- the
+backend stays a normal uv project, because its environment is built on the user's
+machine against their accelerator and cannot be prebuilt here.
+
+requirements.txt is exported alongside as the record of what went in. It is generated
+from the lock file, never hand-written, so the frozen build and the lock cannot
+disagree about a version.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+DEPLOY_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = DEPLOY_DIR.parent
+EXE_NAME = "AIScalerToolkit"
+
+# Bundled as data because they are read at runtime by path, and PyInstaller's import
+# analysis cannot see either of them.
+DATA = (
+    ("launcher/ui", "launcher/ui"),
+    ("launcher/components", "launcher/components"),
+)
+
+
+def run(*args: str, cwd: Path) -> None:
+    print(f"[launcher] $ {' '.join(args)}")
+    proc = subprocess.run(args, cwd=cwd)
+    if proc.returncode != 0:
+        raise SystemExit(f"command failed with exit {proc.returncode}: {' '.join(args)}")
+
+
+def export_requirements(out: Path) -> None:
+    """Record the resolved dependency set. `uv export` reads uv.lock, so this cannot
+    drift from what was actually installed."""
+    result = subprocess.run(
+        ["uv", "export", "--no-dev", "--no-hashes", "--format", "requirements-txt"],
+        cwd=DEPLOY_DIR,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"uv export failed:\n{result.stderr.strip()}")
+    out.write_text(result.stdout, encoding="utf-8")
+    print(f"[launcher] wrote {out} ({len(result.stdout.splitlines())} lines)")
+
+
+def find_icon() -> Path | None:
+    """Use the icon from whichever frontend package was assembled, so the executable
+    carries the brand that actually shipped."""
+    for package in ("dist_client", "dist"):
+        directory = REPO_ROOT / "frontend" / package
+        if not directory.is_dir():
+            continue
+        icon = next(iter(sorted(directory.glob("*.ico"))), None)
+        if icon:
+            return icon
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", default=str(DEPLOY_DIR / "build" / "launcher"),
+                        help="where to put the built executable")
+    parser.add_argument("--icon", default="", help="override the icon file")
+    args = parser.parse_args()
+
+    out_dir = Path(args.out).resolve()
+    work_dir = out_dir / "work"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    export_requirements(DEPLOY_DIR / "launcher" / "requirements.txt")
+
+    icon = Path(args.icon) if args.icon else find_icon()
+    if icon and not icon.is_file():
+        raise SystemExit(f"icon not found: {icon}")
+    if not icon:
+        print("[launcher] no .ico found in the assembled frontend; building without one")
+
+    separator = ";" if sys.platform == "win32" else ":"
+    command = [
+        "uv", "run", "--", "pyinstaller",
+        "--name", EXE_NAME,
+        "--onedir",  # onefile unpacks to a temp directory on every launch; this is a tray app that starts at login
+        "--noconsole",
+        "--noconfirm",
+        "--clean",
+        "--distpath", str(out_dir),
+        "--workpath", str(work_dir),
+        "--specpath", str(work_dir),
+    ]
+    if icon:
+        command += ["--icon", str(icon)]
+    for source, dest in DATA:
+        command += ["--add-data", f"{DEPLOY_DIR / source}{separator}{dest}"]
+    # launcher_main.py, not launcher/__main__.py: freezing the latter runs it outside
+    # its package and breaks every relative import.
+    command += [str(DEPLOY_DIR / "launcher_main.py")]
+
+    run(*command, cwd=DEPLOY_DIR)
+
+    built = out_dir / EXE_NAME
+    exe = built / (f"{EXE_NAME}.exe" if sys.platform == "win32" else EXE_NAME)
+    if not exe.is_file():
+        raise SystemExit(f"PyInstaller reported success but {exe} is missing")
+
+    print(f"[launcher] built {exe} ({exe.stat().st_size / 1024 / 1024:.1f} MB)")
+    print(f"[launcher] pass --launcher-dir {built} to make_payload.py")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

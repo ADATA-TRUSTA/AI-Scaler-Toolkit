@@ -55,3 +55,14 @@ logs/
 
 # GitHub metrics archive (published to gh-pages by CI, not tracked on code branches)
 data/metrics/
+
+# Build output. Anchored to the repo root on purpose: frontend/dist and
+# frontend/dist_client are assembled content and must stay tracked, so a bare `dist/`
+# here would quietly stop assembly from adding files to them.
+/payload*/
+/dist/
+/dist-unsigned/
+/frontend-dist/
+/sources/
+/ci-tools/
+/deploy/build/
