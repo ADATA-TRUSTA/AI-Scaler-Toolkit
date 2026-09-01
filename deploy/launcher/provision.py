@@ -18,7 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,8 +40,11 @@ class Phase:
 # Display order. setup_env fetches the conversion tools before the llama runtime on
 # Windows and the other way round on Linux, so the interface tracks which phases have
 # been *seen* rather than assuming this order holds.
+#
+# "detect" is not here. It finishes in well under a second -- it is a check for
+# nvidia-smi -- so as a step it only ever appeared already complete, which reads as
+# one that was skipped.
 PHASES: tuple[Phase, ...] = (
-    Phase("detect", "Detecting your GPU"),
     Phase("sync", "Installing Python packages"),
     Phase("xpu", "Checking the GPU can compute"),
     Phase("convert", "Fetching conversion tools"),
@@ -49,11 +52,25 @@ PHASES: tuple[Phase, ...] = (
     Phase("done", "Finishing up"),
 )
 
+# Phases that only happen on some accelerators. Showing one that will not run leaves
+# a permanent gap in the middle of the row, which looks like something broke rather
+# than like a step that does not apply here.
+ACCELERATOR_ONLY: dict[str, str] = {"xpu": "xpu"}
+
+ACCEL_MARKER = re.compile(r"^accelerator=(?P<accel>\S+)")
+
+
+def phases_for(accelerator: str) -> tuple[Phase, ...]:
+    """The steps this machine will actually take."""
+    return tuple(
+        phase for phase in PHASES
+        if phase.key not in ACCELERATOR_ONLY or ACCELERATOR_ONLY[phase.key] == accelerator
+    )
+
 # Substrings of setup_env's own output, in the order it emits them. Matching on its
 # messages keeps this readable, and a message it stops printing shows up as a phase
 # that never advances rather than as a crash.
 PHASE_HINTS: tuple[tuple[str, str], ...] = (
-    ("accelerator=", "detect"),
     ("uv sync", "sync"),
     ("verifying the XPU install", "xpu"),
     ("skipping the XPU check", "convert"),
@@ -135,7 +152,8 @@ def build_env() -> dict[str, str]:
 
 def run(on_line: Callable[[str], None] | None = None,
         on_phase: Callable[[str, str], None] | None = None,
-        on_progress: Callable[[progress.Progress], None] | None = None) -> str:
+        on_progress: Callable[[progress.Progress], None] | None = None,
+        on_phases: Callable[[tuple[Phase, ...]], None] | None = None) -> str:
     """Run provisioning to completion. Returns the accelerator setup_env settled on.
 
     Raises RuntimeError with the tail of the output if it fails; the full log is kept
@@ -165,13 +183,13 @@ def run(on_line: Callable[[str], None] | None = None,
     meter = progress.Meter(on_progress) if on_progress else None
 
     try:
-        return _run_setup(command, environment, log_path, meter, on_line, on_phase)
+        return _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phases)
     finally:
         if meter:
             meter.close()
 
 
-def _run_setup(command, environment, log_path, meter, on_line, on_phase) -> str:
+def _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phases=None) -> str:
     seen_phase: str | None = None
     accelerator = ""
     tail: list[str] = []
@@ -209,6 +227,15 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase) -> str:
             if not marker:
                 continue
             message = marker.group("message")
+
+            # The accelerator is the first thing setup_env prints, which is early
+            # enough to publish a step list with the steps this machine will skip
+            # already left out.
+            accel_line = ACCEL_MARKER.match(message)
+            if accel_line and on_phases:
+                accelerator = accel_line.group("accel")
+                on_phases(phases_for(accelerator))
+
             phase = phase_for(message)
             if phase and phase != seen_phase:
                 seen_phase = phase
@@ -244,10 +271,6 @@ def is_provisioned() -> bool:
     if not state.get("provisioned"):
         return False
     return (config.venv_dir() / ("Scripts" if config.IS_WINDOWS else "bin")).is_dir()
-
-
-def iter_phases() -> Iterator[Phase]:
-    return iter(PHASES)
 
 
 if __name__ == "__main__":

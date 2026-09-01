@@ -199,10 +199,15 @@ class Launcher:
     def reload_window(self) -> None:
         if self.window is None:
             return
+        compact = self._starts_compact()
+        # Asked for in the URL, because the page cannot tell a window from a browser
+        # tab any other way -- and config.json, being per-deployment, describes both.
+        url = config.interface_url(self.service.port, compact=compact)
         # Sized before the page loads rather than after, so the interface does not
         # appear at the setup window's size and then jump.
-        self.set_window_size(COMPACT_SIZE if self._starts_compact() else EXPANDED_SIZE)
-        self.window.load_url(config.service_url(self.service.port))
+        self.set_window_size(COMPACT_SIZE if compact else EXPANDED_SIZE)
+        log.info("loading %s", url)
+        self.window.load_url(url)
 
     def _starts_compact(self) -> bool:
         """What the packaged config.json asks for. The interface may be toggled away
@@ -226,12 +231,11 @@ class Launcher:
     def open_in_browser(self) -> None:
         """The full interface, in the system browser.
 
-        The ?ui=full marker matters. config.json asks for the collapsed view because
-        that is right for the desktop window, and the page has no other way to tell
-        the two apart -- without it, "open the full interface" would open the narrow
-        one and offer a button to expand it, which is absurd in a browser tab.
+        No marker needed: only ?ui=compact collapses the view, and only the desktop
+        window ever asks for that. A browser gets the full interface by default, which
+        is the only thing that makes sense in a browser tab.
         """
-        webbrowser.open(config.service_url(self.service.port) + "/?ui=full")
+        webbrowser.open(config.service_url(self.service.port))
 
     def open_settings(self) -> None:
         """Open the settings window, or raise the one already open.
@@ -285,6 +289,18 @@ class Launcher:
             f"window.setProgress({_js_string(name)}, {value}, {_js_string(detail)}, {elapsed})"
         )
 
+    def _publish_phases(self, phases) -> None:
+        """Send the step list once, with the steps this machine will skip left out.
+
+        A phase that never runs would otherwise sit uncoloured in the middle of the
+        row for the whole install, which reads as something broken rather than as a
+        check that does not apply to this hardware.
+        """
+        items = [{"key": phase.key, "label": phase.label} for phase in phases]
+        log.info("bootstrap: %d steps apply here (%s)", len(items),
+                 ", ".join(item["key"] for item in items))
+        self._js(f"window.setPhases({_js_json(items)})")
+
     def _report_progress(self, update: progress.Progress) -> None:
         self._set_step(update.label, update.fraction, update.detail, update.elapsed)
 
@@ -326,10 +342,8 @@ class Launcher:
             started_at = time.monotonic()
 
             if not provisioned:
-                phases = [{"key": p.key, "label": p.label} for p in provision.iter_phases()]
-                log.info("bootstrap: sending %d phases to the page", len(phases))
-                self._js(f"window.setPhases({_js_json(phases)})")
-
+                # The step list is published by provisioning itself, once it knows the
+                # accelerator -- see _publish_phases.
                 log.info("bootstrap: resolving the service port")
                 port = service_manager.resolve_first_run_port(self._choose_port)
                 state.set("service_port", port)
@@ -345,6 +359,7 @@ class Launcher:
                 provision.run(
                     on_phase=lambda key, _label: self._js(f"window.setPhase({_js_string(key)})"),
                     on_progress=self._report_progress,
+                    on_phases=self._publish_phases,
                 )
 
             log.info("bootstrap: starting the service")

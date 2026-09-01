@@ -185,3 +185,15 @@ def autostart_target() -> Path:
 
 def service_url(port: int) -> str:
     return f"http://{SERVICE_HOST}:{port}"
+
+
+def interface_url(port: int, *, compact: bool = False) -> str:
+    """The interface itself, not the root that redirects to it.
+
+    The backend answers / with a redirect to /frontend/, and that redirect drops the
+    query string -- so a request for /?ui=compact arrives as /frontend/ with nothing
+    attached, and the page renders as though it had been asked for the full view.
+    Addressing the real path avoids depending on a redirect to carry anything.
+    """
+    url = f"{service_url(port)}/frontend/"
+    return url + "?ui=compact" if compact else url
