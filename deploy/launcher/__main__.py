@@ -334,6 +334,8 @@ class Launcher:
                 self._js(
                     "window.showDone("
                     + _js_string(f"Ready in {spent}, using {accelerator}.")
+                    + ", "
+                    + _js_string(config.service_url(self.service.port))
                     + ")"
                 )
             log.info("bootstrap: done")

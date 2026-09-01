@@ -37,12 +37,15 @@ class Phase:
     label: str
 
 
+# Display order. setup_env fetches the conversion tools before the llama runtime on
+# Windows and the other way round on Linux, so the interface tracks which phases have
+# been *seen* rather than assuming this order holds.
 PHASES: tuple[Phase, ...] = (
     Phase("detect", "Detecting your GPU"),
     Phase("sync", "Installing Python packages"),
     Phase("xpu", "Checking the GPU can compute"),
-    Phase("llama", "Downloading the GPU runtime"),
     Phase("convert", "Fetching conversion tools"),
+    Phase("llama", "Downloading the GPU runtime"),
     Phase("done", "Finishing up"),
 )
 
@@ -53,16 +56,27 @@ PHASE_HINTS: tuple[tuple[str, str], ...] = (
     ("accelerator=", "detect"),
     ("uv sync", "sync"),
     ("verifying the XPU install", "xpu"),
-    ("skipping the XPU check", "llama"),
-    ("llama backend=", "llama"),
-    ("downloading the official install", "llama"),
-    ("llama installed", "convert"),
-    ("llama binary already present", "convert"),
-    ("skipping llama", "convert"),
+    ("skipping the XPU check", "convert"),
+    # Conversion tooling: resolving the pinned commit is the first thing it prints.
+    ("resolves to", "convert"),
     ("sparse checkout of the convert tooling", "convert"),
     ("fetching the convert scripts", "convert"),
-    ("convert tooling ready", "done"),
-    ("convert tooling already present", "done"),
+    # Conversion tooling finished, so the runtime is next. Matching the *end* of one
+    # phase to the start of the next is what keeps the display honest when a phase is
+    # skipped entirely.
+    ("convert tooling ready", "llama"),
+    ("convert tooling already present", "llama"),
+    ("torch ships", "llama"),
+    ("publishes llama-", "llama"),
+    ("downloading llama-", "llama"),
+    ("downloading the official install", "llama"),
+    ("llama backend=", "llama"),
+    # Runtime in place; all that is left is recording where it went.
+    ("installed:", "done"),
+    ("llama binary already present", "done"),
+    ("skipping llama", "done"),
+    ("recorded LLAMA_SERVER_BINARY", "done"),
+    ("llama install failed", "done"),
 )
 
 

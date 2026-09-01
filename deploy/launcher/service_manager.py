@@ -133,11 +133,25 @@ class ServiceManager:
         if not python.is_file():
             raise RuntimeError(f"Python environment not found at {config.venv_dir()}; setup has not run.")
 
+        # Every start, not just the first. A reinstall, an upgrade over the top, or
+        # anyone deleting the file leaves the backend reading .env.example instead --
+        # which does not fall back to code defaults, it applies the example's values.
+        written = env_file.ensure(self.port)
+        if written:
+            log.info("restored missing .env keys: %s", ", ".join(written))
+
         env = {
             **env_file.read_keys(env_file.env_path()),
             "PYTHONPATH": str(config.backend_dir()),
             "HF_HOME": str(config.hf_home()),
             "LOG_DIR": str(config.log_dir()),
+            # Passed explicitly, and last, so the file cannot move the service off the
+            # port we are about to poll. That is not hypothetical: a rebuilt payload
+            # lost its .env, the backend fell back to the example's port 8000, and the
+            # launcher waited on 8571 for a service that was running perfectly well
+            # somewhere else.
+            "SERVICE_HOST": config.SERVICE_HOST,
+            "SERVICE_PORT": str(self.port),
         }
         import os
 

@@ -175,11 +175,17 @@
       items.length ? items[items.length - 1].label : "";
   };
 
+  // Which phases have been reached, rather than how far along a fixed list we are.
+  // setup_env fetches the conversion tools before the runtime on Windows and after it
+  // on Linux, so marking "everything before this one" would light the wrong pips.
+  var seen = {};
+
   window.setPhase = function (key) {
-    var at = keys.indexOf(key);
+    seen[key] = true;
     var pips = document.getElementById("phases").querySelectorAll(".pip");
     for (var n = 0; n < pips.length; n++) {
-      pips[n].className = "pip" + (n < at ? " done" : n === at ? " active" : "");
+      var k = keys[n];
+      pips[n].className = "pip" + (k === key ? " active" : seen[k] ? " done" : "");
     }
   };
 
@@ -201,7 +207,10 @@
     }
   };
 
-  window.showDone = function (summary) {
+  var appUrl = "";
+
+  window.showDone = function (summary, url) {
+    appUrl = url || "";
     document.getElementById("setup").style.display = "none";
     document.getElementById("done-sub").textContent = summary || "";
     document.getElementById("done").classList.add("show");
@@ -216,9 +225,13 @@
   document.getElementById("open").addEventListener("click", function () {
     this.disabled = true;
     this.textContent = "Opening…";
-    // Handled by the launcher, which navigates this window to the interface.
+    // The launcher navigates this window itself, which keeps the transition in one
+    // place. Navigating directly is the fallback: after a nine-minute wait, a button
+    // that does nothing because a bridge was not ready is not an acceptable outcome.
     if (window.pywebview && window.pywebview.api && window.pywebview.api.open_app) {
       window.pywebview.api.open_app();
+    } else if (appUrl) {
+      window.location.href = appUrl;
     }
   });
 </script>
