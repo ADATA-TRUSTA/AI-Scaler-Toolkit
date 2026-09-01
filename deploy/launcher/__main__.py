@@ -11,13 +11,17 @@ the callable passed to webview.start().
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import sys
 import threading
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from . import (
+    applog,
     autostart,
     component_manager,
     config,
@@ -30,6 +34,8 @@ from . import (
 )
 
 UI_DIR = config.resource_root() / "launcher" / "ui"
+
+log = applog.get("main")
 
 
 def _icon_path() -> Path | None:
@@ -49,6 +55,51 @@ def _icon_path() -> Path | None:
         for icon in sorted(directory.glob("*.ico")):
             return icon
     return None
+
+
+class LineBuffer:
+    """Collect provisioning output and push it to the page in batches.
+
+    evaluate_js is a blocking round-trip to the webview -- the first one has to wait
+    for the page to finish loading, and every one after that still costs a hop. uv sync
+    emits thousands of lines, so pushing one at a time makes the window unresponsive
+    for the whole install, which looks exactly like a hang and is nearly as bad.
+    """
+
+    def __init__(self, flush: Callable[[str], None], interval: float = 0.3) -> None:
+        self._flush = flush
+        self._interval = interval
+        self._lines: list[str] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="log-flush", daemon=True)
+        self._thread.start()
+
+    def add(self, line: str) -> None:
+        with self._lock:
+            self._lines.append(line)
+            # Bound the buffer: a burst should not turn into one enormous evaluate_js.
+            if len(self._lines) > 500:
+                del self._lines[:-500]
+
+    def _drain(self) -> None:
+        with self._lock:
+            if not self._lines:
+                return
+            batch = self._lines
+            self._lines = []
+        # Losing progress text must never stop provisioning.
+        with contextlib.suppress(Exception):
+            self._flush("\n".join(batch))
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._interval):
+            self._drain()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._drain()
 
 
 class SettingsApi:
@@ -141,10 +192,8 @@ class Launcher:
         """Push a UI update, tolerating a window that is mid-navigation or gone."""
         if self.window is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             self.window.evaluate_js(script)
-        except Exception:
-            pass
 
     def reload_window(self) -> None:
         if self.window is not None:
@@ -219,15 +268,21 @@ class Launcher:
     def bootstrap(self) -> None:
         """Everything between launch and a usable window. Runs off the main thread."""
         try:
+            log.info("bootstrap: preflight")
             report = preflight.run()
             if not report.ok:
                 self._report_blocking(report)
                 return
 
-            if not provision.is_provisioned():
+            provisioned = provision.is_provisioned()
+            log.info("bootstrap: already provisioned = %s", provisioned)
+
+            if not provisioned:
                 phases = [{"key": p.key, "label": p.label} for p in provision.iter_phases()]
+                log.info("bootstrap: sending %d phases to the page", len(phases))
                 self._js(f"window.setPhases({_js_json(phases)})")
 
+                log.info("bootstrap: resolving the service port")
                 port = service_manager.resolve_first_run_port(self._choose_port)
                 state.set("service_port", port)
                 env_file.ensure(port)
@@ -235,17 +290,27 @@ class Launcher:
                     # The frontend's address is baked in at packaging time, so a
                     # non-default port has to be written there too or the UI loads and
                     # then cannot reach the backend.
+                    log.info("bootstrap: rewriting the frontend config for port %s", port)
                     service_manager.set_port(port)
 
-                provision.run(
-                    on_line=lambda line: self._js(f"window.appendLog({_js_string(line)})"),
-                    on_phase=lambda key, _label: self._js(f"window.setPhase({_js_string(key)})"),
-                )
+                buffer = LineBuffer(lambda text: self._js(f"window.appendLog({_js_string(text)})"))
+                try:
+                    log.info("bootstrap: handing over to provisioning")
+                    provision.run(
+                        on_line=buffer.add,
+                        on_phase=lambda key, _label: self._js(f"window.setPhase({_js_string(key)})"),
+                    )
+                finally:
+                    buffer.close()
 
+            log.info("bootstrap: starting the service")
             self.service.start()
+            log.info("bootstrap: loading the interface")
             self.reload_window()
+            log.info("bootstrap: done")
 
         except Exception as exc:
+            log.exception("bootstrap failed")
             self._js(f"window.showError({_js_string(str(exc))})")
 
     # ------------------------------------------------------------------ tray
@@ -301,10 +366,8 @@ class Launcher:
             if self.tray is not None:
                 self.tray.stop()
             if self.window is not None:
-                try:
+                with contextlib.suppress(Exception):
                     self.window.destroy()
-                except Exception:
-                    pass
 
 
 def _js_string(value: str) -> str:
@@ -319,7 +382,78 @@ def _js_json(value: Any) -> str:
     return json.dumps(value)
 
 
-def main() -> int:
+def diagnose() -> int:
+    """Walk the startup sequence without opening a window, and say what it found.
+
+    A windowed build has no console and a hang leaves nothing behind, so this exists to
+    answer "where did it stop" from a terminal -- and to be runnable on a user's machine
+    when the application itself will not start.
+
+    It stops short of actually provisioning: it reports the command it would run.
+    """
+    applog.banner()
+    print(f"log file: {applog.log_path()}\n")
+
+    print("-- preflight " + "-" * 55)
+    report = preflight.run()
+    print(preflight.describe(report.checks))
+    print("verdict:", "ready" if report.ok else
+          "BLOCKED by " + ", ".join(c.label for c in report.blocking))
+
+    print("\n-- state " + "-" * 59)
+    for key, value in sorted(state.load().items()):
+        print(f"  {key:<18} {value}")
+    print(f"  {'is_provisioned()':<18} {provision.is_provisioned()}")
+
+    print("\n-- ports " + "-" * 59)
+    port = state.service_port()
+    print(f"  configured         {port}")
+    print(f"  status             {service_manager.probe(port)}")
+    print(f"  venv python        {service_manager.venv_python()} "
+          f"({'present' if service_manager.venv_python().is_file() else 'absent'})")
+
+    print("\n-- .env " + "-" * 60)
+    env_path = env_file.env_path()
+    print(f"  path               {env_path} ({'exists' if env_path.is_file() else 'missing'})")
+    existing = env_file.read_keys(env_path)
+    for key, value in sorted(env_file.desired(port).items()):
+        mark = "set" if key in existing else "WOULD ADD"
+        print(f"  {key:<18} {mark:<10} {existing.get(key, value)}")
+
+    print("\n-- provisioning " + "-" * 52)
+    try:
+        command = provision.build_command()
+        print(f"  command            {' '.join(command)}")
+        print(f"  cwd                {config.backend_dir()}")
+        environment = provision.build_env()
+        for key in ("UV_PROJECT_ENVIRONMENT", "HF_HOME"):
+            print(f"  {key:<18} {environment.get(key)}")
+        print(f"  disk free          {provision.disk_free_gb(config.data_dir()):.1f} GB")
+    except Exception as exc:
+        print(f"  WOULD FAIL: {exc}")
+
+    print("\n-- window resources " + "-" * 48)
+    for name in ("progress.html", "settings.html"):
+        path = UI_DIR / name
+        print(f"  {name:<18} {'ok' if path.is_file() else 'MISSING'}  {path}")
+    icon = _icon_path()
+    print(f"  {'icon':<18} {icon or 'none found'}")
+
+    print("\nnothing was installed or started.")
+    return 0 if report.ok else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="launcher", description=__doc__)
+    parser.add_argument("--diagnose", action="store_true",
+                        help="report what startup would do, without a window and without installing")
+    args = parser.parse_args(argv)
+
+    if args.diagnose:
+        return diagnose()
+
+    applog.banner()
+
     import webview
 
     launcher = Launcher()
@@ -337,14 +471,16 @@ def main() -> int:
     # a daemon: if the window loop ends unexpectedly the process must still exit.
     threading.Thread(target=launcher.tray.run, name="tray", daemon=True).start()
 
+    log.info("tray started")
+
     if state.get("autostart") and not autostart.is_enabled():
         # Default-on has to be applied once, on the first run that owns the setting.
-        try:
+        with contextlib.suppress(Exception):
             autostart.enable()
-        except Exception:
-            pass
 
+    log.info("entering the window loop")
     webview.start(launcher.bootstrap, debug=False)
+    log.info("window loop ended; exiting")
     return 0
 
 

@@ -22,7 +22,9 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, env_file, state
+from . import applog, config, env_file, state
+
+log = applog.get("provision")
 
 MARKER = re.compile(r"^\[setup_env\]\s*(?P<message>.*)$")
 ACCEL_SUMMARY = re.compile(r"^\s*Accelerator\s*:\s*(?P<accel>\S+)")
@@ -92,6 +94,7 @@ def check_disk() -> None:
 
 def build_command() -> list[str]:
     script = config.setup_env_script()
+    log.info("setup_env script: %s (exists: %s)", script, script.is_file())
     if not script.is_file():
         raise RuntimeError(f"provisioning script not found: {script}")
     if config.IS_WINDOWS:
@@ -119,26 +122,37 @@ def run(on_line: Callable[[str], None] | None = None,
     Raises RuntimeError with the tail of the output if it fails; the full log is kept
     on disk either way, because "provisioning failed" with no detail is unactionable.
     """
+    log.info("provisioning requested")
+
+    free = disk_free_gb(config.data_dir())
+    log.info("disk free at %s: %.1f GB (need %s GB)", config.data_dir(), free, config.MIN_FREE_DISK_GB)
     check_disk()
 
     port = state.service_port()
     written = env_file.ensure(port)
-    if written:
-        print(f"[provision] wrote {', '.join(written)} to {env_file.env_path()}")
+    log.info("env keys written: %s", ", ".join(written) if written else "none needed")
 
     config.log_dir().mkdir(parents=True, exist_ok=True)
     log_path = config.log_dir() / "provision.log"
 
     command = build_command()
+    environment = build_env()
+    log.info("command    : %s", " ".join(command))
+    log.info("cwd        : %s", config.backend_dir())
+    log.info("UV_PROJECT_ENVIRONMENT=%s", environment.get("UV_PROJECT_ENVIRONMENT"))
+    log.info("HF_HOME=%s", environment.get("HF_HOME"))
+    log.info("output goes to %s", log_path)
+
     seen_phase: str | None = None
     accelerator = ""
     tail: list[str] = []
 
-    with log_path.open("w", encoding="utf-8") as log:
+    with log_path.open("w", encoding="utf-8") as log_file:
+        log.info("starting setup_env")
         process = subprocess.Popen(
             command,
             cwd=config.backend_dir(),  # setup_env resolves the project root from its own location
-            env=build_env(),
+            env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -149,7 +163,8 @@ def run(on_line: Callable[[str], None] | None = None,
         assert process.stdout is not None
         for raw in process.stdout:
             line = raw.rstrip("\n")
-            log.write(line + "\n")
+            log_file.write(line + "\n")
+            log_file.flush()  # so the log is readable while a long install is still running
             tail.append(line)
             del tail[:-40]
             if on_line:
@@ -166,11 +181,13 @@ def run(on_line: Callable[[str], None] | None = None,
             phase = phase_for(message)
             if phase and phase != seen_phase:
                 seen_phase = phase
+                log.info("phase -> %s", phase)
                 if on_phase:
                     label = next((p.label for p in PHASES if p.key == phase), phase)
                     on_phase(phase, label)
 
         code = process.wait()
+    log.info("setup_env exited with %s", code)
 
     if code != 0:
         raise RuntimeError(
@@ -184,6 +201,7 @@ def run(on_line: Callable[[str], None] | None = None,
         raise RuntimeError(f"Provisioning ended without reporting completion. Full log: {log_path}")
 
     state.save({"provisioned": True, "accelerator": accelerator or None})
+    log.info("provisioning complete, accelerator=%s", accelerator or "unknown")
     return accelerator
 
 

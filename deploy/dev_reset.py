@@ -93,7 +93,8 @@ def show_status() -> None:
     print(f"accelerator      : {stored['accelerator'] or '-'}")
     print(f"service port     : {stored['service_port']}")
     print(f"autostart        : {'on' if autostart.is_enabled() else 'off'}")
-    print(f"venv             : {config.venv_dir()} {'(present)' if config.venv_dir().is_dir() else '(absent)'}")
+    print(f"venv             : {config.venv_dir()} "
+          f"{'(present)' if config.venv_dir().is_dir() else '(absent)'}")
     print(f"llama            : {config.llama_binary()} "
           f"{'(present)' if config.llama_binary().exists() else '(absent)'}")
     print(f"convert tooling  : {config.gguf_tools_dir()} "
@@ -102,7 +103,8 @@ def show_status() -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--purge", action="store_true", help="remove provisioning output and launcher state")
     parser.add_argument("--keep-model-cache", action="store_true",
                         help="leave HF_HOME alone (tens of GB, and irrelevant to which setup path runs)")

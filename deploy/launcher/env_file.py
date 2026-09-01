@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import config
+from . import applog, config
+
+log = applog.get("env")
 
 
 def env_path() -> Path:
@@ -61,6 +63,8 @@ def ensure(port: int) -> list[str]:
     existing = read_keys(path)
 
     added = {k: v for k, v in desired(port).items() if k not in existing}
+    log.info("%s: %d existing keys, adding %s", path, len(existing),
+             ", ".join(sorted(added)) if added else "nothing")
     if not added:
         return []
 

@@ -17,6 +17,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import layout  # noqa: E402
+
 DEPLOY_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = DEPLOY_DIR.parent
 EXE_NAME = "AIScalerToolkit"
@@ -51,11 +55,6 @@ def export_requirements(out: Path) -> None:
     print(f"[launcher] wrote {out} ({len(result.stdout.splitlines())} lines)")
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import layout  # noqa: E402
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default=str(DEPLOY_DIR / "build" / "launcher"),
@@ -81,7 +80,8 @@ def main() -> int:
     command = [
         "uv", "run", "--", "pyinstaller",
         "--name", EXE_NAME,
-        "--onedir",  # onefile unpacks to a temp directory on every launch; this is a tray app that starts at login
+        # onefile unpacks to a temp directory on every launch, and this one starts at login
+        "--onedir",
         "--noconsole",
         "--noconfirm",
         "--clean",

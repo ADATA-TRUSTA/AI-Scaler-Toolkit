@@ -18,7 +18,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import config
+from . import applog, config
+
+log = applog.get("preflight")
 
 
 @dataclass
@@ -73,7 +75,8 @@ def check_git() -> Check:
         ok=_on_path("git"),
         required=True,
         detail="Needed by setup during installation, not just by developers.",
-        remedy="https://git-scm.com/download/win" if config.IS_WINDOWS else "install git with your package manager",
+        remedy="https://git-scm.com/download/win" if config.IS_WINDOWS
+        else "install git with your package manager",
         fixer="winget" if config.IS_WINDOWS else "",
     )
 
@@ -120,7 +123,7 @@ def check_vulkan() -> Check:
     """The Intel path uses the Vulkan build of llama; the runtime normally arrives with
     the Intel driver."""
     if config.IS_WINDOWS:
-        found = (Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "vulkan-1.dll").is_file()
+        found = (Path(os.environ.get("SYSTEMROOT", "C:/Windows")) / "System32" / "vulkan-1.dll").is_file()
     else:
         found = _on_path("vulkaninfo")
     return Check("vulkan", "Vulkan runtime", ok=found, required=False,
@@ -141,8 +144,8 @@ def check_webkitgtk() -> Check:
     if config.IS_WINDOWS:
         return Check("webkitgtk", "WebKitGTK", ok=True, required=False,
                      detail="Not used on this platform.")
-    found = any(Path(d).glob("libwebkit2gtk-*.so*") for d in ("/usr/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu")
-                if Path(d).is_dir())
+    candidates = ("/usr/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu")
+    found = any(Path(d).glob("libwebkit2gtk-*.so*") for d in candidates if Path(d).is_dir())
     return Check("webkitgtk", "WebKitGTK", ok=found, required=True,
                  detail="Renders the application window on Linux.",
                  remedy="install your distribution's webkit2gtk package")
@@ -170,15 +173,23 @@ CHECKS = (
 
 
 def run() -> Report:
+    log.info("running %d checks", len(CHECKS))
     report = Report()
     for check in CHECKS:
         try:
-            report.checks.append(check())
+            result = check()
+            log.info("%-14s %-9s %s", result.key,
+                     "ok" if result.ok else ("BLOCKING" if result.required else "missing"),
+                     result.detail)
+            report.checks.append(result)
         except Exception as exc:  # a probe failing is not the same as the thing missing
+            log.warning("%s could not be checked: %s", check.__name__, exc)
             report.checks.append(
                 Check(check.__name__, check.__name__, ok=True, required=False,
                       detail=f"could not be checked: {exc}")
             )
+    log.info("preflight %s", "passed" if report.ok else
+             "BLOCKED by " + ", ".join(c.key for c in report.blocking))
     return report
 
 

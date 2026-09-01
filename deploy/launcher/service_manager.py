@@ -21,7 +21,9 @@ import urllib.request
 from pathlib import Path
 from typing import Literal
 
-from . import config, env_file, state
+from . import applog, config, env_file, state
+
+log = applog.get("service")
 
 PortStatus = Literal["free", "ours", "foreign"]
 
@@ -81,14 +83,16 @@ class ServiceManager:
     def is_running(self) -> bool:
         return self.status() == "ours"
 
-    def start(self, wait_sec: int = 120) -> None:
+    def start(self, wait_sec: int = 120) -> None:  # noqa: D401
         """Start the service, or adopt one that is already answering.
 
         Adoption is the common case after an unclean shutdown, and it is safe: the
         fingerprint check has already established that what is on the port is ours.
         """
         status = self.status()
+        log.info("start requested on port %s, current status: %s", self.port, status)
         if status == "ours":
+            log.info("a healthy service is already there; adopting it")
             return
         if status == "foreign":
             raise RuntimeError(
@@ -111,6 +115,7 @@ class ServiceManager:
         merged = os.environ.copy()
         merged.update({k: v for k, v in env.items() if v})
 
+        log.info("spawning %s -m service.app (cwd=%s)", python, config.backend_dir())
         creation = subprocess.CREATE_NO_WINDOW if config.IS_WINDOWS else 0
         self._process = subprocess.Popen(
             [str(python), "-m", "service.app"],
@@ -173,7 +178,7 @@ def set_port(port: int) -> None:
     config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def resolve_first_run_port(prompt) -> int:
+def resolve_first_run_port(prompt) -> int:  # noqa: D401
     """Settle on a port before .env is written.
 
     prompt(requested, suggested) -> int is called only when the default is taken, and
@@ -181,8 +186,10 @@ def resolve_first_run_port(prompt) -> int:
     """
     default = config.DEFAULT_SERVICE_PORT
     if is_port_free(default):
+        log.info("port %s is free; using it", default)
         return default
     suggested = next_free_port(default + 1)
+    log.warning("port %s is taken; asking whether to use %s instead", default, suggested)
     chosen = int(prompt(default, suggested))
     if not is_port_free(chosen):
         raise RuntimeError(f"Port {chosen} is also in use.")
