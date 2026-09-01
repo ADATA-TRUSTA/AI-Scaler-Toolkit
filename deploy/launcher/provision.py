@@ -1,0 +1,208 @@
+"""First-run provisioning: call the backend's setup_env and show what it is doing.
+
+This module deliberately does very little. setup_env already detects the accelerator,
+runs uv sync with the right extras, verifies an XPU install by actually computing on
+it, installs the pinned llama binaries, fetches the GGUF conversion tooling and records
+LLAMA_SERVER_BINARY. Reimplementing any of that here would mean maintaining a second
+copy that drifts from the backend's within a release or two.
+
+So the job is: write the .env keys the launcher owns, run the script, stream its output
+to the progress window, and translate its `[setup_env]` lines into something coarse
+enough for a person to read.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import config, env_file, state
+
+MARKER = re.compile(r"^\[setup_env\]\s*(?P<message>.*)$")
+ACCEL_SUMMARY = re.compile(r"^\s*Accelerator\s*:\s*(?P<accel>\S+)")
+SUCCESS = "Environment setup complete"
+
+
+@dataclass(frozen=True)
+class Phase:
+    key: str
+    label: str
+
+
+PHASES: tuple[Phase, ...] = (
+    Phase("detect", "Detecting the accelerator"),
+    Phase("sync", "Installing Python packages (several GB, this is the long one)"),
+    Phase("xpu", "Verifying the GPU can actually compute"),
+    Phase("llama", "Installing the llama runtime"),
+    Phase("convert", "Fetching the GGUF conversion tools"),
+    Phase("done", "Finishing up"),
+)
+
+# Substrings of setup_env's own output, in the order it emits them. Matching on its
+# messages keeps this readable, and a message it stops printing shows up as a phase
+# that never advances rather than as a crash.
+PHASE_HINTS: tuple[tuple[str, str], ...] = (
+    ("accelerator=", "detect"),
+    ("uv sync", "sync"),
+    ("verifying the XPU install", "xpu"),
+    ("skipping the XPU check", "llama"),
+    ("llama backend=", "llama"),
+    ("downloading the official install", "llama"),
+    ("llama installed", "convert"),
+    ("llama binary already present", "convert"),
+    ("skipping llama", "convert"),
+    ("sparse checkout of the convert tooling", "convert"),
+    ("fetching the convert scripts", "convert"),
+    ("convert tooling ready", "done"),
+    ("convert tooling already present", "done"),
+)
+
+
+def phase_for(message: str) -> str | None:
+    lowered = message.lower()
+    for hint, key in PHASE_HINTS:
+        if hint.lower() in lowered:
+            return key
+    return None
+
+
+def disk_free_gb(path: Path) -> float:
+    target = path
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    return shutil.disk_usage(target).free / (1024**3)
+
+
+def check_disk() -> None:
+    """Stop before starting rather than halfway through a multi-gigabyte download."""
+    free = disk_free_gb(config.data_dir())
+    if free < config.MIN_FREE_DISK_GB:
+        raise RuntimeError(
+            f"Only {free:.1f} GB free where the environment is installed; "
+            f"at least {config.MIN_FREE_DISK_GB} GB is needed "
+            "(virtual environment ~3.7 GB, GPU runtime ~2.7 GB, llama a few hundred MB)."
+        )
+
+
+def build_command() -> list[str]:
+    script = config.setup_env_script()
+    if not script.is_file():
+        raise RuntimeError(f"provisioning script not found: {script}")
+    if config.IS_WINDOWS:
+        return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    return ["bash", str(script)]
+
+
+def build_env() -> dict[str, str]:
+    env = os.environ.copy()
+    # uv would otherwise create .venv inside the payload directory. Keeping it in the
+    # per-user data directory means a reinstall does not re-download it and the program
+    # directory does not grow by gigabytes after setup.
+    env["UV_PROJECT_ENVIRONMENT"] = str(config.venv_dir())
+    env["HF_HOME"] = str(config.hf_home())
+    # Every default that setup_env exposes is left alone. It picks better than a guess
+    # here would: cuda when nvidia-smi answers, xpu otherwise, and it proves an XPU
+    # install by running a real GEMM plus a training step before declaring success.
+    return env
+
+
+def run(on_line: Callable[[str], None] | None = None,
+        on_phase: Callable[[str, str], None] | None = None) -> str:
+    """Run provisioning to completion. Returns the accelerator setup_env settled on.
+
+    Raises RuntimeError with the tail of the output if it fails; the full log is kept
+    on disk either way, because "provisioning failed" with no detail is unactionable.
+    """
+    check_disk()
+
+    port = state.service_port()
+    written = env_file.ensure(port)
+    if written:
+        print(f"[provision] wrote {', '.join(written)} to {env_file.env_path()}")
+
+    config.log_dir().mkdir(parents=True, exist_ok=True)
+    log_path = config.log_dir() / "provision.log"
+
+    command = build_command()
+    seen_phase: str | None = None
+    accelerator = ""
+    tail: list[str] = []
+
+    with log_path.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            command,
+            cwd=config.backend_dir(),  # setup_env resolves the project root from its own location
+            env=build_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for raw in process.stdout:
+            line = raw.rstrip("\n")
+            log.write(line + "\n")
+            tail.append(line)
+            del tail[:-40]
+            if on_line:
+                on_line(line)
+
+            summary = ACCEL_SUMMARY.match(line)
+            if summary:
+                accelerator = summary.group("accel")
+
+            marker = MARKER.match(line)
+            if not marker:
+                continue
+            message = marker.group("message")
+            phase = phase_for(message)
+            if phase and phase != seen_phase:
+                seen_phase = phase
+                if on_phase:
+                    label = next((p.label for p in PHASES if p.key == phase), phase)
+                    on_phase(phase, label)
+
+        code = process.wait()
+
+    if code != 0:
+        raise RuntimeError(
+            f"Provisioning failed (exit {code}). Full log: {log_path}\n\n" + "\n".join(tail[-15:])
+        )
+
+    if not any(SUCCESS in line for line in tail):
+        # An exit code of zero without the completion banner means the script ended
+        # somewhere unexpected. Treating that as success is how a half-provisioned
+        # install reaches a user.
+        raise RuntimeError(f"Provisioning ended without reporting completion. Full log: {log_path}")
+
+    state.save({"provisioned": True, "accelerator": accelerator or None})
+    return accelerator
+
+
+def is_provisioned() -> bool:
+    """Trust the recorded flag, but only alongside the artefacts it claims exist."""
+    if not state.get("provisioned"):
+        return False
+    return (config.venv_dir() / ("Scripts" if config.IS_WINDOWS else "bin")).is_dir()
+
+
+def iter_phases() -> Iterator[Phase]:
+    return iter(PHASES)
+
+
+if __name__ == "__main__":
+    try:
+        accel = run(on_line=lambda line: print(line, flush=True),
+                    on_phase=lambda _key, label: print(f"== {label}", flush=True))
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
+    print(f"provisioned, accelerator={accel or 'unknown'}")

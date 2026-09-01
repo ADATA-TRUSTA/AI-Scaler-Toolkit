@@ -1,0 +1,167 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Settings</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg:#ffffff; --fg:#16181d; --muted:#5b6270; --line:#e3e6ec; --accent:#2f6fed; --card:#f6f7f9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --fg:#e8eaee; --muted:#9aa1ae; --line:#2a2e36; --accent:#5b8dff; --card:#1b1e24; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:26px 30px; background:var(--bg); color:var(--fg);
+         font:14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1 { margin:0 0 20px; font-size:18px; font-weight:600; }
+  h2 { margin:26px 0 10px; font-size:12px; font-weight:600; text-transform:uppercase;
+       letter-spacing:.06em; color:var(--muted); }
+  .row { display:flex; align-items:flex-start; justify-content:space-between; gap:16px;
+         padding:12px 0; border-bottom:1px solid var(--line); }
+  .row:last-of-type { border-bottom:0; }
+  .label { font-weight:550; }
+  .hint { color:var(--muted); font-size:13px; margin-top:3px; }
+  input[type=number] { width:110px; padding:6px 8px; border:1px solid var(--line);
+                       border-radius:6px; background:var(--bg); color:var(--fg); font:inherit; }
+  button { padding:6px 12px; border:1px solid var(--line); border-radius:6px;
+           background:var(--card); color:var(--fg); font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
+          padding:14px 16px; margin-bottom:10px; }
+  .card-head { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+  .badge { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid var(--line);
+           color:var(--muted); }
+  code { display:block; margin:8px 0; padding:8px 10px; background:var(--bg);
+         border:1px solid var(--line); border-radius:6px;
+         font:12px/1.5 ui-monospace, Consolas, monospace; word-break:break-all; }
+  .note { color:var(--muted); font-size:13px; margin-top:8px; }
+  #saved { color:var(--accent); font-size:13px; margin-left:10px; opacity:0; transition:opacity .2s; }
+  #saved.show { opacity:1; }
+</style>
+
+<h1>Settings</h1>
+
+<div class="row">
+  <div>
+    <div class="label" id="autostart-label">Start with Windows</div>
+    <div class="hint">The service is available as soon as you log in.</div>
+  </div>
+  <label><input type="checkbox" id="autostart"></label>
+</div>
+
+<div class="row">
+  <div>
+    <div class="label">Service port</div>
+    <div class="hint">Applying this restarts the service and updates the interface's address at the same time.</div>
+  </div>
+  <div>
+    <input type="number" id="port" min="1024" max="65535">
+    <button class="primary" id="save-port">Apply</button>
+    <span id="saved">saved</span>
+  </div>
+</div>
+
+<h2>Optional components</h2>
+<div id="components"></div>
+<p class="note">You install these yourself, not this application &mdash; so what is shown is what was found on this machine.</p>
+
+<h2>Updates</h2>
+<div class="row">
+  <div>
+    <div class="label" id="version">&mdash;</div>
+    <div class="hint" id="update-hint">Checks the public releases page.</div>
+  </div>
+  <button id="check-update">Check now</button>
+</div>
+
+<script>
+  var api = window.pywebview.api;
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function componentCard(c) {
+    var html = '<div class="card"><div class="card-head"><strong>' + escapeHtml(c.name) +
+      '</strong><span class="badge">' + (c.installed ? 'installed' : 'not installed') +
+      '</span></div><div class="hint">' + escapeHtml(c.description) + '</div>';
+    if (c.command) {
+      html += '<code>' + escapeHtml(c.command) + '</code>' +
+        '<button data-copy="' + encodeURIComponent(c.command) + '">Copy command</button>';
+    }
+    if (c.url) {
+      html += '<div style="margin-top:8px"><button data-open="' + escapeHtml(c.url) +
+        '">Open download page</button></div>';
+    }
+    if (c.note) { html += '<div class="note">' + escapeHtml(c.note) + '</div>'; }
+    return html + '</div>';
+  }
+
+  function render() {
+    api.get_state().then(function (state) {
+      document.getElementById('autostart').checked = state.autostart;
+      document.getElementById('port').value = state.service_port;
+      document.getElementById('version').textContent =
+        'Installed version ' + (state.installed_version || 'unknown');
+      if (state.platform !== 'win32') {
+        document.getElementById('autostart-label').textContent = 'Start on login';
+      }
+    });
+
+    api.components().then(function (list) {
+      document.getElementById('components').innerHTML = list.map(componentCard).join('');
+    });
+  }
+
+  document.addEventListener('click', function (event) {
+    var copy = event.target.dataset.copy;
+    if (copy) {
+      navigator.clipboard.writeText(decodeURIComponent(copy));
+      event.target.textContent = 'Copied';
+      setTimeout(function () { event.target.textContent = 'Copy command'; }, 1500);
+    }
+    if (event.target.dataset.open) { api.open_url(event.target.dataset.open); }
+  });
+
+  document.getElementById('autostart').addEventListener('change', function (event) {
+    api.set_autostart(event.target.checked);
+  });
+
+  document.getElementById('save-port').addEventListener('click', function (event) {
+    var button = event.target;
+    button.disabled = true;
+    api.set_port(parseInt(document.getElementById('port').value, 10)).then(function (result) {
+      button.disabled = false;
+      if (result.ok) {
+        var saved = document.getElementById('saved');
+        saved.classList.add('show');
+        setTimeout(function () { saved.classList.remove('show'); }, 1600);
+      } else {
+        alert(result.error);
+      }
+    });
+  });
+
+  document.getElementById('check-update').addEventListener('click', function (event) {
+    var button = event.target;
+    button.disabled = true;
+    button.textContent = 'Checking...';
+    api.check_update().then(function (status) {
+      button.disabled = false;
+      button.textContent = 'Check now';
+      var hint = document.getElementById('update-hint');
+      if (status.latest === null) {
+        hint.textContent = 'Could not reach the releases page.';
+      } else if (status.available) {
+        hint.textContent = 'Version ' + status.latest + ' is available.';
+        api.open_release_page();
+      } else {
+        hint.textContent = 'This is the newest release.';
+      }
+    });
+  });
+
+  render();
+</script>

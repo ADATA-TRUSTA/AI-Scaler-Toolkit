@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Setting up</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #16181d; --muted: #5b6270;
+    --line: #e3e6ec; --accent: #2f6fed; --log-bg: #f6f7f9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --fg:#e8eaee; --muted:#9aa1ae; --line:#2a2e36; --accent:#5b8dff; --log-bg:#1b1e24; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:28px 32px; background:var(--bg); color:var(--fg);
+         font:14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h1 { margin:0 0 4px; font-size:19px; font-weight:600; }
+  p.sub { margin:0 0 22px; color:var(--muted); }
+  ol { list-style:none; margin:0 0 20px; padding:0; }
+  li { display:flex; align-items:center; gap:10px; padding:5px 0; color:var(--muted); }
+  li .dot { width:8px; height:8px; border-radius:50%; background:var(--line); flex:none; }
+  li.active { color:var(--fg); font-weight:550; }
+  li.active .dot { background:var(--accent); }
+  li.done { color:var(--fg); }
+  li.done .dot { background:var(--accent); }
+  #log { height:190px; overflow:auto; background:var(--log-bg); border:1px solid var(--line);
+         border-radius:8px; padding:10px 12px; font:12px/1.5 ui-monospace, Consolas, monospace;
+         white-space:pre-wrap; word-break:break-word; color:var(--muted); }
+  #error { display:none; margin-top:16px; padding:12px 14px; border-radius:8px;
+           border:1px solid #d9534f; color:#d9534f; white-space:pre-wrap; }
+</style>
+
+<h1>Setting up AI Scaler Toolkit</h1>
+<p class="sub">First run only. The GPU runtime is downloaded now rather than bundled, so this takes a while.</p>
+
+<ol id="phases"></ol>
+<div id="log"></div>
+<div id="error"></div>
+
+<script>
+  var phasesEl = document.getElementById('phases');
+  var logEl = document.getElementById('log');
+  var keys = [];
+
+  window.setPhases = function (items) {
+    keys = items.map(function (i) { return i.key; });
+    var html = '';
+    for (var n = 0; n < items.length; n++) {
+      html += '<li><span class="dot"></span><span>' + items[n].label + '</span></li>';
+    }
+    phasesEl.innerHTML = html;
+  };
+
+  window.setPhase = function (key) {
+    var at = keys.indexOf(key);
+    var items = phasesEl.querySelectorAll('li');
+    for (var n = 0; n < items.length; n++) {
+      items[n].className = n < at ? 'done' : (n === at ? 'active' : '');
+    }
+  };
+
+  window.appendLog = function (line) {
+    // Keep the node count bounded: provisioning emits thousands of lines.
+    if (logEl.childNodes.length > 400) { logEl.removeChild(logEl.firstChild); }
+    logEl.appendChild(document.createTextNode(line + '\n'));
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+
+  window.showError = function (message) {
+    var box = document.getElementById('error');
+    box.textContent = message;
+    box.style.display = 'block';
+  };
+</script>
