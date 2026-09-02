@@ -37,6 +37,69 @@ def is_enabled() -> bool:
     return config.autostart_target().is_file()
 
 
+def recorded_command() -> str | None:
+    """What the autostart entry launches today, or None if there is no entry."""
+    if config.IS_WINDOWS:
+        proc = subprocess.run(
+            ["reg", "query", rf"HKCU\{RUN_KEY}", "/v", RUN_VALUE],
+            capture_output=True, text=True, creationflags=config.subprocess_flags(),
+        )
+        if proc.returncode != 0:
+            return None
+        for line in proc.stdout.splitlines():
+            if RUN_VALUE in line and "REG_SZ" in line:
+                return line.split("REG_SZ", 1)[1].strip()
+        return None
+
+    target = config.autostart_target()
+    if not target.is_file():
+        return None
+    for line in target.read_text(encoding="utf-8").splitlines():
+        if line.startswith("Exec="):
+            return line[len("Exec="):].strip()
+    return None
+
+
+def _executable_in(command: str) -> Path | None:
+    """The program a recorded autostart command runs, quoted or not."""
+    command = command.strip()
+    if command.startswith('"'):
+        end = command.find('"', 1)
+        if end == -1:
+            return None
+        return Path(command[1:end])
+    first = command.split(" ", 1)[0]
+    return Path(first) if first else None
+
+
+def refresh() -> bool:
+    """Repoint the autostart entry when what it names is gone.
+
+    The entry records an absolute path, and the application moves: a reinstall into a
+    different directory, an upgrade, a developer build replaced by a real install. The
+    old entry then names a path that no longer exists, and the failure mode is the
+    quietest one there is -- nothing starts at login, forever, with no error anywhere.
+    Found on a machine where it had already happened, naming a build directory that
+    had since been renamed.
+
+    Only when the recorded program is missing, never merely when it differs from this
+    one. Two working copies can exist -- a release install and a checkout being worked
+    on -- and whichever ran last should not get to claim the login entry from the other.
+
+    Returns True if the entry was rewritten.
+    """
+    if not is_enabled():
+        return False
+    current = recorded_command()
+    if current is None:
+        return False
+    program = _executable_in(current)
+    if program is not None and program.exists():
+        return False
+    enable()
+    return True
+
+
 def enable() -> None:
     if config.IS_WINDOWS:
         subprocess.run(

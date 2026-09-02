@@ -17,6 +17,7 @@ import argparse
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -65,6 +66,59 @@ def rewrite_config(config_path: Path, port: int) -> None:
     print(f"[payload] config.json: apiBaseUrl=http://127.0.0.1:{port}, hideChatPanel=true")
 
 
+def running_from(payload: Path) -> str:
+    """Name a process running out of this payload, or "" if none is obvious.
+
+    Only for the error message. Deciding whether the payload can be replaced is the
+    rename's job below, because this cannot see every holder: the backend service runs
+    from an interpreter installed elsewhere and merely has its working directory inside
+    the payload, which is enough to lock it and invisible to a scan of executable paths.
+    """
+    if sys.platform != "win32":
+        return ""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath } | "
+             "Select-Object -ExpandProperty ExecutablePath"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    target = str(payload).lower()
+    for line in result.stdout.splitlines():
+        path = line.strip()
+        if path and path.lower().startswith(target):
+            return path
+    return ""
+
+
+def clear_payload(payload: Path) -> None:
+    """Move the old payload aside, then delete it.
+
+    Deleting in place is what went wrong twice: a locked file stops the walk partway
+    and leaves a directory that still looks like a payload, passes a glance, and fails
+    every assertion afterwards. A rename either succeeds completely or changes nothing,
+    so a payload that cannot be replaced is left exactly as it was.
+
+    It also catches holders a process scan cannot see -- anything with a working
+    directory or an open file inside, not just something running the executable.
+    """
+    parked = payload.with_name(f"{payload.name}.old-{int(time.time())}")
+    try:
+        payload.rename(parked)
+    except OSError as exc:
+        culprit = running_from(payload)
+        raise SystemExit(
+            f"[payload] {payload} cannot be replaced: {exc}\n"
+            + (f"[payload] {culprit} is running from it.\n" if culprit else "")
+            + "[payload] Close the application and stop its backend service, then try "
+              "again. Nothing has been deleted."
+        )
+    layout.force_rmtree(parked)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=sorted(BRAND_BY_PLATFORM), required=True)
@@ -80,7 +134,7 @@ def main() -> int:
     source = Path(args.source).resolve()
     payload = Path(args.out).resolve()
     if payload.exists():
-        layout.force_rmtree(payload)
+        clear_payload(payload)
     payload.mkdir(parents=True)
 
     package, brand = BRAND_BY_PLATFORM[args.platform]

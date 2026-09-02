@@ -656,7 +656,21 @@ class Launcher:
     # ------------------------------------------------------------------ exit
 
     def quit(self) -> None:
-        """The only path that stops the service."""
+        """The only path that stops the service.
+
+        A component install is asked about first, and the reason is a real casualty:
+        an install interrupted partway left a third-party tool with a virtual
+        environment and no packages in it -- broken, and reporting itself as present.
+        Its installer is a child of this process reading from a pipe we own, so this
+        process going away is enough to abort it mid-write.
+
+        Closing the settings window is safe; the install runs here, not there. Quitting
+        is what takes it down, so quitting is what asks.
+        """
+        job = components.current_job()
+        if job and job["running"] and not self._confirm_quit_during_install(job["id"]):
+            log.info("quit cancelled: %s is still installing", job["id"])
+            return
         self._quitting.set()
         try:
             self.service.stop()
@@ -666,6 +680,25 @@ class Launcher:
             if self.window is not None:
                 with contextlib.suppress(Exception):
                     self.window.destroy()
+
+    def _confirm_quit_during_install(self, component_id: str) -> bool:
+        """Ask before abandoning an install. Defaults to quitting if we cannot ask."""
+        import webview
+
+        name = components.BY_ID[component_id].name if component_id in components.BY_ID \
+            else component_id
+        target = self.settings_window or self.window
+        if target is None:
+            return True
+        try:
+            return bool(target.create_confirmation_dialog(
+                f"{name} is still installing",
+                f"Quitting now interrupts the {name} installer, which can leave it "
+                "half-installed.\n\nOK: quit anyway.\nCancel: leave it running.",
+            ))
+        except Exception:
+            log.exception("could not ask about quitting mid-install")
+            return True
 
 
 def _js_string(value: str) -> str:
@@ -797,6 +830,14 @@ def main(argv: list[str] | None = None) -> int:
         # Default-on has to be applied once, on the first run that owns the setting.
         with contextlib.suppress(Exception):
             autostart.enable()
+    else:
+        # An existing entry records an absolute path, and this executable moves --
+        # a reinstall to a different directory, an upgrade, a developer build
+        # replaced by a real one. Checked on every start because the entry going
+        # stale produces no error at all: nothing launches at login, silently.
+        with contextlib.suppress(Exception):
+            if autostart.refresh():
+                log.info("autostart pointed at another copy; repointed it here")
 
     log.info("entering the window loop")
     try:
