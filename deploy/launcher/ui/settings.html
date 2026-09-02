@@ -125,6 +125,9 @@
   .badge.off { background: color-mix(in srgb, var(--faint) 18%, transparent); color: var(--muted); }
   .component .desc { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
   .component .note { color: var(--faint); font-size: 12.5px; margin-top: 8px; }
+  /* What "Installed" leaves out. Coloured only when it is something to act on. */
+  .component .detail { font-size: 13px; margin-top: 8px; color: var(--muted); }
+  .component .detail.act { color: var(--warn); }
   .component .where {
     font-size: 12px; color: var(--faint); margin-top: 8px;
     font-family: ui-monospace, Consolas, monospace; word-break: break-all;
@@ -404,6 +407,8 @@
           "</div>" +
           '<div class="desc">' + escapeHtml(c.description) + "</div>" +
           '<div class="note">' + escapeHtml(c.note) + "</div>" +
+          (c.detail ? '<div class="detail' + (c.detail_settled ? "" : " act") + '">' +
+                      escapeHtml(c.detail) + "</div>" : "") +
           (c.location ? '<div class="where">' + escapeHtml(c.location) + "</div>" : "") +
           '<div class="component-actions">' + action +
             '<button class="link" data-page="' + escapeHtml(c.page) + '">Vendor page</button>' +

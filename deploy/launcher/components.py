@@ -192,6 +192,14 @@ class Progress:
         """We are saying this."""
         self._job.record(text, ours=True)
 
+    def tail(self, lines: int) -> list[str]:
+        """The installer's recent output, for deciding what to do about a failure.
+
+        Its own output only -- see the class docstring for what reading our narration
+        back cost the last time.
+        """
+        return self._job.installer_lines()[-lines:]
+
 
 def _decode(raw: bytes) -> str:
     """Decode a line of installer output without guessing wrong silently.
@@ -281,20 +289,149 @@ def _download(url: str, target: Path, out: Progress) -> bool:
     return True
 
 
+def _hermes_desktop_exe(root: Path) -> Path | None:
+    """The windowed application, which is a separate build from the command line tool."""
+    release = root / "hermes-agent" / "apps" / "desktop" / "release"
+    return _first_existing(release / "win-unpacked" / "Hermes.exe",
+                           release / "win-arm64-unpacked" / "Hermes.exe")
+
+
+def _hermes_home() -> Path:
+    """Where Hermes actually is, preferring the disk over any environment variable.
+
+    The process copy of HERMES_HOME is the least reliable answer available: it was
+    captured when this application started, and an install that moved Hermes since
+    then updated the persistent variable, which running processes never see. Taking it
+    at face value pointed at the previous location, which is how this was found.
+    """
+    located = detect_hermes()
+    if located:
+        home = Path(located).parent.parent
+        if (home / "hermes-agent").is_dir() or (home / "bin").is_dir():
+            return home
+    for candidate in (_user_environment("HERMES_HOME"), os.environ.get("HERMES_HOME")):
+        if candidate:
+            return Path(candidate)
+    return _local_appdata() / "hermes"
+
+
+def _default_install_home() -> Path:
+    """Where the vendor's script will put Hermes if we do not tell it otherwise.
+
+    Deliberately not _hermes_home(): that answers "where is it", by looking at the
+    disk, and the two are different questions. Deciding whether an install is heading
+    somewhere that cannot work has to use the destination the script will pick, which
+    is its own default -- HERMES_HOME as the child process will inherit it, else
+    %LOCALAPPDATA%\\hermes. Using the disk answer here meant the retry never fired
+    when an existing install already sat somewhere that works.
+    """
+    inherited = os.environ.get("HERMES_HOME")
+    return Path(inherited) if inherited else _local_appdata() / "hermes"
+
+
+def _under_appdata(path: Path) -> bool:
+    appdata = Path.home() / "AppData"
+    try:
+        path.resolve().relative_to(appdata.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+# The symptom of a machine that vetoes directory renames under AppData. uv extracts a
+# managed Python to a temporary directory and renames it into place; where the rename
+# is blocked, uv reports the *target* as missing, which is true and useless.
+_APPDATA_RENAME_VETO = (
+    "missing expected target directory for python minor version link",
+    "python 3.11 not available",
+)
+
+
+def _run_hermes_installer(script: Path, out: Progress, log_name: str,
+                          home: Path | None) -> int:
+    """Run the vendor's script from a file so its own switches can be passed.
+
+    -IncludeDesktop is the reason. Without it the script installs the command line
+    tool and stops: the windowed application is opt-in upstream, and its build step is
+    also what creates the Start Menu and desktop shortcuts. Piping the script into
+    Invoke-Expression, as the documented one-liner does, cannot pass a switch at all.
+    """
+    prelude = "$ProgressPreference = 'SilentlyContinue'; "
+    invocation = f"& {_ps_string(str(script))} -IncludeDesktop"
+    if home is not None:
+        # The environment variable, and the parameter as well.
+        #
+        # -HermesHome alone does not work: the script's Python stage recomputes its
+        # install directory from %LOCALAPPDATA% and ignores the parameter, so a retry
+        # that passed only -HermesHome went straight back to the location that cannot
+        # work. The environment variable is what was observed to work by hand, and
+        # observation beats the tidier-looking option.
+        prelude += f"$env:HERMES_HOME = {_ps_string(str(home))}; "
+        invocation += f" -HermesHome {_ps_string(str(home))}"
+    command = [
+        "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-Command", prelude + invocation,
+    ]
+    return _stream(command, out, log_name)
+
+
+def _ps_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def install_hermes(out: Progress) -> bool:
-    if sys.platform == "win32":
-        command = [
-            "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-            "-Command",
-            "$ProgressPreference = 'SilentlyContinue'; "
-            f"Invoke-RestMethod {HERMES_PS1} | Invoke-Expression",
-        ]
-    else:
-        command = ["bash", "-c", f"curl -fsSL {HERMES_SH} | bash"]
-    code = _stream(command, out, "install-hermes.log")
+    if sys.platform != "win32":
+        code = _stream(["bash", "-c", f"curl -fsSL {HERMES_SH} | bash"], out,
+                       "install-hermes.log")
+        if code != 0:
+            out.note(f"The installer exited with code {code}.")
+        return code == 0
+
+    script = Path(tempfile.gettempdir()) / "hermes-install.ps1"
+    if not _download(HERMES_PS1, script, out):
+        return False
+
+    out.note("Installing the command line tool and building the desktop application. "
+             "The desktop build is a separate step and takes several minutes.")
+    code = _run_hermes_installer(script, out, "install-hermes.log", home=None)
     if code != 0:
         out.note(f"The installer exited with code {code}.")
-    return code == 0
+
+    # Judged by what is on disk, never by the exit code. This installer prints
+    # "[X] Installation failed" and then exits 0, so a retry gated on the exit code
+    # never fires and a success gated on it is a coin toss. The exit code is reported
+    # above, for the reader, and decides nothing.
+    #
+    # One retry, and only for the failure with a known cause and a known cure: the
+    # default location is inside AppData, and on a machine that vetoes directory
+    # renames there the install cannot complete wherever else it is tried. Retrying
+    # blindly would fail twice and take twice as long.
+    if _hermes_desktop_exe(_hermes_home()) is None and _under_appdata(_default_install_home()):
+        tail = "\n".join(out.tail(80)).lower()
+        if any(marker in tail for marker in _APPDATA_RENAME_VETO):
+            fallback = Path.home() / "hermes"
+            out.note(
+                "That failed while installing its own Python, in a way that means this "
+                f"machine will not allow it under {Path.home() / 'AppData'}. Retrying "
+                f"in {fallback}, which is outside it."
+            )
+            retry = _run_hermes_installer(script, out, "install-hermes-retry.log",
+                                          home=fallback)
+            if retry != 0:
+                out.note(f"The retry exited with code {retry}.")
+
+    # Both halves have to be there. The command line tool with no window is not what
+    # was asked for, and the script reports success having built only the first.
+    desktop = _hermes_desktop_exe(_hermes_home())
+    if desktop is None:
+        if detect_hermes() is None:
+            out.note("Hermes did not install.")
+        else:
+            out.note("The command line tool installed, but the desktop application was "
+                     "not built. Run `hermes desktop` to build it.")
+        return False
+    out.note(f"Desktop application built: {desktop}")
+    return True
 
 
 def install_comfyui(out: Progress) -> bool:
@@ -325,6 +462,13 @@ def explain_hermes(log_tail: str) -> str | None:
     opaque otherwise: the installer prints a path and no instruction. Diagnosing it
     once took a day; recognising it costs one string match.
     """
+    if any(marker in log_tail for marker in _APPDATA_RENAME_VETO):
+        return ("Hermes could not install its own Python. On this machine a directory "
+                f"cannot be moved into place anywhere under {Path.home() / 'AppData'}, "
+                "which is where it installs by default, and its installer reports that "
+                "as a missing directory. Installing it outside AppData works: "
+                f"`$env:HERMES_HOME='{Path.home() / 'hermes'}'` before running the "
+                "vendor's script.")
     if "venv" in log_tail and ("could not move" in log_tail or "access is denied" in log_tail
                                or "拒絕存取" in log_tail):
         return ("Hermes could not replace its existing Python environment. Delete "
@@ -332,6 +476,18 @@ def explain_hermes(log_tail: str) -> str | None:
                 "environment present the installer creates a fresh one instead of "
                 "trying to rename the old one.")
     return None
+
+
+def describe_hermes() -> tuple[str, bool]:
+    """Say whether the windowed application is there, not just the command line tool.
+
+    Returns (text, settled) -- settled False marks something the reader should act on,
+    so the page can colour it without knowing what any of it means.
+    """
+    if _hermes_desktop_exe(_hermes_home()) is not None:
+        return "Desktop application built.", True
+    return ("Command line tool only — the desktop application is not built. "
+            "Reinstall to build it.", False)
 
 
 @dataclass(frozen=True)
@@ -348,6 +504,11 @@ class Component:
     # rather than in a shared if-chain keyed on id means the knowledge sits with the
     # thing it is about, and adding a component cannot break another one's advice.
     explain: Callable[[str], str | None] | None = None
+    # Anything about an installed copy worth saying on the card. "Installed" is one
+    # bit, and one bit was not enough for Hermes: the command line tool and the
+    # windowed application are separate builds, and a card reading "Installed" beside
+    # a missing desktop application is the kind of half-truth this file keeps fixing.
+    describe: Callable[[], tuple[str, bool]] | None = None
 
 
 CATALOGUE: tuple[Component, ...] = (
@@ -361,6 +522,7 @@ CATALOGUE: tuple[Component, ...] = (
         detect=detect_hermes,
         install=install_hermes,
         explain=explain_hermes,
+        describe=describe_hermes,
     ),
     Component(
         id="comfyui",
@@ -531,6 +693,12 @@ def listing() -> list[dict]:
         except Exception:
             log.exception("detecting %s failed", component.id)
             located = None
+        detail, detail_settled = "", True
+        if located is not None and component.describe is not None:
+            try:
+                detail, detail_settled = component.describe()
+            except Exception:
+                log.exception("describing %s failed", component.id)
         out.append({
             "id": component.id,
             "name": component.name,
@@ -538,6 +706,8 @@ def listing() -> list[dict]:
             "note": component.note,
             "page": component.page,
             "installed": located is not None,
+            "detail": detail,
+            "detail_settled": detail_settled,
             "location": located or "",
             "available": not (component.windows_only and sys.platform != "win32"),
             "busy": busy == component.id,
