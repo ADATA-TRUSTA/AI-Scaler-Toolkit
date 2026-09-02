@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import layout  # noqa: E402
+import make_icon  # noqa: E402
 
 DEPLOY_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = DEPLOY_DIR.parent
@@ -70,11 +71,13 @@ def main() -> int:
 
     export_requirements(DEPLOY_DIR / "launcher" / "requirements.txt")
 
-    icon = Path(args.icon) if args.icon else layout.find_icon(Path(args.source).resolve())
-    if icon and not icon.is_file():
+    # The same icon the payload ships, so the executable, its shortcut and the tray
+    # cannot disagree about which mark this build wears.
+    icon = Path(args.icon).resolve() if args.icon else make_icon.build(
+        layout.ICON_BRAND, out_dir / f"{layout.ICON_BRAND}.ico"
+    )
+    if not icon.is_file():
         raise SystemExit(f"icon not found: {icon}")
-    if not icon:
-        print("[launcher] no .ico found in the assembled frontend; building without one")
 
     separator = ";" if sys.platform == "win32" else ":"
     command = [

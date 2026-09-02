@@ -10,7 +10,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import make_icon  # noqa: E402
 
 EXPECTED = {
     "windows": {
@@ -79,6 +84,22 @@ def main() -> int:
         failures.append(f"payload has neither {exe} nor launcher sources")
     elif not (root / exe).is_file():
         failures.append(f"payload ships launcher sources but no {exe}; run build_launcher.py first")
+
+    icon = root / "app.ico"
+    if not icon.is_file():
+        failures.append("payload has no app.ico")
+    else:
+        sizes = make_icon.ico_sizes(icon)
+        # Windows draws the desktop shortcut at 48 and Explorer's largest view at 256.
+        # An icon missing those is upscaled from whatever is nearest, which is exactly
+        # how a 16x16 favicon shipped as the application icon and nothing objected.
+        missing = [s for s in (16, 32, 48, 256) if s not in sizes]
+        if missing:
+            failures.append(
+                f"app.ico is missing the {', '.join(str(s) for s in missing)}px "
+                f"entr{'y' if len(missing) == 1 else 'ies'} (has {sizes}); it would be "
+                "upscaled wherever Windows asks for one"
+            )
 
     if failures:
         print("[assert-payload] FAILED")

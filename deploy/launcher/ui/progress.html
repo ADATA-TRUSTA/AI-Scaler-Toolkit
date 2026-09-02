@@ -118,13 +118,18 @@
     <div class="head">
       <div class="mark" aria-hidden="true">AI</div>
       <div>
-        <h1>Setting up AI Scaler Toolkit</h1>
-        <p class="sub">One-time setup. The GPU runtime is downloaded now rather than bundled.</p>
+        <!-- Starts as a plain "starting" screen. Most launches are not installs, and
+             saying "Setting up" while nothing is being set up is simply wrong. It is
+             promoted to a setup screen by setPhases, which only runs when there is
+             actually something to install. -->
+        <h1 id="heading">Starting AI Scaler Toolkit</h1>
+        <p class="sub" id="sub" hidden>One-time setup. The GPU runtime is downloaded
+          now rather than bundled.</p>
       </div>
     </div>
 
     <div class="step">
-      <span class="step-name" id="step-name">Starting</span>
+      <span class="step-name" id="step-name">Checking your system</span>
       <span class="step-detail" id="step-detail"></span>
     </div>
     <div class="track indeterminate" id="track"><div class="fill" id="fill"></div></div>
@@ -133,11 +138,13 @@
       <span id="total-elapsed"></span>
     </div>
 
-    <div class="phases" id="phases"></div>
-    <div class="phase-names"><span id="first-phase"></span><span id="last-phase"></span></div>
+    <div class="phases" id="phases" hidden></div>
+    <div class="phase-names" id="phase-names" hidden>
+      <span id="first-phase"></span><span id="last-phase"></span>
+    </div>
 
-    <p class="note">You can leave this running. Setup usually takes five to ten minutes
-      depending on your connection.</p>
+    <p class="note" id="note" hidden>You can leave this running. Setup usually takes
+      five to ten minutes depending on your connection.</p>
   </div>
 
   <div id="done">
@@ -181,6 +188,12 @@
   }, 1000);
 
   window.setPhases = function (items) {
+    // Being given steps is what makes this a setup screen rather than a splash.
+    document.getElementById("heading").textContent = "Setting up AI Scaler Toolkit";
+    ["sub", "phases", "phase-names", "note"].forEach(function (id) {
+      document.getElementById(id).hidden = false;
+    });
+
     keys = items.map(function (i) { return i.key; });
     var row = document.getElementById("phases");
     row.innerHTML = items.map(function () { return '<span class="pip"></span>'; }).join("");

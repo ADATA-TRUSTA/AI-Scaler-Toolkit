@@ -31,6 +31,7 @@ from . import (
     progress,
     provision,
     service_manager,
+    single_instance,
     state,
     updater,
 )
@@ -226,8 +227,14 @@ class Launcher:
         self._js(HOST_HOOK)
 
     def show_window(self) -> None:
-        if self.window is not None:
+        if self.window is None:
+            return
+        with contextlib.suppress(Exception):
             self.window.show()
+        with contextlib.suppress(Exception):
+            # Closing the window hides it and minimising leaves it minimised; a
+            # request to come forward has to undo either.
+            self.window.restore()
 
     def open_in_browser(self) -> None:
         """The full interface, in the system browser.
@@ -550,12 +557,31 @@ def main(argv: list[str] | None = None) -> int:
     import webview
 
     launcher = Launcher()
+
+    # Before anything else is created. A second launch should raise the window that is
+    # already open, not add a tray icon and a second manager for one service -- where
+    # "Quit" on either would stop the service under the other.
+    if not single_instance.acquire(lambda: launcher.show_window()):
+        log.info("another copy is already running; exiting")
+        return 0
+
+    # Sized before it is created, not after. Every launch used to open at the setup
+    # size and then jump to the interface size once the service answered -- which on
+    # an already-installed machine is a small window sitting there for a minute or
+    # more and then resizing, for no reason the user can see.
+    if provision.is_provisioned():
+        width, height = COMPACT_SIZE if launcher._starts_compact() else EXPANDED_SIZE
+        log.info("already provisioned; opening at the interface size %dx%d", width, height)
+    else:
+        width, height = SETUP_SIZE
+        log.info("setup is needed; opening at the setup size %dx%d", width, height)
+
     launcher.window = webview.create_window(
         config.APP_TITLE,
         str(UI_DIR / "progress.html"),
         js_api=WindowApi(launcher),
-        width=SETUP_SIZE[0],
-        height=SETUP_SIZE[1],
+        width=width,
+        height=height,
         min_size=(520, 480),
     )
     launcher.window.events.closing += launcher._on_closing
@@ -575,7 +601,10 @@ def main(argv: list[str] | None = None) -> int:
             autostart.enable()
 
     log.info("entering the window loop")
-    webview.start(launcher.bootstrap, debug=False)
+    try:
+        webview.start(launcher.bootstrap, debug=False)
+    finally:
+        single_instance.release()
     log.info("window loop ended; exiting")
     return 0
 

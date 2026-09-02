@@ -22,31 +22,19 @@ SOURCE_KEYS: tuple[str, ...] = ("backend", "console", "frontend")
 # rather than as a repository checkout.
 FRONTEND_PACKAGES: tuple[str, ...] = ("dist", "dist_client")
 
-# Where the application icon comes from, most preferred first.
+# Which mark the application wears. Built by make_icon.py from the artwork in assets/,
+# not scavenged from the frontend package -- the favicons that ship there carry one or
+# two sizes and Windows draws this at nine.
 #
-# Deliberately not the same choice the payload makes. A Windows payload carries the
-# dist_client (ADATA) frontend, but the application itself is asked to show the TRUSTA
-# mark, so the icon is taken from dist. Keeping it here rather than in either script
-# means the executable, the shortcut and the tray cannot end up showing two brands.
-ICON_PACKAGE_ORDER: tuple[str, ...] = ("dist", "dist_client")
+# Deliberately not tied to the payload's frontend brand: a Windows payload carries the
+# ADATA frontend, but the application itself is asked to show the TRUSTA mark. One line
+# to change if that stops being true, and it keeps the executable, the shortcut and the
+# tray from ever showing two different marks.
+ICON_BRAND = "trusta"
 
-# Fixed name the icon is copied to inside the payload, so the running application does
-# not have to know which package it came from.
+# Fixed name the icon takes inside the payload, so the running application does not
+# have to know which brand it came from.
 PAYLOAD_ICON = "app.ico"
-
-
-def find_icon(source_root):
-    """First .ico from the most preferred frontend package present under source_root."""
-    from pathlib import Path as _Path
-
-    root = _Path(source_root)
-    for package in ICON_PACKAGE_ORDER:
-        directory = root / "frontend" / package
-        if not directory.is_dir():
-            continue
-        for icon in sorted(directory.glob("*.ico")):
-            return icon
-    return None
 
 # Top-level entries copied out of each source repo. Globs are allowed.
 INCLUDE: dict[str, tuple[str, ...]] = {

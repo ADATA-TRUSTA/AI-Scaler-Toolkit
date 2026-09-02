@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from typing import Any
 
 from . import config
@@ -46,11 +47,21 @@ def load() -> dict[str, Any]:
     path = config.state_file()
     if not path.is_file():
         return dict(DEFAULTS)
-    try:
-        stored = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        # A corrupt state file must not stop the app from starting; defaults are all
-        # recoverable and provisioning detects what is already installed.
+    stored = None
+    for attempt in range(3):
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            break
+        except json.JSONDecodeError:
+            # Almost certainly a read that landed mid-replace. Falling straight back to
+            # defaults here reports "not provisioned", which sends a fully installed
+            # machine to the setup screen -- so retry before believing it.
+            time.sleep(0.05 * (attempt + 1))
+        except OSError:
+            break
+    if stored is None:
+        # A genuinely unreadable state file must not stop the app from starting;
+        # defaults are recoverable and provisioning detects what is already installed.
         return dict(DEFAULTS)
     if stored.get("schema") != SCHEMA:
         # Not an error: an older layout is simply unusable, and a fresh first run is
