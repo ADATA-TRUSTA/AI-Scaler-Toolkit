@@ -98,12 +98,35 @@ def build(brand: str, destination: Path) -> Path:
     return destination
 
 
+# The mark the setup window shows beside its heading. A PNG rather than the .ico
+# because the page is HTML: it is displayed at 38px and this covers the highest DPI
+# scaling without carrying the other eight sizes along with it.
+UI_MARK_SIZE = 128
+
+
+def build_png(brand: str, destination: Path, size: int = UI_MARK_SIZE) -> Path:
+    from PIL import Image
+
+    source = find_source(brand)
+    with Image.open(source) as raw:
+        canvas = square(raw).resize((size, size), Image.LANCZOS)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(destination, format="PNG", optimize=True)
+
+    print(f"[icon] {source.name} -> {destination.name} ({size}px, "
+          f"{destination.stat().st_size} bytes)")
+    return destination
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--brand", choices=sorted(SOURCES), required=True)
-    parser.add_argument("--out", required=True, help="path of the .ico to write")
+    parser.add_argument("--out", required=True, help="path to write")
+    parser.add_argument("--png", action="store_true",
+                        help="write a single PNG for the window, not a multi-size .ico")
     args = parser.parse_args()
-    build(args.brand, Path(args.out).resolve())
+    out = Path(args.out).resolve()
+    build_png(args.brand, out) if args.png else build(args.brand, out)
     return 0
 
 

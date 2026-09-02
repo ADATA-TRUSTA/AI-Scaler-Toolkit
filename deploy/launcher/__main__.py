@@ -63,6 +63,34 @@ window.__hostViewChange = function (compact) {
 log = applog.get("main")
 
 
+def _mark_data_uri() -> str:
+    """The application mark for the setup window.
+
+    Sent as data because the page is loaded from a file: a reference to the payload
+    directory would not resolve, and would break again once the window navigates to the
+    interface over http.
+    """
+    path = config.payload_dir() / layout_mark_name()
+    if not path.is_file():
+        log.info("no application mark at %s; the lettered tile stands in", path)
+        return ""
+    try:
+        import base64
+
+        data = base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError:
+        log.warning("could not read the application mark at %s", path)
+        return ""
+    log.info("application mark: %s (%d bytes)", path.name, path.stat().st_size)
+    return "data:image/png;base64," + data
+
+
+def layout_mark_name() -> str:
+    """Kept in step with what packaging writes, without importing the packaging code
+    into the shipped application."""
+    return "app-mark.png"
+
+
 def _icon_path() -> Path | None:
     """The icon packaging chose, under the fixed name it writes.
 
@@ -348,6 +376,7 @@ class Launcher:
         """Everything between launch and a usable window. Runs off the main thread."""
         try:
             self._js(f"window.setBrandBackground({_js_string(brand.page_background())})")
+            self._js(f"window.setMark({_js_string(_mark_data_uri())})")
 
             log.info("bootstrap: preflight")
             report = preflight.run()

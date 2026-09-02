@@ -104,6 +104,7 @@ def main() -> int:
     # Built from the brand artwork rather than scavenged from the frontend package.
     # The favicons that ship there carry one or two sizes; Windows draws this at nine.
     make_icon.build(layout.ICON_BRAND, payload / layout.PAYLOAD_ICON)
+    make_icon.build_png(layout.ICON_BRAND, payload / layout.PAYLOAD_MARK)
 
     for name in PAYLOAD_DIRS:
         src = source / name

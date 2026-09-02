@@ -36,6 +36,11 @@ ICON_BRAND = "trusta"
 # have to know which brand it came from.
 PAYLOAD_ICON = "app.ico"
 
+# The same mark as a PNG, for the setup window -- that page is HTML and shows it
+# beside the heading, where an .ico is awkward and a lettered placeholder was standing
+# in while the only artwork available was a 16x16 favicon.
+PAYLOAD_MARK = "app-mark.png"
+
 # Top-level entries copied out of each source repo. Globs are allowed.
 INCLUDE: dict[str, tuple[str, ...]] = {
     "backend": (

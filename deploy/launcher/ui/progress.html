@@ -42,8 +42,9 @@
 
   /* Header: icon beside the title, not above it -- the window is wide, not tall. */
   .head { display: flex; align-items: center; gap: 13px; margin-bottom: 26px; }
-  .head .mark {
-    width: 38px; height: 38px; border-radius: 9px; flex: none;
+  .head .mark { width: 38px; height: 38px; border-radius: 9px; flex: none; }
+  .head img.mark { object-fit: contain; }
+  .head div.mark {
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     display: grid; place-items: center;
     color: var(--accent); font-weight: 700; font-size: 17px;
@@ -116,7 +117,11 @@
 <main>
   <div id="setup">
     <div class="head">
-      <div class="mark" aria-hidden="true">AI</div>
+      <!-- The lettered tile is what shows until the mark arrives, and in a source
+           checkout where no payload has been built. It is drawn by the browser, so it
+           stays crisp; the image replaces it once there is one worth showing. -->
+      <img class="mark" id="mark" alt="" hidden>
+      <div class="mark" id="mark-fallback" aria-hidden="true">AI</div>
       <div>
         <!-- Starts as a plain "starting" screen. Most launches are not installs, and
              saying "Setting up" while nothing is being set up is simply wrong. It is
@@ -172,6 +177,17 @@
     if (!value) { return; }
     document.documentElement.style.setProperty("--brand-bg", value);
   };
+  // Sent by the host once, as a data URI: the page is loaded from a file and cannot
+  // reference one from the payload directory over http.
+  window.setMark = function (dataUri) {
+    if (!dataUri) { return; }
+    var img = document.getElementById("mark");
+    img.src = dataUri;
+    img.hidden = false;
+    var fallback = document.getElementById("mark-fallback");
+    if (fallback) { fallback.remove(); }
+  };
+
   var keys = [];
   var startedAt = Date.now();
 
