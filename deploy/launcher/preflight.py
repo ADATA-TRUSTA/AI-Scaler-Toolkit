@@ -135,7 +135,7 @@ def check_vulkan() -> Check:
 def check_winget() -> Check:
     return Check("winget", "winget", ok=_on_path("winget") if config.IS_WINDOWS else True,
                  required=False,
-                 detail="Used by one of the optional third-party components' own installer.")
+                 detail="How git is installed when it is missing, without an administrator.")
 
 
 def check_webkitgtk() -> Check:

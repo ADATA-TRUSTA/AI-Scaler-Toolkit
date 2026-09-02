@@ -193,6 +193,22 @@ class ServiceManager:
                     f"The service stopped while starting (exit code {self._process.returncode}).\n\n"
                     + _log_tail(service_log)
                 )
+            # A port that is bound but silent is normal here -- uvicorn listens before
+            # it finishes starting. A port that *answers* without the keys we identify
+            # ourselves by is not: it will still be answering in fifteen minutes, and
+            # waiting them out ends in "the service did not answer" about a service
+            # that answered every time. Say what is actually wrong instead.
+            body = health(self.port)
+            if body is not None:
+                missing = [key for key in FINGERPRINT if key not in body]
+                if missing:
+                    raise RuntimeError(
+                        f"Something is answering on port {self.port}, but it is not "
+                        f"this application's backend -- its health response is missing "
+                        f"{', '.join(missing)}.\n\nEither another program is using the "
+                        "port, or this installation's backend is a different version "
+                        "from its launcher."
+                    )
             elapsed = time.monotonic() - started
             if on_wait and elapsed - last_report >= 5:
                 last_report = elapsed

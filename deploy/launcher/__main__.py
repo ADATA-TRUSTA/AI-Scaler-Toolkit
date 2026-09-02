@@ -24,6 +24,7 @@ from . import (
     applog,
     autostart,
     brand,
+    components,
     config,
     env_file,
     maintenance,
@@ -214,6 +215,24 @@ class SettingsApi:
     def open_url(self, url: str) -> None:
         if str(url).startswith(("http://", "https://")):
             webbrowser.open(url)
+
+    # ------------------------------------------------------------- components
+
+    def list_components(self) -> list[dict[str, Any]]:
+        return components.listing()
+
+    def install_component(self, component_id: str) -> dict[str, Any]:
+        started, error = components.start(str(component_id))
+        return {"ok": started, "error": error}
+
+    def component_progress(self) -> dict[str, Any] | None:
+        """Polled by the page while an install runs.
+
+        Returning the whole log every second is wasteful in principle and free in
+        practice -- it is a few hundred lines over a local bridge -- and it means a
+        page reopened mid-install shows the history rather than starting blank.
+        """
+        return components.current_job()
 
 
 class Launcher:
@@ -468,14 +487,30 @@ class Launcher:
 
         Silently taking a different port leaves someone with a working application on
         an address they never chose, and a stale one written into their configuration.
+
+        The dialog is the platform's own, and on Windows that means OK and Cancel, not
+        Yes and No. So the text names what OK does instead of asking a question the
+        buttons cannot answer -- "Use 8572 instead?" above a Cancel button reads as a
+        question with the wrong answers.
         """
         import webview
 
-        answer = webview.windows[0].create_confirmation_dialog(
-            "Port in use",
-            f"Port {requested} is already taken. Use {suggested} instead?",
+        accepted = webview.windows[0].create_confirmation_dialog(
+            f"Port {requested} is in use",
+            f"Another program is already using port {requested}.\n\n"
+            f"OK: start on port {suggested} instead.\n"
+            f"Cancel: stop, so you can free port {requested} first.",
         )
-        return suggested if answer else requested
+        if accepted:
+            return suggested
+        # Declining is a decision, not a failure to resolve. Returning the busy port
+        # would surface as "port N is also in use", which reads as a contradiction of
+        # what the user just chose.
+        raise RuntimeError(
+            f"Setup stopped because port {requested} is in use. Close whatever is "
+            f"using it and start this application again, or accept port {suggested} "
+            "when asked."
+        )
 
     def bootstrap(self) -> None:
         """Everything between launch and a usable window. Runs off the main thread."""
@@ -589,9 +624,34 @@ class Launcher:
             self._js(f"window.showError({_js_string(str(exc))})")
 
     def _check_updates(self) -> None:
+        """Say something in every case.
+
+        Opening a page on success and doing nothing otherwise makes "no update" and
+        "the check failed" look identical, and both look like the menu item is broken.
+        """
         status = updater.check()
+        log.info("tray update check: latest=%s available=%s reason=%s",
+                 status.latest, status.available, status.reason)
         if status.available:
             updater.open_release_page(status)
+            self._notify(f"Version {status.latest} is available",
+                         "Opening the release page.")
+        elif status.reason == "none-published":
+            self._notify("No updates", "No releases have been published yet.")
+        elif status.reason == "unreachable":
+            self._notify("Could not check for updates",
+                         "The releases page could not be reached.")
+        else:
+            self._notify("No updates", f"You are on the newest release ({status.current}).")
+
+    def _notify(self, title: str, message: str) -> None:
+        """Best effort: a tray balloon is not worth an exception on a machine that has
+        notifications turned off."""
+        if self.tray is None:
+            log.info("notification (no tray): %s -- %s", title, message)
+            return
+        with contextlib.suppress(Exception):
+            self.tray.notify(message, title)
 
     # ------------------------------------------------------------------ exit
 

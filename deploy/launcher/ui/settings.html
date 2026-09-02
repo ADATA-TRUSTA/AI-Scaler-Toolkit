@@ -11,23 +11,22 @@
     --accent: #2f6fed;
     --ok: #1a9a5f;
     --warn: #b26b00;
+    --err: #d9534f;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #101215; --fg: #e9ebef; --muted: #98a0ae; --faint: #6b7280;
       --line: #262a31; --card: #181b20; --accent: #5b8dff; --ok: #3fbc82;
-      --warn: #d69a3a;
+      --warn: #d69a3a; --err: #ef6b66;
     }
-  }
-  /* The brand wash is built for a white page; the dark theme keeps its own ground. */
-  @media (prefers-color-scheme: dark) {
+    /* The brand wash is built for a white page; the dark theme keeps its own ground. */
     body { background: var(--bg) !important; }
   }
 
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    padding: 40px 44px 56px;
+    padding: 32px 44px 56px;
     background: var(--brand-bg, var(--bg));
     color: var(--fg);
     font: 14.5px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -35,11 +34,21 @@
   main { max-width: 620px; margin: 0 auto; }
 
   h1 { margin: 0 0 8px; font-size: 21px; font-weight: 620; letter-spacing: -0.01em; }
-  .lede { margin: 0 0 36px; color: var(--muted); font-size: 13.5px; }
+  .lede { margin: 0 0 28px; color: var(--muted); font-size: 13.5px; }
   h2 {
-    margin: 40px 0 14px; font-size: 11.5px; font-weight: 650;
+    margin: 36px 0 14px; font-size: 11.5px; font-weight: 650;
     text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint);
   }
+
+  /* Tabs. Two views in one window rather than two windows: the second window would
+     need its own lifecycle, and these belong together anyway. */
+  .tabs { display: flex; gap: 4px; margin: 0 0 26px; border-bottom: 1px solid var(--line); }
+  .tabs button {
+    padding: 9px 14px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+    background: none; color: var(--muted); font: inherit; font-weight: 560; cursor: pointer;
+  }
+  .tabs button:hover { color: var(--fg); }
+  .tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
 
   .row {
     display: flex; align-items: center; justify-content: space-between;
@@ -50,6 +59,7 @@
   .label { font-weight: 560; }
   .hint { color: var(--muted); font-size: 13px; margin-top: 5px; }
   .control { flex: none; }
+  .control-group { display: flex; align-items: center; gap: 8px; }
 
   input[type=number] {
     width: 92px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px;
@@ -80,8 +90,10 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   button:disabled { opacity: 0.5; cursor: default; }
-
-  .control-group { display: flex; align-items: center; gap: 8px; }
+  button.link {
+    border: 0; background: none; color: var(--accent); padding: 8px 4px;
+    text-decoration: underline; text-underline-offset: 3px;
+  }
 
   /* Read-only facts, laid out as a list rather than as rows that look adjustable. */
   .facts { margin: 0; padding: 0; list-style: none; }
@@ -96,10 +108,41 @@
   .status { font-size: 13px; margin-top: 6px; text-align: right; min-height: 1.4em; }
   .status.ok { color: var(--ok); }
   .status.warn { color: var(--warn); }
-  .status.err { color: #d9534f; }
+  .status.err { color: var(--err); }
+
+  /* Components */
+  .component {
+    border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px;
+    margin-bottom: 14px; background: var(--card);
+  }
+  .component-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+  .component-name { font-weight: 600; font-size: 15px; }
+  .badge {
+    flex: none; font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 99px;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .badge.on { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .badge.off { background: color-mix(in srgb, var(--faint) 18%, transparent); color: var(--muted); }
+  .component .desc { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+  .component .note { color: var(--faint); font-size: 12.5px; margin-top: 8px; }
+  .component .where {
+    font-size: 12px; color: var(--faint); margin-top: 8px;
+    font-family: ui-monospace, Consolas, monospace; word-break: break-all;
+  }
+  .component-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+  .component .outcome { font-size: 13px; margin-top: 10px; }
+  .component .outcome.ok { color: var(--ok); }
+  .component .outcome.err { color: var(--err); }
+
+  pre.log {
+    margin: 12px 0 0; padding: 12px 14px; max-height: 220px; overflow: auto;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    font: 12px/1.55 ui-monospace, Consolas, monospace; color: var(--muted);
+    white-space: pre-wrap; word-break: break-word;
+  }
 
   #loading { color: var(--muted); }
-  #app[hidden] { display: none; }
+  [hidden] { display: none !important; }
 </style>
 
 <main>
@@ -109,65 +152,84 @@
     <h1>Settings</h1>
     <p class="lede" id="lede">—</p>
 
-    <h2>Startup</h2>
-    <div class="row">
-      <div>
-        <div class="label" id="autostart-label">Open automatically when you sign in</div>
-        <div class="hint">The service takes a couple of minutes to load the GPU runtime.
-          Starting it at sign-in means it is already running when you first open the
-          window, instead of you waiting for it then.</div>
-      </div>
-      <div class="control">
-        <label class="switch">
-          <input type="checkbox" id="autostart">
-          <span class="slider"></span>
-        </label>
-      </div>
+    <div class="tabs" role="tablist">
+      <button id="tab-settings" role="tab" aria-selected="true">Settings</button>
+      <button id="tab-components" role="tab" aria-selected="false">Components</button>
     </div>
 
-    <h2>Ports</h2>
-    <div class="row">
-      <div>
-        <div class="label">Backend service</div>
-        <div class="hint">The API and this application's interface are both served here.
-          Changing it restarts the service and repoints the interface at the same time.</div>
-      </div>
-      <div class="control">
-        <div class="control-group">
-          <input type="number" id="port" min="1024" max="65535">
-          <button class="primary" id="save-port">Apply</button>
+    <!-- ------------------------------------------------------------ settings -->
+    <section id="view-settings">
+      <h2>Startup</h2>
+      <div class="row">
+        <div>
+          <div class="label" id="autostart-label">Start automatically with Windows</div>
+          <div class="hint" id="autostart-hint">Runs in the background from the moment
+            you sign in. The service needs a minute or two to load the GPU runtime, so
+            this is the difference between opening the window and waiting, and opening
+            the window and using it.</div>
         </div>
-        <div class="status" id="port-status"></div>
+        <div class="control">
+          <label class="switch">
+            <input type="checkbox" id="autostart">
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
-    </div>
 
-    <ul class="facts" id="inference-ports"></ul>
-    <p class="hint" id="inference-note"></p>
-
-    <h2>Environment</h2>
-    <ul class="facts" id="environment"></ul>
-
-    <div class="row">
-      <div>
-        <div class="label">Reinstall the environment</div>
-        <div class="hint">Removes the Python environment and GPU runtime and installs
-          them again — about ten minutes. Use this if the application starts but the
-          backend will not. Your downloaded models are kept.</div>
+      <h2>Ports</h2>
+      <div class="row">
+        <div>
+          <div class="label">Backend service</div>
+          <div class="hint">The API and this application's interface are both served
+            here. Changing it restarts the service and repoints the interface at the
+            same time.</div>
+        </div>
+        <div class="control">
+          <div class="control-group">
+            <input type="number" id="port" min="1024" max="65535">
+            <button class="primary" id="save-port">Apply</button>
+          </div>
+          <div class="status" id="port-status"></div>
+        </div>
       </div>
-      <div class="control">
-        <button id="repair">Reinstall</button>
-        <div class="status" id="repair-status"></div>
-      </div>
-    </div>
 
-    <h2>Updates</h2>
-    <div class="row">
-      <div>
-        <div class="label" id="version">—</div>
-        <div class="hint" id="update-hint">Checks the public releases page.</div>
+      <ul class="facts" id="inference-ports"></ul>
+      <p class="hint" id="inference-note"></p>
+
+      <h2>Environment</h2>
+      <ul class="facts" id="environment"></ul>
+
+      <div class="row">
+        <div>
+          <div class="label">Reinstall the environment</div>
+          <div class="hint">Removes the Python environment and GPU runtime and installs
+            them again — about ten minutes. Use this if the application starts but the
+            backend will not. Your downloaded models are kept.</div>
+        </div>
+        <div class="control">
+          <button id="repair">Reinstall</button>
+          <div class="status" id="repair-status"></div>
+        </div>
       </div>
-      <div class="control"><button id="check-update">Check now</button></div>
-    </div>
+
+      <h2>Updates</h2>
+      <div class="row">
+        <div>
+          <div class="label" id="version">—</div>
+          <div class="hint" id="update-hint">Checks the public releases page.</div>
+        </div>
+        <div class="control"><button id="check-update">Check now</button></div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------- components -->
+    <section id="view-components" hidden>
+      <p class="hint" style="margin-top: 0">Tools that work alongside this one. They are
+        installed for you alone and never ask for an administrator. Each is maintained
+        by someone else, so its own page is linked if you would rather install it
+        yourself.</p>
+      <div id="component-list"></div>
+    </section>
   </div>
 </main>
 
@@ -186,34 +248,50 @@
       .replace(/"/g, "&quot;");
   }
 
+  function el(id) { return document.getElementById(id); }
+
   function facts(id, rows) {
-    document.getElementById(id).innerHTML = rows.map(function (r) {
+    el(id).innerHTML = rows.map(function (r) {
       return '<li><span class="k">' + escapeHtml(r[0]) + '</span>' +
              '<span class="v">' + escapeHtml(r[1]) + "</span></li>";
     }).join("");
   }
 
   function setStatus(id, text, kind) {
-    var el = document.getElementById(id);
-    el.textContent = text || "";
-    el.className = "status" + (kind ? " " + kind : "");
+    var node = el(id);
+    node.textContent = text || "";
+    node.className = "status" + (kind ? " " + kind : "");
   }
 
   function start(api) {
-    document.getElementById("loading").hidden = true;
-    document.getElementById("app").hidden = false;
+    el("loading").hidden = true;
+    el("app").hidden = false;
 
+    // ------------------------------------------------------------------- tabs
+    function showView(name) {
+      el("view-settings").hidden = name !== "settings";
+      el("view-components").hidden = name !== "components";
+      el("tab-settings").setAttribute("aria-selected", String(name === "settings"));
+      el("tab-components").setAttribute("aria-selected", String(name === "components"));
+      if (name === "components") { refreshComponents(); }
+    }
+    el("tab-settings").addEventListener("click", function () { showView("settings"); });
+    el("tab-components").addEventListener("click", function () { showView("components"); });
+
+    // --------------------------------------------------------------- settings
     api.get_state().then(function (s) {
-      document.getElementById("autostart").checked = s.autostart;
-      document.getElementById("port").value = s.service_port;
-      document.getElementById("version").textContent =
-        "Installed version " + (s.installed_version || "unknown");
+      el("autostart").checked = s.autostart;
+      el("port").value = s.service_port;
+      el("version").textContent = "Installed version " + (s.installed_version || "unknown");
       if (s.platform !== "win32") {
-        document.getElementById("autostart-label").textContent =
-          "Open automatically when you log in";
+        el("autostart-label").textContent = "Start automatically when you log in";
+        el("autostart-hint").textContent =
+          "Runs in the background from the moment you log in. The service needs a " +
+          "minute or two to load the GPU runtime, so this is the difference between " +
+          "opening the window and waiting, and opening the window and using it.";
       }
 
-      document.getElementById("lede").textContent =
+      el("lede").textContent =
         "Everything here is about the service behind the interface — where it listens, " +
         "when it starts, and which version you have.";
 
@@ -224,7 +302,7 @@
         ["llama server", String(s.llama_port)],
         ["vLLM server", String(s.vllm_port) + (s.platform === "win32" ? " (Linux only)" : "")],
       ]);
-      document.getElementById("inference-note").textContent =
+      el("inference-note").textContent =
         "Shown for reference. These are part of the inference configuration, not " +
         "settings — a model being loaded brings its own.";
 
@@ -235,7 +313,7 @@
       ]);
     });
 
-    document.getElementById("autostart").addEventListener("change", function (e) {
+    el("autostart").addEventListener("change", function (e) {
       var box = e.target;
       box.disabled = true;
       api.set_autostart(box.checked).then(function (r) {
@@ -247,24 +325,22 @@
       });
     });
 
-    document.getElementById("save-port").addEventListener("click", function (e) {
+    el("save-port").addEventListener("click", function (e) {
       var button = e.target;
       button.disabled = true;
       setStatus("port-status", "Restarting the service…");
-      api.set_port(parseInt(document.getElementById("port").value, 10)).then(function (r) {
+      api.set_port(parseInt(el("port").value, 10)).then(function (r) {
         button.disabled = false;
         setStatus("port-status", r.ok ? "Saved" : r.error, r.ok ? "ok" : "err");
         if (r.ok) { setTimeout(function () { setStatus("port-status", ""); }, 2500); }
       });
     });
 
-    document.getElementById("repair").addEventListener("click", function (e) {
+    el("repair").addEventListener("click", function (e) {
       // Confirmed, because it throws away several gigabytes that take ten minutes to
       // fetch again, and the button sits one click from things that are harmless.
       if (!window.confirm(
-            "Remove the Python environment and GPU runtime, then install them again?
-
-" +
+            "Remove the Python environment and GPU runtime, then install them again?\n\n" +
             "This takes about ten minutes. Your downloaded models are kept.")) {
         return;
       }
@@ -280,9 +356,9 @@
       });
     });
 
-    document.getElementById("check-update").addEventListener("click", function (e) {
+    el("check-update").addEventListener("click", function (e) {
       var button = e.target;
-      var hint = document.getElementById("update-hint");
+      var hint = el("update-hint");
       button.disabled = true;
       button.textContent = "Checking…";
       hint.textContent = "Asking the releases page…";
@@ -303,12 +379,123 @@
         }
       });
     });
+
+    // ------------------------------------------------------------- components
+    var poller = null;
+
+    function cardHtml(c) {
+      var installed = c.installed;
+      var action;
+      if (!c.available) {
+        action = '<span class="hint">Only published for Windows.</span>';
+      } else if (c.busy) {
+        action = '<button disabled>Installing…</button>';
+      } else {
+        action = '<button class="' + (installed ? "" : "primary") + '" data-install="' +
+                 escapeHtml(c.id) + '"' + (c.blocked ? " disabled" : "") + ">" +
+                 (installed ? "Reinstall" : "Install") + "</button>";
+      }
+      return '' +
+        '<div class="component" id="card-' + escapeHtml(c.id) + '">' +
+          '<div class="component-head">' +
+            '<span class="component-name">' + escapeHtml(c.name) + "</span>" +
+            '<span class="badge ' + (installed ? "on" : "off") + '">' +
+              (installed ? "Installed" : "Not installed") + "</span>" +
+          "</div>" +
+          '<div class="desc">' + escapeHtml(c.description) + "</div>" +
+          '<div class="note">' + escapeHtml(c.note) + "</div>" +
+          (c.location ? '<div class="where">' + escapeHtml(c.location) + "</div>" : "") +
+          '<div class="component-actions">' + action +
+            '<button class="link" data-page="' + escapeHtml(c.page) + '">Vendor page</button>' +
+          "</div>" +
+          '<div class="outcome" id="outcome-' + escapeHtml(c.id) + '"></div>' +
+          '<pre class="log" id="log-' + escapeHtml(c.id) + '" hidden></pre>' +
+        "</div>";
+    }
+
+    function refreshComponents() {
+      return api.list_components().then(function (list) {
+        el("component-list").innerHTML = list.map(cardHtml).join("");
+        Array.prototype.forEach.call(
+          el("component-list").querySelectorAll("[data-install]"), function (b) {
+            b.addEventListener("click", function () { install(b.getAttribute("data-install")); });
+          });
+        Array.prototype.forEach.call(
+          el("component-list").querySelectorAll("[data-page]"), function (b) {
+            b.addEventListener("click", function () { api.open_url(b.getAttribute("data-page")); });
+          });
+        // A page opened while an install is already running picks it up rather than
+        // showing a stale idle card.
+        return api.component_progress().then(function (job) {
+          if (job) { paintJob(job); }
+          if (job && job.running) { poll(); }
+        });
+      });
+    }
+
+    function paintJob(job) {
+      var log = el("log-" + job.id);
+      var outcome = el("outcome-" + job.id);
+      if (!log || !outcome) { return; }
+      log.hidden = false;
+      var atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
+      log.textContent = job.lines.join("\n");
+      // Only follow if they had not scrolled up to read something.
+      if (atBottom) { log.scrollTop = log.scrollHeight; }
+      if (!job.running) {
+        outcome.textContent = job.message;
+        outcome.className = "outcome " + (job.ok ? "ok" : "err");
+      }
+    }
+
+    function poll() {
+      if (poller) { return; }
+      poller = setInterval(function () {
+        api.component_progress().then(function (job) {
+          if (!job) { return; }
+          paintJob(job);
+          if (!job.running) {
+            clearInterval(poller);
+            poller = null;
+            // Re-read from disk: the badge should reflect what is there now, and the
+            // installer's own exit code is not the authority on that.
+            var finished = job;
+            refreshComponents().then(function () { paintJob(finished); });
+          }
+        });
+      }, 1000);
+    }
+
+    function install(id) {
+      var outcome = el("outcome-" + id);
+      if (outcome) { outcome.textContent = ""; outcome.className = "outcome"; }
+      // Disabled here, not after the round trip. Waiting for the card to re-render
+      // leaves a window in which the button is live and a second click starts a
+      // second install -- the backend refuses it, but the refusal is not the user's
+      // to read.
+      var button = document.querySelector('#card-' + id + ' [data-install]');
+      if (button) { button.disabled = true; button.textContent = "Installing…"; }
+      api.install_component(id).then(function (r) {
+        if (!r.ok) {
+          // Refused before anything started, so give the button back.
+          if (button) { button.disabled = false; button.textContent = "Install"; }
+          if (outcome) {
+            outcome.textContent = r.error;
+            outcome.className = "outcome err";
+          }
+          return;
+        }
+        refreshComponents().then(poll);
+      });
+    }
+
+    // Exposed so the tab handler defined above can reach it.
+    window.__refreshComponents = refreshComponents;
   }
 
   // pywebview injects its bridge asynchronously and announces it with this event.
   // Reading window.pywebview.api at parse time is a race that this page lost often
-  // enough to look broken: the script threw before rendering anything, so the port
-  // field stayed empty and no control did anything.
+  // enough to look broken.
   if (window.pywebview && window.pywebview.api) {
     start(window.pywebview.api);
   } else {

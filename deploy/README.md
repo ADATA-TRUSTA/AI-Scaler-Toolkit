@@ -53,11 +53,35 @@ because `setup_env` appends to the same file and the user may have edited it.
 
 ## Optional third-party components
 
-Removed. The settings page used to list Hermes and ComfyUI with the command to install
-them, as the original specification asked. Nothing in this application integrates with
-either, so it amounted to showing a user two unrelated products in the settings of a
-third.
+The Components tab in settings installs Hermes and ComfyUI. `launcher/components.py`
+owns the catalogue, the detection and the install; the page polls a single in-flight
+job for its log.
 
-The reasoning behind that section still holds for anything that does get integrated:
-show the command, never run someone else's installer. It is why remedy.py is limited
-to the three prerequisites setup itself cannot proceed without.
+This has been decided twice, in opposite directions, and both are worth knowing about.
+
+The original specification said to *show* the install command and never run it. That
+bought three real things: no output panel, no elevation to handle, and nothing to
+break when a vendor changed their installer. Then the section was removed outright,
+on the argument that nothing here integrates with either tool. Neither version
+installed anything, which is the only outcome a user was ever after — "here is a
+command, go and paste it somewhere" is a to-do item dressed as a feature.
+
+So they are installed, and the three costs are paid deliberately:
+
+- Output is streamed to the page, because an install that takes minutes and says
+  nothing is indistinguishable from one that has hung.
+- Both are per-user by design — Hermes into `%LOCALAPPDATA%\hermes`, ComfyUI through
+  electron-builder's per-user NSIS target — so neither raises a UAC prompt. That
+  matters: this application installs without elevation and would look broken if a
+  component demanded it.
+- Neither installer is ours. On failure the page shows the installer's own output and
+  keeps the vendor's page one click away. `_explain_failure` translates the two
+  failures we know the shape of; everything else is reported as what it is.
+
+Detection is looser than the install path on purpose: it finds copies this application
+never installed, because telling someone to install what they already have is its own
+kind of wrong.
+
+`remedy.py` is a different thing and stays narrow. It installs WebView2, the Visual
+C++ runtime and git — the prerequisites *setup itself* cannot proceed without. The
+line is whose problem it is, not whether we are able to install it.
