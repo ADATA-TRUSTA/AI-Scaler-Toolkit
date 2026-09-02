@@ -51,8 +51,13 @@ project, which puts tens of gigabytes of models under the install directory. The
 launcher writes its keys on first run and only ever fills in ones that are absent,
 because `setup_env` appends to the same file and the user may have edited it.
 
-## Third-party components
+## Optional third-party components
 
-Shown, never run. `components/components.yaml` holds the list; the settings page
-displays a command to copy or a download link. Because we do not run the installers we
-never learn an outcome, so status is detection only — "not installed", never "failed".
+Removed. The settings page used to list Hermes and ComfyUI with the command to install
+them, as the original specification asked. Nothing in this application integrates with
+either, so it amounted to showing a user two unrelated products in the settings of a
+third.
+
+The reasoning behind that section still holds for anything that does get integrated:
+show the command, never run someone else's installer. It is why remedy.py is limited
+to the three prerequisites setup itself cannot proceed without.

@@ -1,7 +1,7 @@
 """Check the machine can run what we are about to install, and fix what we can.
 
 The split is deliberate: prerequisites *we* need are detected and installed here;
-optional third-party tools are only ever shown to the user (see component_manager).
+optional third-party tools are not this application's business at all.
 
 git is the one that surprises people. It looks like something a user would already
 have, but provisioning needs it directly -- setup_env fetches the GGUF conversion

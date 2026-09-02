@@ -24,12 +24,13 @@ from . import (
     applog,
     autostart,
     brand,
-    component_manager,
     config,
     env_file,
+    maintenance,
     preflight,
     progress,
     provision,
+    remedy,
     service_manager,
     single_instance,
     state,
@@ -139,6 +140,12 @@ class SettingsApi:
             "installed_version": stored["installed_version"],
             "accelerator": stored["accelerator"],
             "last_setup": stored["last_setup"],
+            "package_count": stored["package_count"],
+            # Shown read-only. The launcher owns the service port and nothing else --
+            # these two belong to an inference configuration, and the load-model
+            # request carries its own, so anything written here would be overwritten.
+            "llama_port": config.LLAMA_SERVER_PORT,
+            "vllm_port": config.VLLM_PORT,
             "platform": sys.platform,
         }
 
@@ -170,26 +177,34 @@ class SettingsApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def components(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "id": c.id,
-                "name": c.name,
-                "description": c.description,
-                "installed": c.installed,
-                "command": c.command,
-                "url": c.url,
-                "note": c.note,
-            }
-            for c in component_manager.load()
-        ]
+    def repair_environment(self) -> dict[str, Any]:
+        """Throw the installed environment away and build it again.
+
+        The counterpart to this -- removing the application itself -- belongs to the
+        uninstaller, not to a settings page. This one exists because the environment
+        can be broken without the application being broken: a half-finished install, a
+        virus scanner that ate a file, a torch build that no longer imports. Repairing
+        it should not mean reinstalling everything.
+
+        The model cache is kept. It is not part of what breaks and re-downloading tens
+        of gigabytes to fix a virtual environment would be its own kind of failure.
+        """
+        try:
+            self._launcher.begin_repair()
+            return {"ok": True}
+        except Exception as exc:
+            log.exception("could not start the repair")
+            return {"ok": False, "error": str(exc)}
 
     def check_update(self) -> dict[str, Any]:
         self._update = updater.check()
+        log.info("update check: latest=%s available=%s reason=%s",
+                 self._update.latest, self._update.available, self._update.reason)
         return {
             "current": self._update.current,
             "latest": self._update.latest,
             "available": self._update.available,
+            "reason": self._update.reason,
         }
 
     def open_release_page(self) -> None:
@@ -333,6 +348,67 @@ class Launcher:
             f"window.setProgress({_js_string(name)}, {value}, {_js_string(detail)}, {elapsed})"
         )
 
+    def begin_repair(self) -> None:
+        """Stop the service, clear the environment, and set up again in the window."""
+        log.info("repair requested")
+        if self.settings_window is not None:
+            with contextlib.suppress(Exception):
+                self.settings_window.destroy()
+            self.settings_window = None
+
+        threading.Thread(target=self._repair, name="repair", daemon=True).start()
+
+    def _repair(self) -> None:
+        try:
+            self.service.unwatch()
+            self.service.stop()
+
+            self.set_window_size(SETUP_SIZE)
+            self.window.load_url(str(UI_DIR / "progress.html"))
+            self.show_window()
+            # The page has to finish loading before anything can be pushed into it.
+            time.sleep(1.0)
+            self._js(f"window.setBrandBackground({_js_string(brand.page_background())})")
+            self._js(f"window.setMark({_js_string(_mark_data_uri())})")
+            self._set_step("Removing the current environment", None, "", 0)
+
+            result = maintenance.provisioning_output()
+            log.info("repair: %s", result.summary())
+            if not result.ok:
+                raise RuntimeError(
+                    "Could not remove " + ", ".join(result.failed) +
+                    ". Something is still using it -- close the application and try again."
+                )
+
+            provision.run(
+                on_phase=lambda key, _label: self._js(f"window.setPhase({_js_string(key)})"),
+                on_progress=self._report_progress,
+                on_phases=self._publish_phases,
+            )
+            self.service.start(on_wait=lambda seconds: self._set_step(
+                "Starting the service", None, "loading the GPU runtime", seconds))
+            self.service.watch(self._service_lost)
+            self.reload_window()
+            log.info("repair: finished")
+        except Exception as exc:
+            log.exception("repair failed")
+            self._js(f"window.showError({_js_string(str(exc))})")
+
+    def _service_lost(self, detail: str) -> None:
+        """The backend went away after it had started.
+
+        Said plainly rather than restarted automatically: something that just crashed
+        usually crashes again, and a silent restart loop hides the reason. The log
+        keeps whatever it printed on the way out.
+        """
+        log.warning("service lost: %s", detail)
+        message = (
+            f"The backend service stopped ({detail}).\n\n"
+            "Use “Restart backend” in the tray menu to bring it back. "
+            f"What it printed before stopping is in {config.log_dir() / 'service.log'}."
+        )
+        self._js(f"window.showError({_js_string(message)})")
+
     def _publish_phases(self, phases) -> None:
         """Send the step list once, with the steps this machine will skip left out.
 
@@ -349,6 +425,35 @@ class Launcher:
         self._set_step(update.label, update.fraction, update.detail, update.elapsed)
 
     # ------------------------------------------------------------- first run
+
+    def _install_missing(self, report: preflight.Report) -> preflight.Report:
+        """Install the prerequisites setup itself needs, then check again.
+
+        These are ours to fix: without them setup cannot run at all, and telling
+        someone to go and install a C++ runtime before they can use the thing they
+        just downloaded is not an installation experience. Optional third-party tools
+        are the opposite case and are only ever shown, never installed.
+        """
+        fixable = [c for c in report.blocking if remedy.can_fix(c.fixer)]
+        unfixable = [c for c in report.blocking if not remedy.can_fix(c.fixer)]
+        if not fixable:
+            return report
+
+        if unfixable:
+            # No point spending minutes on downloads when something else will stop us
+            # anyway.
+            log.info("not attempting repairs: %s cannot be fixed from here",
+                     ", ".join(c.label for c in unfixable))
+            return report
+
+        for check in fixable:
+            log.info("installing missing prerequisite: %s", check.label)
+            self._set_step(f"Installing {check.label}", None, "one-time, needed by setup", 0)
+            if not remedy.apply(check.fixer):
+                log.warning("could not install %s", check.label)
+
+        log.info("re-running preflight after the repairs")
+        return preflight.run()
 
     def _report_blocking(self, report: preflight.Report) -> None:
         lines = ["This machine is missing something setup needs:", ""]
@@ -380,6 +485,8 @@ class Launcher:
 
             log.info("bootstrap: preflight")
             report = preflight.run()
+            if not report.ok:
+                report = self._install_missing(report)
             if not report.ok:
                 self._report_blocking(report)
                 return
@@ -417,6 +524,8 @@ class Launcher:
                     "Starting the service", None, "loading the GPU runtime", seconds
                 )
             )
+
+            self.service.watch(self._service_lost)
 
             if provisioned:
                 # Not a first run: there is nothing to celebrate and nobody waiting,

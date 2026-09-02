@@ -22,6 +22,10 @@ class UpdateStatus:
     current: str | None
     latest: str | None
     available: bool
+    # Why there is no newer version, when there is none. "none published yet" and
+    # "could not ask" look the same to the caller otherwise, and only one of them is
+    # something the user should do anything about.
+    reason: str = "ok"
     release_url: str = ""
     asset_url: str | None = None
     asset_name: str | None = None
@@ -33,9 +37,12 @@ def asset_suffix() -> str:
 
 def check(repo: str = github.DEFAULT_REPO) -> UpdateStatus:
     current = state.get("installed_version")
-    release = github.latest(repo=repo, asset_suffix=asset_suffix())
+    try:
+        release = github.latest(repo=repo, asset_suffix=asset_suffix())
+    except github.NoReleases:
+        return UpdateStatus(current=current, latest=None, available=False, reason="none-published")
     if release is None:
-        return UpdateStatus(current=current, latest=None, available=False)
+        return UpdateStatus(current=current, latest=None, available=False, reason="unreachable")
 
     state.set("last_update_check", release.tag)
     return UpdateStatus(

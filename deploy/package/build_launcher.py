@@ -30,7 +30,6 @@ EXE_NAME = "AIScalerToolkit"
 # analysis cannot see either of them.
 DATA = (
     ("launcher/ui", "launcher/ui"),
-    ("launcher/components", "launcher/components"),
 )
 
 

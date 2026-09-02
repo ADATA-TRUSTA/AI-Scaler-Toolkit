@@ -40,6 +40,17 @@ def is_newer(candidate: str, current: str | None) -> bool:
     return old is None or new > old
 
 
+class NoReleases(Exception):
+    """The repository is reachable and has published nothing yet.
+
+    Worth its own type: it is indistinguishable from a network failure at the HTTP
+    level -- GitHub answers /releases/latest with 404 in both the "no releases" and
+    "no such repo" cases -- but telling a user "could not reach the releases page"
+    when the page is fine and simply empty sends them looking for a problem that is
+    not there.
+    """
+
+
 def latest(repo: str = DEFAULT_REPO, asset_suffix: str = ".exe", timeout: float = 10.0) -> Release | None:
     request = urllib.request.Request(
         API.format(repo=repo),
@@ -48,10 +59,13 @@ def latest(repo: str = DEFAULT_REPO, asset_suffix: str = ".exe", timeout: float 
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise NoReleases(repo) from exc
+        return None
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
-        # No network, rate limited, or no releases yet. Not an error worth surfacing:
-        # an update check that cannot reach the internet is just a check that found
-        # nothing.
+        # No network, or rate limited. An update check that cannot reach the internet
+        # is a check that found nothing, not a failure worth interrupting anyone over.
         return None
 
     asset = next(

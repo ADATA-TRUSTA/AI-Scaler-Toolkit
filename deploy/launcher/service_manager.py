@@ -12,9 +12,11 @@ did not choose -- and a stale one written into their config.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -91,6 +93,8 @@ class ServiceManager:
     def __init__(self) -> None:
         self._process: subprocess.Popen | None = None
         self._log_handle = None
+        self._watch_thread: threading.Thread | None = None
+        self._watch_stop = threading.Event()
 
     @property
     def port(self) -> int:
@@ -200,8 +204,48 @@ class ServiceManager:
             + _log_tail(service_log)
         )
 
+    def watch(self, on_lost: Callable[[str], None], interval: float = 10.0) -> None:
+        """Notice if the service goes away after it started.
+
+        Starting it is checked carefully and then never looked at again, which means a
+        backend that dies -- out of memory during a load, or an unhandled crash -- is
+        invisible: the tray still says it is running and the window simply stops
+        answering. Nothing here restarts it; being told is the point, because an
+        automatic restart of something that just crashed usually crashes again and
+        buries the reason.
+        """
+        if self._watch_thread is not None:
+            return
+
+        def loop() -> None:
+            while not self._watch_stop.wait(interval):
+                if self.status() == "ours":
+                    continue
+                # One missed probe is not a death: the service blocks its event loop
+                # briefly while a model loads. Confirm before saying anything.
+                if self._watch_stop.wait(3.0) or self.status() == "ours":
+                    continue
+
+                code = self._process.poll() if self._process is not None else None
+                detail = (f"it exited with code {code}" if code is not None
+                          else "it stopped answering")
+                log.warning("the service is no longer responding: %s", detail)
+                with contextlib.suppress(Exception):
+                    on_lost(detail)
+                return
+
+        self._watch_stop.clear()
+        self._watch_thread = threading.Thread(target=loop, name="service-watch", daemon=True)
+        self._watch_thread.start()
+        log.info("watching the service every %.0fs", interval)
+
+    def unwatch(self) -> None:
+        self._watch_stop.set()
+        self._watch_thread = None
+
     def stop(self, timeout: float = 20.0) -> None:
         """Only called from Quit. Everything else leaves the service running."""
+        self.unwatch()
         if self._process is None or self._process.poll() is not None:
             self._process = None
             return

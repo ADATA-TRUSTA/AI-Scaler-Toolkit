@@ -15,62 +15,40 @@ runs and it reaches tens of gigabytes, so --keep-model-cache exists and CI uses 
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from launcher import autostart, config, state  # noqa: E402
-
-
-def _remove(path: Path, label: str, *, dry_run: bool) -> bool:
-    if not path.exists():
-        print(f"  - {label}: not present")
-        return False
-    if dry_run:
-        print(f"  - {label}: would remove {path}")
-        return True
-    try:
-        shutil.rmtree(path) if path.is_dir() else path.unlink()
-    except OSError as exc:
-        print(f"  ! {label}: could not remove {path} ({exc})")
-        return False
-    print(f"  - {label}: removed {path}")
-    return True
+from launcher import autostart, config, maintenance, state  # noqa: E402
 
 
 def purge(*, keep_model_cache: bool, dry_run: bool) -> None:
+    """One implementation, shared with the settings window and the acceptance run.
+
+    A convenience script with its own copy is how the two stop agreeing, and the way
+    that shows up is a CI run that skips the work it exists to test and passes.
+    """
     print("Removing provisioning output:")
-    _remove(config.venv_dir(), "virtual environment", dry_run=dry_run)
-    _remove(config.llama_dir(), "llama runtime", dry_run=dry_run)
-    _remove(config.legacy_llama_binary(), "llama binary (legacy location)", dry_run=dry_run)
-    _remove(config.gguf_tools_dir(), "GGUF conversion tooling", dry_run=dry_run)
-    _remove(config.llama_staging_dir(), "llama installer staging", dry_run=dry_run)
-
-    print("Removing launcher state:")
-    _remove(config.state_file(), "state.json", dry_run=dry_run)
-    _remove(config.log_dir(), "logs", dry_run=dry_run)
-
-    # The backend's .env is written by the launcher on first run and appended to by
-    # setup_env. Both are regenerated, and leaving a stale port behind is exactly the
-    # kind of half-reset that makes the next run behave unlike a real first run.
-    env_path = config.backend_dir() / ".env"
-    _remove(env_path, "backend .env", dry_run=dry_run)
+    result = maintenance.provisioning_output(dry_run=dry_run)
+    for label in result.removed:
+        print(f"  - {label}")
+    for label in result.absent:
+        print(f"  - {label}: not present")
+    for label in result.failed:
+        print(f"  ! {label}: could not be removed")
 
     print("Removing autostart entry:")
-    if dry_run:
-        print(f"  - autostart: currently {'enabled' if autostart.is_enabled() else 'disabled'}")
-    else:
-        autostart.disable()
-        print("  - autostart: cleared")
+    maintenance.clear_autostart(dry_run=dry_run)
+    print("  - autostart: " + ("would be cleared" if dry_run else "cleared"))
 
     if keep_model_cache:
         print(f"Keeping the model cache at {config.hf_home()}")
     else:
         print("Removing the model cache:")
-        _remove(config.hf_home(), "HF_HOME", dry_run=dry_run)
+        for label in maintenance.model_cache(dry_run=dry_run).removed:
+            print(f"  - {label}")
 
 
 def reprovision() -> int:
