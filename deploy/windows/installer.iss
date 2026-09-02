@@ -76,17 +76,18 @@ begin
   Result := ExpandConstant('{localappdata}\AIScalerToolkit');
 end;
 
-procedure RemoveIfExists(Path: String; Label: String);
+// "Label" is reserved in Pascal -- it names a goto target -- hence What.
+procedure RemoveIfExists(Target: String; What: String);
 begin
-  if DirExists(Path) then
+  if DirExists(Target) then
   begin
-    Log('removing directory (' + Label + '): ' + Path);
-    DelTree(Path, True, True, True);
+    Log('removing directory (' + What + '): ' + Target);
+    DelTree(Target, True, True, True);
   end
-  else if FileExists(Path) then
+  else if FileExists(Target) then
   begin
-    Log('removing file (' + Label + '): ' + Path);
-    DeleteFile(Path);
+    Log('removing file (' + What + '): ' + Target);
+    DeleteFile(Target);
   end;
 end;
 
@@ -97,26 +98,26 @@ begin
   if CurStep <> usUninstall then
     Exit;
 
-  { An autostart entry pointing at a removed executable fails silently at every
-    login, forever. It is written by the application at runtime rather than by this
-    installer, so it has to be cleared here explicitly. }
+  // An autostart entry pointing at a removed executable fails silently at every
+  // login, forever. It is written by the application at runtime rather than by this
+  // installer, so it has to be cleared here explicitly.
   if RegValueExists(HKEY_CURRENT_USER, RunKey, RunValue) then
   begin
     Log('clearing autostart entry');
     RegDeleteValue(HKEY_CURRENT_USER, RunKey, RunValue);
   end;
 
-  { Provisioning output lives outside {app} on purpose, so uninstalling the program
-    does not touch it unless we do it here: the virtual environment, the llama
-    binary, the conversion tooling checkout, the installer's staging directory, and
-    the launcher's own state and logs. }
+  // Provisioning output that lives outside the program directory, so uninstalling
+  // does not touch it unless we do it here: the virtual environment, the launcher's
+  // state and logs, and the staging directory the llama installer uses. The llama
+  // runtime itself now lands under the program directory and goes with it.
   RemoveIfExists(DataDir(), 'launcher data, virtual environment and logs');
   RemoveIfExists(ExpandConstant('{localappdata}\Microsoft\WindowsApps\llama.exe'), 'llama binary');
   RemoveIfExists(ExpandConstant('{localappdata}\llama-app'), 'llama staging');
 
-  { The model cache is asked about rather than assumed. It is commonly tens of
-    gigabytes, it is shared with any other Hugging Face tooling on the machine, and
-    re-downloading it is expensive. }
+  // The model cache is asked about rather than assumed. It is commonly tens of
+  // gigabytes, it is shared with any other Hugging Face tooling on the machine, and
+  // re-downloading it is expensive.
   ModelCache := ExpandConstant('{userprofile}\.cache\huggingface');
   if DirExists(ModelCache) then
   begin
@@ -133,19 +134,28 @@ begin
   end;
 end;
 
+const
+  RequiredGB = 10;
+
 function InitializeSetup(): Boolean;
 var
-  FreeMB, TotalMB: Int64;
+  FreeBytes, TotalBytes: Int64;
+  FreeGB: Integer;
 begin
   Result := True;
-  { Setup itself is small; what needs room is the first launch. Saying so before the
-    install is more useful than failing partway through a multi-gigabyte download. }
-  if GetSpaceOnDisk(ExpandConstant('{localappdata}'), True, FreeMB, TotalMB) then
+  // Setup itself is small; what needs room is the first launch. Saying so before
+  // the install is more useful than failing partway through a download.
+  //
+  // GetSpaceOnDisk64 rather than GetSpaceOnDisk: the latter reports into Cardinal,
+  // and passing Int64 to it is a type mismatch the compiler rejects.
+  if GetSpaceOnDisk64(ExpandConstant('{localappdata}'), FreeBytes, TotalBytes) then
   begin
-    if FreeMB < 10240 then
+    FreeGB := FreeBytes div 1073741824;
+    if FreeGB < RequiredGB then
       Result := SuppressibleMsgBox(
-        'Only ' + IntToStr(FreeMB div 1024) + ' GB is free on this drive.' + #13#10#13#10 +
-        'First launch downloads the GPU runtime and needs about 10 GB. Continue anyway?',
+        'Only ' + IntToStr(FreeGB) + ' GB is free on this drive.' + #13#10#13#10 +
+        'First launch downloads the GPU runtime and needs about ' +
+        IntToStr(RequiredGB) + ' GB. Continue anyway?',
         mbConfirmation, MB_YESNO, IDYES) = IDYES;
   end;
 end;
