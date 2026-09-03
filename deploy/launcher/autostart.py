@@ -21,10 +21,17 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = config.APP_NAME
 
 
+# Passed by the autostart entry and by nothing else, so the application can tell a
+# login from someone choosing to open it. Without that distinction, logging in to
+# Windows could begin an unattended eight-minute setup: nothing in the launcher knew
+# it had not been asked for.
+LOGIN_FLAG = "--autostart"
+
+
 def _launch_command() -> str:
     if getattr(sys, "frozen", False):
-        return f'"{Path(sys.executable).resolve()}"'
-    return f'"{sys.executable}" -m launcher'
+        return f'"{Path(sys.executable).resolve()}" {LOGIN_FLAG}'
+    return f'"{sys.executable}" -m launcher {LOGIN_FLAG}'
 
 
 def is_enabled() -> bool:

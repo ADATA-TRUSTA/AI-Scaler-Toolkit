@@ -216,15 +216,6 @@ class SettingsApi:
         if str(url).startswith(("http://", "https://")):
             webbrowser.open(url)
 
-    def quit_application(self) -> dict[str, Any]:
-        """A second way out, because the first one can be invisible.
-
-        Quitting lives in the tray, and on Windows 11 the tray icon starts in the
-        overflow where someone may never find it. Anything that is the only way to do
-        something essential should not depend on a chevron.
-        """
-        threading.Thread(target=self._launcher.quit, name="quit", daemon=True).start()
-        return {"ok": True}
 
     # ------------------------------------------------------------- components
 
@@ -369,31 +360,7 @@ class Launcher:
             return True
         if self.window is not None:
             self.window.hide()
-        self._explain_hiding_once()
         return False
-
-    def _explain_hiding_once(self) -> None:
-        """Say where the application went, the first time it goes there.
-
-        Closing to a tray icon is only obvious if the icon is visible, and on Windows
-        11 a new one is put in the overflow behind the chevron by default, with no
-        supported way to promote it. So the first close looks exactly like the program
-        vanishing while its service keeps holding a port -- and the way to quit it is
-        behind an icon the user has not found yet.
-
-        Once. A message that appears every time is a message that gets dismissed
-        without reading, and this one only has to land the first time.
-        """
-        if state.get("hide_explained"):
-            return
-        state.set("hide_explained", True)
-        self._notify(
-            "Still running",
-            "The window is closed but the service is still running, so models stay "
-            "loaded for anything else using them.\n\n"
-            "Its icon is in the notification area — under the ^ arrow if you do not "
-            "see it. Quit from there, or from Settings, to stop it completely.",
-        )
 
     def _set_step(self, name: str, fraction: float | None, detail: str, elapsed: int) -> None:
         value = "null" if fraction is None else f"{fraction:.4f}"
@@ -626,6 +593,18 @@ class Launcher:
             started_at = time.monotonic()
 
             if not provisioned:
+                # A previous attempt that started and never finished. Nothing is lost
+                # -- setup_env installs only what is missing, so the finished parts go
+                # past in seconds -- but silence about it is what makes a resumed run
+                # look like the whole thing starting over on an application the user
+                # thought was installed.
+                resuming = state.get("setup_started")
+                state.set("setup_started", True)
+                if resuming:
+                    log.info("bootstrap: the previous setup did not finish; resuming")
+                    self._set_step("Resuming setup", None,
+                                   "picking up where the last attempt stopped", 0)
+
                 # The step list is published by provisioning itself, once it knows the
                 # accelerator -- see _publish_phases.
                 log.info("bootstrap: resolving the service port")
@@ -671,6 +650,7 @@ class Launcher:
                 spent = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
                 accelerator = state.get("accelerator") or "your CPU"
                 state.set("last_setup", f"{spent} ({accelerator})")
+                state.set("setup_started", False)
                 log.info("bootstrap: setup finished in %s", spent)
                 self._js("window.showDone(" + _js_string(f"Ready in {spent}, using {accelerator}.") + ")")
                 time.sleep(DONE_PAUSE_SECONDS)
@@ -944,12 +924,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="launcher", description=__doc__)
     parser.add_argument("--diagnose", action="store_true",
                         help="report what startup would do, without a window and without installing")
+    parser.add_argument(autostart.LOGIN_FLAG, dest="autostart", action="store_true",
+                        help="this launch came from the autostart entry, not from a person")
     args = parser.parse_args(argv)
 
     if args.diagnose:
         return diagnose()
 
     applog.banner()
+
+    # Logging in is not a request to install anything. Setup takes eight minutes, opens
+    # a window and downloads gigabytes, and doing that because someone turned their
+    # computer on is a surprise -- particularly since autostart is on by default, so
+    # nobody chose it. Whoever launches it deliberately gets the first-run flow; a
+    # login gets nothing until then.
+    if args.autostart and not provision.is_provisioned():
+        log.info("started by the autostart entry with setup not yet done; "
+                 "leaving it for a deliberate launch")
+        return 0
 
     import webview
 

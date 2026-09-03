@@ -215,19 +215,6 @@
         </div>
       </div>
 
-      <div class="row">
-        <div>
-          <div class="label">Quit</div>
-          <div class="hint">Closes the window and stops the service. Models stay loaded
-            for other applications until you do this, so closing the window on its own
-            leaves everything running.</div>
-        </div>
-        <div class="control">
-          <button id="quit">Quit</button>
-          <div class="status" id="quit-status"></div>
-        </div>
-      </div>
-
       <h2>Updates</h2>
       <div class="row">
         <div>
@@ -370,20 +357,6 @@
         }
         // On success this window closes and the main one takes over.
       });
-    });
-
-    el("quit").addEventListener("click", function (e) {
-      // The backend may be serving other applications, so this is not the same as
-      // closing a window. The launcher asks again if something is actually loaded.
-      if (!window.confirm(
-            "Quit and stop the service?\n\n" +
-            "Any loaded model becomes unavailable to other applications until you " +
-            "open this again.")) {
-        return;
-      }
-      e.target.disabled = true;
-      setStatus("quit-status", "Stopping…");
-      api.quit_application();
     });
 
     el("check-update").addEventListener("click", function (e) {

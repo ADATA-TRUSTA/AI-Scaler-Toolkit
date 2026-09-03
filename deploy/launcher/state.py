@@ -33,11 +33,11 @@ DEFAULTS: dict[str, Any] = {
     "accelerator": None,
     "installed_version": None,
     "last_update_check": None,
-    # Whether the "closing hides it, quit from the tray" notice has been shown. Once
-    # per installation: the tray icon may be in the Windows 11 overflow where it is
-    # not obvious, and someone who has not been told cannot know where the program
-    # went or how to stop it.
-    "hide_explained": False,
+    # True from the moment setup starts until it finishes. Finding it still set on a
+    # later start means the previous attempt was interrupted -- a quit, a reboot, a
+    # crash -- so the next one can say it is carrying on rather than looking like a
+    # fresh install of something the user thought was already installed.
+    "setup_started": False,
     # How many packages a complete install has on this machine. Used as the
     # denominator for the setup progress bar; until a run records one, a shipped
     # estimate stands in.
