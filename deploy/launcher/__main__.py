@@ -216,6 +216,16 @@ class SettingsApi:
         if str(url).startswith(("http://", "https://")):
             webbrowser.open(url)
 
+    def quit_application(self) -> dict[str, Any]:
+        """A second way out, because the first one can be invisible.
+
+        Quitting lives in the tray, and on Windows 11 the tray icon starts in the
+        overflow where someone may never find it. Anything that is the only way to do
+        something essential should not depend on a chevron.
+        """
+        threading.Thread(target=self._launcher.quit, name="quit", daemon=True).start()
+        return {"ok": True}
+
     # ------------------------------------------------------------- components
 
     def list_components(self) -> list[dict[str, Any]]:
@@ -359,13 +369,98 @@ class Launcher:
             return True
         if self.window is not None:
             self.window.hide()
+        self._explain_hiding_once()
         return False
+
+    def _explain_hiding_once(self) -> None:
+        """Say where the application went, the first time it goes there.
+
+        Closing to a tray icon is only obvious if the icon is visible, and on Windows
+        11 a new one is put in the overflow behind the chevron by default, with no
+        supported way to promote it. So the first close looks exactly like the program
+        vanishing while its service keeps holding a port -- and the way to quit it is
+        behind an icon the user has not found yet.
+
+        Once. A message that appears every time is a message that gets dismissed
+        without reading, and this one only has to land the first time.
+        """
+        if state.get("hide_explained"):
+            return
+        state.set("hide_explained", True)
+        self._notify(
+            "Still running",
+            "The window is closed but the service is still running, so models stay "
+            "loaded for anything else using them.\n\n"
+            "Its icon is in the notification area — under the ^ arrow if you do not "
+            "see it. Quit from there, or from Settings, to stop it completely.",
+        )
 
     def _set_step(self, name: str, fraction: float | None, detail: str, elapsed: int) -> None:
         value = "null" if fraction is None else f"{fraction:.4f}"
         self._js(
             f"window.setProgress({_js_string(name)}, {value}, {_js_string(detail)}, {elapsed})"
         )
+
+    def _show_progress_page(self, heading: str, detail: str = "") -> None:
+        """Put the window in front showing the setup page, ready to be driven.
+
+        The same surface first-run uses. A service action that takes a minute or two
+        with nothing on screen is indistinguishable from one that did nothing, which is
+        exactly how "Start backend" and "Restart backend" behaved: the work happened
+        and no one could tell.
+        """
+        self.set_window_size(SETUP_SIZE)
+        with contextlib.suppress(Exception):
+            self.window.load_url(str(UI_DIR / "progress.html"))
+        self.show_window()
+        time.sleep(1.0)  # the page has to load before anything can be pushed into it
+        self._js(f"window.setBrandBackground({_js_string(brand.page_background())})")
+        self._js(f"window.setMark({_js_string(_mark_data_uri())})")
+        self._set_step(heading, None, detail, 0)
+
+    def open_window(self) -> None:
+        """Show the window, and make sure there is something behind it.
+
+        Opening used to only raise the window, which is fine while the backend happens
+        to be up and shows an unreachable interface when it is not. Since nothing in
+        the tray starts the backend any more, opening has to: all or nothing, and this
+        is the "all".
+        """
+        self.show_window()
+        if self.service.status() == "ours":
+            return
+        log.info("opening the window with no backend running; starting it")
+        self.begin_service_action("start")
+
+    def begin_service_action(self, kind: str) -> None:
+        """Start, stop or restart the backend, with the window showing what happens."""
+        threading.Thread(target=self._service_action, args=(kind,),
+                         name=f"service-{kind}", daemon=True).start()
+
+    def _service_action(self, kind: str) -> None:
+        headings = {
+            "start": ("Starting the service", "loading the GPU runtime"),
+            "restart": ("Restarting the service", "loading the GPU runtime"),
+            "stop": ("Stopping the service", ""),
+        }
+        heading, detail = headings[kind]
+        log.info("tray: %s backend", kind)
+        try:
+            self._show_progress_page(heading, detail)
+            if kind == "stop":
+                self.service.unwatch()
+                self.service.stop()
+                self._set_step("The service is stopped", 1.0,
+                               "Start it again from the tray when you need it", 0)
+                return
+
+            action = self.service.start if kind == "start" else self.service.restart
+            action(on_wait=lambda seconds: self._set_step(heading, None, detail, seconds))
+            self.service.watch(self._service_lost)
+            self.reload_window()
+        except Exception as exc:
+            log.exception("tray: %s failed", kind)
+            self._js(f"window.showError({_js_string(str(exc))})")
 
     def begin_repair(self) -> None:
         """Stop the service, clear the environment, and set up again in the window."""
@@ -595,23 +690,25 @@ class Launcher:
         icon_file = _icon_path()
         image = Image.open(icon_file) if icon_file else Image.new("RGB", (64, 64), (47, 111, 237))
 
-        def backend_status(_item: Any) -> str:
-            return {
-                "ours": "Backend: running",
-                "free": "Backend: stopped",
-                "foreign": "Backend: port taken by another program",
-            }[self.service.status()]
-
+        # Four items, and none of them mention the backend.
+        #
+        # This menu used to be a service console: a status line plus Start, Stop and
+        # Restart. All of it exposed an implementation detail as something to manage,
+        # and every one of those items cost a bug -- a status line that froze, a Start
+        # offered while it was already running, a Stop that silently failed on a
+        # service this launcher had adopted rather than spawned.
+        #
+        # The rule is now all or nothing: opening the window makes sure the backend is
+        # up, and Quit takes everything down. There is no in-between state for anyone
+        # to manage, so there is nothing to put in a menu.
+        #
+        # Checking for updates went to the settings page. It belongs where someone
+        # goes to look for it, not behind a right-click.
         menu = pystray.Menu(
-            pystray.MenuItem("Open window", lambda: self.show_window(), default=True),
+            pystray.MenuItem("Open window", lambda: self.open_window(), default=True),
             pystray.MenuItem("Open full interface in browser", lambda: self.open_in_browser()),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem(backend_status, None, enabled=False),
-            pystray.MenuItem("Start backend", lambda: self._guard(self.service.start)),
-            pystray.MenuItem("Restart backend", lambda: self._guard(self.service.restart)),
-            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings", lambda: self.open_settings()),
-            pystray.MenuItem("Check for updates", lambda: self._check_updates()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", lambda: self.quit()),
         )
@@ -623,35 +720,38 @@ class Launcher:
         except Exception as exc:
             self._js(f"window.showError({_js_string(str(exc))})")
 
-    def _check_updates(self) -> None:
-        """Say something in every case.
-
-        Opening a page on success and doing nothing otherwise makes "no update" and
-        "the check failed" look identical, and both look like the menu item is broken.
-        """
-        status = updater.check()
-        log.info("tray update check: latest=%s available=%s reason=%s",
-                 status.latest, status.available, status.reason)
-        if status.available:
-            updater.open_release_page(status)
-            self._notify(f"Version {status.latest} is available",
-                         "Opening the release page.")
-        elif status.reason == "none-published":
-            self._notify("No updates", "No releases have been published yet.")
-        elif status.reason == "unreachable":
-            self._notify("Could not check for updates",
-                         "The releases page could not be reached.")
-        else:
-            self._notify("No updates", f"You are on the newest release ({status.current}).")
-
     def _notify(self, title: str, message: str) -> None:
-        """Best effort: a tray balloon is not worth an exception on a machine that has
-        notifications turned off."""
-        if self.tray is None:
-            log.info("notification (no tray): %s -- %s", title, message)
+        """Say it in a dialog the reader has to dismiss.
+
+        This was a tray balloon, and a balloon is not an answer: Windows suppresses
+        them under focus assist, per-application notification settings, and during
+        full-screen use, so "Check for updates" was reported as doing nothing at all.
+        A message box cannot be silently swallowed, and an update check is a thing
+        someone asked for and is waiting on -- interrupting them is the point.
+        """
+        log.info("notification: %s -- %s", title, message)
+        if sys.platform != "win32":
+            with contextlib.suppress(Exception):
+                if self.tray is not None:
+                    self.tray.notify(message, title)
             return
-        with contextlib.suppress(Exception):
-            self.tray.notify(message, title)
+
+        import ctypes
+
+        MB_OK, MB_ICONINFORMATION, MB_SETFOREGROUND, MB_TOPMOST = 0x0, 0x40, 0x10000, 0x40000
+
+        def show() -> None:
+            with contextlib.suppress(Exception):
+                ctypes.windll.user32.MessageBoxW(
+                    None, message, f"{config.APP_TITLE} — {title}",
+                    MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST,
+                )
+
+        # On its own thread. A message box blocks the thread that raised it, and these
+        # are raised from menu callbacks, which pystray runs on the thread that also
+        # serves the tray icon -- so a dialog left on screen made the whole tray
+        # unresponsive, with no menu until someone found the dialog and dismissed it.
+        threading.Thread(target=show, name="notify", daemon=True).start()
 
     # ------------------------------------------------------------------ exit
 
@@ -666,20 +766,86 @@ class Launcher:
 
         Closing the settings window is safe; the install runs here, not there. Quitting
         is what takes it down, so quitting is what asks.
+
+        Work in the backend is asked about for a different reason. The service holds
+        loaded models and serves them to other applications, not only to this window,
+        so stopping it can break something the user is doing somewhere else entirely --
+        which they will not connect to having quit a tray icon. Only when something is
+        actually loaded or training, because a confirmation that appears every time is
+        one nobody reads.
         """
+        if not self._confirm_quit_while_busy():
+            log.info("quit cancelled: the backend is in use")
+            return
+
         job = components.current_job()
         if job and job["running"] and not self._confirm_quit_during_install(job["id"]):
             log.info("quit cancelled: %s is still installing", job["id"])
             return
         self._quitting.set()
         try:
+            self.service.unwatch()
             self.service.stop()
         finally:
             if self.tray is not None:
-                self.tray.stop()
-            if self.window is not None:
                 with contextlib.suppress(Exception):
-                    self.window.destroy()
+                    self.tray.stop()
+            # Every window, not just the main one. pywebview's loop runs until the last
+            # window closes, so leaving the settings window open meant Quit removed the
+            # tray icon and the main window while the process kept running -- an
+            # application with no way left to reach it and no way to quit it.
+            for window in (self.settings_window, self.window):
+                if window is not None:
+                    with contextlib.suppress(Exception):
+                        window.destroy()
+            self.settings_window = None
+
+    def _confirm_quit_while_busy(self) -> bool:
+        """True to go ahead. Silent unless the backend is holding something."""
+        body = service_manager.health(self.service.port, timeout=2.0)
+        if not body:
+            return True
+        doing = []
+        if body.get("training_active"):
+            doing.append("a training run is in progress")
+        if body.get("model_loaded"):
+            doing.append("a model is loaded")
+        if not doing:
+            return True
+
+        log.info("quit while busy: %s", "; ".join(doing))
+        return self._ask(
+            "The backend is in use",
+            f"{' and '.join(doing).capitalize()}.\n\n"
+            "Other applications can be using the loaded model through this service, "
+            "and quitting stops it for them too.\n\n"
+            "OK: quit anyway.\nCancel: leave it running.",
+        )
+
+    def _ask(self, title: str, message: str) -> bool:
+        """A yes/no the user cannot miss, without needing a window to hang it on."""
+        if sys.platform != "win32":
+            target = self.settings_window or self.window
+            if target is None:
+                return True
+            with contextlib.suppress(Exception):
+                return bool(target.create_confirmation_dialog(title, message))
+            return True
+
+        import ctypes
+
+        MB_OKCANCEL, MB_ICONWARNING = 0x1, 0x30
+        MB_SETFOREGROUND, MB_TOPMOST = 0x10000, 0x40000
+        IDOK = 1
+        try:
+            answer = ctypes.windll.user32.MessageBoxW(
+                None, message, f"{config.APP_TITLE} — {title}",
+                MB_OKCANCEL | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+            )
+        except Exception:
+            log.exception("could not ask")
+            return True
+        return answer == IDOK
 
     def _confirm_quit_during_install(self, component_id: str) -> bool:
         """Ask before abandoning an install. Defaults to quitting if we cannot ask."""

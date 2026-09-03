@@ -51,6 +51,42 @@ project, which puts tens of gigabytes of models under the install directory. The
 launcher writes its keys on first run and only ever fills in ones that are absent,
 because `setup_env` appends to the same file and the user may have edited it.
 
+## The tray menu, and why it stopped being a service console
+
+Four items: open the window, open the interface in a browser, Settings, Quit. There is
+no backend status line and no Start, Stop or Restart. The specification asked for
+those; they were built, and then removed.
+
+Each one was a way to leave the application in a state nobody wants. Worse, each was
+wrong in a way only visible by clicking it with a mouse:
+
+- the status line froze, because pystray re-reads a callable menu item only when
+  `update_menu()` is called, so it went on saying "Backend: running" after the service
+  had stopped;
+- "Start backend" was offered while it was already running, where it adopts the
+  running service and does nothing;
+- "Stop backend" silently failed whenever the launcher had adopted a service rather
+  than spawned it, because stopping worked by process handle and there was none.
+
+The rule now is all or nothing. Opening the window makes sure the backend is up.
+Quit takes everything down. Nothing sits between those, so nothing needs managing.
+
+Closing the window still hides to the tray rather than quitting, and that is
+deliberate: the service holds loaded models and serves them to *other applications*
+over its API, not only to this window. Closing a window here is not the same as
+finishing with the service.
+
+That makes Quit consequential, so two things guard it. Quitting asks first when
+`/health` reports a model loaded or a training run active -- only then, because a
+confirmation shown every time is one nobody reads. And the first time the window is
+closed, the application says where it went: on Windows 11 a new tray icon starts in
+the overflow behind the chevron, with no supported way to promote it, so an
+application that hides there without saying so has effectively vanished. Settings
+carries a Quit button for the same reason -- nothing essential should depend on
+finding an icon Windows chose to hide.
+
+Checking for updates moved to Settings. It belongs where someone goes to look for it.
+
 ## Optional third-party components
 
 The Components tab in settings installs Hermes and ComfyUI. `launcher/components.py`

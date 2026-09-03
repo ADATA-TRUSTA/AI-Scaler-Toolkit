@@ -43,6 +43,57 @@ def is_port_free(port: int, host: str = config.SERVICE_HOST) -> bool:
         return sock.connect_ex((host, port)) != 0
 
 
+def listening_pid(port: int, host: str = config.SERVICE_HOST) -> int | None:
+    """Which process is listening on this port, if any.
+
+    Needed because a launcher can adopt a service it did not spawn, and then has no
+    handle to stop it with. netstat rather than a library: this runs inside a frozen
+    build where every dependency is weight, and the answer is one line of output.
+    """
+    if not config.IS_WINDOWS:
+        return None
+    try:
+        result = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                                capture_output=True, text=True, timeout=30,
+                                creationflags=config.subprocess_flags())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    needle = f"{host}:{port}"
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[1] == needle and parts[3].upper() == "LISTENING":
+            with contextlib.suppress(ValueError):
+                return int(parts[4])
+    return None
+
+
+def terminate_pid(pid: int) -> bool:
+    """Ask a process to go, then insist. Someone else's service is still someone's."""
+    try:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T"],
+                       capture_output=True, timeout=20,
+                       creationflags=config.subprocess_flags())
+        time.sleep(1.0)
+        if listening_pid_alive(pid):
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=20,
+                           creationflags=config.subprocess_flags())
+    except (OSError, subprocess.SubprocessError):
+        log.warning("could not stop pid %s", pid)
+        return False
+    return True
+
+
+def listening_pid_alive(pid: int) -> bool:
+    try:
+        result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                                capture_output=True, text=True, timeout=20,
+                                creationflags=config.subprocess_flags())
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return str(pid) in result.stdout
+
+
 def next_free_port(start: int, attempts: int = 50) -> int:
     for port in range(start, start + attempts):
         if is_port_free(port):
@@ -220,7 +271,8 @@ class ServiceManager:
             + _log_tail(service_log)
         )
 
-    def watch(self, on_lost: Callable[[str], None], interval: float = 10.0) -> None:
+    def watch(self, on_lost: Callable[[str], None], interval: float = 10.0,
+              on_tick: Callable[[PortStatus], None] | None = None) -> None:
         """Notice if the service goes away after it started.
 
         Starting it is checked carefully and then never looked at again, which means a
@@ -229,13 +281,21 @@ class ServiceManager:
         answering. Nothing here restarts it; being told is the point, because an
         automatic restart of something that just crashed usually crashes again and
         buries the reason.
+
+        on_tick receives the status on every poll, whatever it is. This loop is already
+        asking the question the tray's status line displays, so anything that wants to
+        stay in step with it can do so here for free rather than probing again.
         """
         if self._watch_thread is not None:
             return
 
         def loop() -> None:
             while not self._watch_stop.wait(interval):
-                if self.status() == "ours":
+                status = self.status()
+                if on_tick is not None:
+                    with contextlib.suppress(Exception):
+                        on_tick(status)
+                if status == "ours":
                     continue
                 # One missed probe is not a death: the service blocks its event loop
                 # briefly while a model loads. Confirm before saying anything.
@@ -260,20 +320,50 @@ class ServiceManager:
         self._watch_thread = None
 
     def stop(self, timeout: float = 20.0) -> None:
-        """Only called from Quit. Everything else leaves the service running."""
+        """Stop the service, whether or not this process is the one that started it.
+
+        Terminating by process handle covers only the service we spawned. Adoption is
+        a normal path -- a launcher that starts while a healthy service is already
+        there takes it over rather than fighting for the port -- and an adopted service
+        has no handle here. Stopping it was therefore a no-op that reported success:
+        "Stop backend" left the backend running, and Quit, whose docstring calls itself
+        the only path that stops the service, left it running too.
+
+        Waiting for the port afterwards matters as well. uvicorn keeps the socket bound
+        while it shuts down, so a status probe in that window finds something listening
+        that does not answer /health and calls it a foreign program -- which is what
+        the tray displayed straight after a clean stop.
+        """
         self.unwatch()
-        if self._process is None or self._process.poll() is not None:
-            self._process = None
-            return
-        self._process.terminate()
-        try:
-            self._process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self._process.kill()
+        if self._process is not None and self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
         self._process = None
         if self._log_handle is not None:
             self._log_handle.close()
             self._log_handle = None
+
+        if not self._wait_for_port(5):
+            owner = listening_pid(self.port)
+            if owner is not None:
+                log.info("port %s is held by pid %s, which this launcher did not "
+                         "start; stopping it", self.port, owner)
+                terminate_pid(owner)
+                self._wait_for_port(10)
+
+        if not is_port_free(self.port):
+            log.warning("port %s is still occupied after stopping the service", self.port)
+
+    def _wait_for_port(self, seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if is_port_free(self.port):
+                return True
+            time.sleep(0.2)
+        return is_port_free(self.port)
 
     def restart(self) -> None:
         self.stop()
