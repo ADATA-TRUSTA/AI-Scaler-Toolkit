@@ -43,6 +43,20 @@ OutputBaseFilename=AIScalerToolkit_{#AppVersion}_Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; The application refuses a polite close on purpose: its window hides to the tray
+; instead of exiting, because the service behind it holds loaded models for other
+; programs. Restart Manager asks politely, gets refused, and Setup then aborts and
+; rolls back -- so installing an update while the application was running did nothing
+; at all, and under /VERYSILENT it did nothing silently.
+;
+; force closes it rather than asking. The backend is a separate process and survives,
+; which is the wanted outcome twice over: models stay loaded for whatever else is
+; using them, and the newly installed launcher adopts the running service on its next
+; start rather than waiting for a port it cannot have.
+CloseApplications=force
+; Setup does not relaunch it. A launcher that reappears by itself after an install the
+; user ran from Explorer is a surprise; the shortcut is right there.
+RestartApplications=no
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#LauncherExe}
 ; The installer carries only the base. The GPU runtime is fetched on first launch, so
