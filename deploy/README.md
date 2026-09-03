@@ -87,6 +87,50 @@ finding an icon Windows chose to hide.
 
 Checking for updates moved to Settings. It belongs where someone goes to look for it.
 
+Closing the window says nothing, and Settings has no Quit button. Both existed briefly
+as insurance against a tray icon the user might not find, and both were the wrong
+answer: hiding to the tray is what every application with a tray icon does without
+explaining itself, and a second way to quit does not fix a first one being unreliable.
+
+## A login is not a request to install
+
+The autostart entry passes `--autostart`, and a launch carrying it exits immediately if
+setup has not been completed.
+
+Without that flag nothing separated a login from a person opening the application, and
+bootstrap begins setup whenever it finds itself unprovisioned -- so turning the
+computer on could start an eight-minute install with a window appearing and gigabytes
+downloading, for a decision nobody made. Autostart is on by default, which is what
+makes this worse rather than better: the user did not choose the thing that chose to
+install.
+
+Once setup has been done, a login starts the service as before. That is what autostart
+is for; installing is not.
+
+`state["setup_started"]` is written when setup begins and cleared when it ends. Finding
+it still set on a later start means the last attempt was interrupted, and the window
+says "Resuming setup" instead of looking like a fresh install of something the user
+believed they already had. Nothing resumes a download -- `setup_env` installs only what
+is missing, so finished work goes past in seconds and the llama archive starts over.
+The flag exists to be honest about that, not to hide it.
+
+## One brand in the interface, another on the icon
+
+`BRAND_BY_PLATFORM` gives the Windows payload the ADATA frontend; `layout.ICON_BRAND`
+is `trusta` and is not per-platform. So a Windows installation reads ADATA in the
+interface and wears the TRUSTA mark on its executable, its tray icon, its shortcuts
+and its setup screen -- all four come from the same source, so they agree with each
+other and disagree with the frontend.
+
+Left as it is deliberately. Tying the icon to the platform is a two-line change, but
+there is no ADATA icon to tie it to: `deploy/assets` holds only TRUSTA artwork, and
+the one ADATA image in the repository is 348x348 in the root `assets` directory, which
+serves README headers and is not where application icons come from. Changing the code
+without the artwork would produce a build that fails its own icon assertion.
+
+If ADATA icons arrive, put `adata-icon-1024.png` in `deploy/assets` and make
+`ICON_BRAND` follow the platform the way the frontend package already does.
+
 ## Optional third-party components
 
 The Components tab in settings installs Hermes and ComfyUI. `launcher/components.py`

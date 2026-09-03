@@ -43,6 +43,11 @@ OutputBaseFilename=AIScalerToolkit_{#AppVersion}_Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; The same icon the application wears, taken from the payload rather than kept as a
+; second copy that can drift from it. Without this, Setup.exe carried Inno's generic
+; icon -- so the first thing anyone sees of this product looked like a stock installer
+; belonging to nothing in particular.
+SetupIconFile={#PayloadDir}\app.ico
 ; The application refuses a polite close on purpose: its window hides to the tray
 ; instead of exiting, because the service behind it holds loaded models for other
 ; programs. Restart Manager asks politely, gets refused, and Setup then aborts and

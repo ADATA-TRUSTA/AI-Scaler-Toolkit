@@ -225,6 +225,15 @@
 
   window.setPhase = function (key) {
     seen[key] = true;
+    // Everything ahead of the phase that just started is finished, whether or not it
+    // announced itself. Setup skips work it does not need -- on a resumed run the
+    // conversion tooling is already there, so it goes straight from sync to llama --
+    // and marking only the phases that reported left a grey gap in the middle of a
+    // run where nothing had gone wrong. A step that was not needed is a step that is
+    // done.
+    var at = keys.indexOf(key);
+    for (var i = 0; i < at; i++) { seen[keys[i]] = true; }
+
     var pips = document.getElementById("phases").querySelectorAll(".pip");
     for (var n = 0; n < pips.length; n++) {
       var k = keys[n];

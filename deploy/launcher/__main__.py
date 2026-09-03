@@ -763,22 +763,37 @@ class Launcher:
             log.info("quit cancelled: %s is still installing", job["id"])
             return
         self._quitting.set()
-        try:
-            self.service.unwatch()
-            self.service.stop()
-        finally:
-            if self.tray is not None:
+
+        # Everything visible goes now, and the service is stopped afterwards in
+        # shutdown(), once the window loop has ended. Stopping first meant up to
+        # fifteen seconds of a window that would not close while the backend was
+        # terminated and its port waited on -- the application looked hung at exactly
+        # the moment the user had finished with it.
+        if self.tray is not None:
+            with contextlib.suppress(Exception):
+                self.tray.stop()
+        # Every window, not just the main one. pywebview's loop runs until the last
+        # window closes, so leaving the settings window open meant Quit removed the
+        # tray icon and the main window while the process kept running -- an
+        # application with no way left to reach it and no way to quit it.
+        for window in (self.settings_window, self.window):
+            if window is not None:
                 with contextlib.suppress(Exception):
-                    self.tray.stop()
-            # Every window, not just the main one. pywebview's loop runs until the last
-            # window closes, so leaving the settings window open meant Quit removed the
-            # tray icon and the main window while the process kept running -- an
-            # application with no way left to reach it and no way to quit it.
-            for window in (self.settings_window, self.window):
-                if window is not None:
-                    with contextlib.suppress(Exception):
-                        window.destroy()
-            self.settings_window = None
+                    window.destroy()
+        self.settings_window = None
+
+    def shutdown(self) -> None:
+        """Stop the service. Runs after the window loop ends, on the way out.
+
+        Deliberately not part of quit(): the user should not watch a dead window while
+        a subprocess is terminated and a port is waited on. By the time this runs there
+        is nothing on screen to keep waiting.
+        """
+        log.info("shutting down the service")
+        with contextlib.suppress(Exception):
+            self.service.unwatch()
+        with contextlib.suppress(Exception):
+            self.service.stop()
 
     def _confirm_quit_while_busy(self) -> bool:
         """True to go ahead. Silent unless the backend is holding something."""
@@ -1001,6 +1016,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         webview.start(launcher.bootstrap, debug=False)
     finally:
+        # After the windows are gone, so nobody is looking at a frozen one while the
+        # backend is terminated. The loop only ends on Quit, and if it ever ends for
+        # another reason the service should stop then too.
+        launcher.shutdown()
         single_instance.release()
     log.info("window loop ended; exiting")
     return 0
