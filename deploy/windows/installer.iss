@@ -58,6 +58,14 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[UninstallDelete]
+; The uninstaller removes what it recorded at install time and nothing else, and the
+; backend writes __pycache__ into its own program directory as it runs. Without this
+; the directory survives an uninstall holding a scattering of .pyc files -- observed,
+; not hypothetical -- and an application that looks half-removed is worse than one
+; that is still there.
+Type: filesandordirs; Name: "{app}"
+
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#LauncherExe}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
@@ -91,13 +99,23 @@ begin
   end;
 end;
 
-procedure CurUninstallStepChanged(CurStep: TUninstallStep);
+function ModelCacheDir(): String;
+begin
+  // {%HF_HOME} first because the launcher writes HF_HOME into the backend's .env and
+  // a user may have pointed it elsewhere; the default is what Hugging Face uses.
+  //
+  // {%USERPROFILE} and not {userprofile}: the latter is not an Inno Setup constant,
+  // and ExpandConstant raises on an unknown one. That raise happened here, inside
+  // CurUninstallStepChanged, where an exception is fatal -- see below.
+  Result := ExpandConstant('{%HF_HOME}');
+  if Result = '' then
+    Result := ExpandConstant('{%USERPROFILE}\.cache\huggingface');
+end;
+
+procedure CleanUpBeyondTheProgramDirectory();
 var
   ModelCache: String;
 begin
-  if CurStep <> usUninstall then
-    Exit;
-
   // An autostart entry pointing at a removed executable fails silently at every
   // login, forever. It is written by the application at runtime rather than by this
   // installer, so it has to be cleared here explicitly.
@@ -118,7 +136,7 @@ begin
   // The model cache is asked about rather than assumed. It is commonly tens of
   // gigabytes, it is shared with any other Hugging Face tooling on the machine, and
   // re-downloading it is expensive.
-  ModelCache := ExpandConstant('{userprofile}\.cache\huggingface');
+  ModelCache := ModelCacheDir();
   if DirExists(ModelCache) then
   begin
     if SuppressibleMsgBox(
@@ -131,6 +149,30 @@ begin
       RemoveIfExists(ModelCache, 'model cache')
     else
       Log('keeping the model cache at ' + ModelCache);
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurStep: TUninstallStep);
+begin
+  if CurStep <> usUninstall then
+    Exit;
+
+  // Guarded, because an exception raised here is fatal to the uninstall: the program
+  // directory, the shortcuts and the registry entry are all removed *after* this
+  // returns, so anything that throws leaves an application that is visibly installed
+  // and no longer works.
+  //
+  // That is not a precaution. ExpandConstant on a constant that does not exist threw
+  // exactly here, and the uninstall stopped having deleted four gigabytes of the
+  // environment while leaving every sign of the application in place.
+  //
+  // Everything this procedure does is extra cleanup. None of it is worth abandoning
+  // the uninstall for, so a failure is logged and the uninstall carries on.
+  try
+    CleanUpBeyondTheProgramDirectory();
+  except
+    Log('cleanup beyond the program directory failed: ' + GetExceptionMessage);
+    Log('continuing with the uninstall regardless');
   end;
 end;
 
