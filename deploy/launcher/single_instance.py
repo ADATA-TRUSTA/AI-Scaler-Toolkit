@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import socket
 import threading
+import time
 from collections.abc import Callable
 
 from . import applog
@@ -29,8 +30,16 @@ PORT = 48571
 # this application. Being wrong in that direction would mean refusing to start at all.
 HELLO = b"ai-scaler-toolkit/1 activate\n"
 ACK = b"ai-scaler-toolkit/1 ok\n"
+# Answered while this copy is on its way out. A launch that arrives then must not be
+# told "already running, I will come forward" -- the copy answering is closing and will
+# not come forward, so the click did nothing and the user had to click again.
+BYE = b"ai-scaler-toolkit/1 closing\n"
 
 _TIMEOUT = 2.0
+# How long a launch waits for a closing copy to let go of the port before giving up on
+# it. Shutting down stops a service and waits for its port, which is seconds, not
+# minutes.
+_HANDOVER = 20.0
 
 
 class _Listener(threading.Thread):
@@ -39,6 +48,7 @@ class _Listener(threading.Thread):
         self._server = server
         self._on_activate = on_activate
         self._stop = threading.Event()
+        self._quitting = threading.Event()
 
     def run(self) -> None:
         while not self._stop.is_set():
@@ -51,6 +61,10 @@ class _Listener(threading.Thread):
                     conn.settimeout(_TIMEOUT)
                     if conn.recv(len(HELLO)) != HELLO:
                         continue
+                    if self._quitting.is_set():
+                        conn.sendall(BYE)
+                        log.info("a launch arrived while closing; told it to wait")
+                        continue
                     conn.sendall(ACK)
                 except OSError:
                     continue
@@ -59,6 +73,9 @@ class _Listener(threading.Thread):
                 self._on_activate()
             except Exception:
                 log.exception("could not bring the window forward")
+
+    def begin_quitting(self) -> None:
+        self._quitting.set()
 
     def close(self) -> None:
         self._stop.set()
@@ -69,14 +86,31 @@ class _Listener(threading.Thread):
 _listener: _Listener | None = None
 
 
-def _tell_running_instance() -> bool:
-    """True when an existing copy answered and was asked to show itself."""
+def begin_quitting() -> None:
+    """Stop claiming to be a copy that can be raised.
+
+    Called when shutdown starts, which takes a few seconds: it stops a service and
+    waits for its port. A launch during that window used to be answered with "already
+    running", exit quietly, and appear to do nothing at all -- the user pressed Quit,
+    clicked the shortcut, and had to click a second time.
+    """
+    if _listener is not None:
+        _listener.begin_quitting()
+
+
+def _ask_running_instance() -> str:
+    """"raised" if a copy took over, "closing" if one is on its way out, else "none"."""
     try:
         with socket.create_connection((HOST, PORT), timeout=_TIMEOUT) as client:
             client.sendall(HELLO)
-            return client.recv(len(ACK)) == ACK
+            answer = client.recv(max(len(ACK), len(BYE)))
     except OSError:
-        return False
+        return "none"
+    if answer == ACK:
+        return "raised"
+    if answer == BYE:
+        return "closing"
+    return "none"
 
 
 def acquire(on_activate: Callable[[], None]) -> bool:
@@ -88,15 +122,29 @@ def acquire(on_activate: Callable[[], None]) -> bool:
     """
     global _listener
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        # Deliberately not SO_REUSEADDR: the point here is that the second bind fails.
-        server.bind((HOST, PORT))
-    except OSError:
-        server.close()
-        if _tell_running_instance():
+    deadline = time.monotonic() + _HANDOVER
+    while True:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            # Deliberately not SO_REUSEADDR: the point here is that the second bind fails.
+            server.bind((HOST, PORT))
+            break
+        except OSError:
+            server.close()
+
+        answer = _ask_running_instance()
+        if answer == "raised":
             log.info("already running; asked the existing window to come forward")
             return False
+        if answer == "closing" and time.monotonic() < deadline:
+            # It is going away. Waiting for it is what the person who just clicked
+            # expects; exiting quietly would look like the click did nothing.
+            time.sleep(0.5)
+            continue
+        if answer == "closing":
+            log.warning("the closing copy still holds port %d after %.0fs; starting "
+                        "without the single-instance guard", PORT, _HANDOVER)
+            return True
         # The port is held by something that is not us. Refusing to start over a port
         # clash would be a worse outcome than running twice, so carry on and say so.
         log.warning("port %d is in use by something else; starting without the "

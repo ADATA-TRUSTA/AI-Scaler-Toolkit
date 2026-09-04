@@ -13,6 +13,7 @@ enough for a person to read.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -25,6 +26,53 @@ from pathlib import Path
 from . import applog, config, env_file, progress, state
 
 log = applog.get("provision")
+
+# The setup_env process while one is running, so quitting can stop it.
+#
+# Without this it outlived the window: closing the application ended the window loop
+# and left provisioning running to completion in a process with no interface, which
+# then started a service -- while a second launch, seeing the guard released, started
+# its own. Two copies provisioning and two services on one port, from one click.
+#
+# Stopping it is safe because setup is resumable: state records that setup began, and
+# setup_env installs only what is missing, so the next run carries on rather than
+# starting over.
+_running: subprocess.Popen | None = None
+_cancelled = False
+
+
+class Cancelled(RuntimeError):
+    """Setup was stopped on purpose. Not a failure, and not worth reporting as one."""
+
+
+def cancel() -> bool:
+    """Stop a setup that is in progress. True if there was one."""
+    global _cancelled
+    process = _running
+    if process is None or process.poll() is not None:
+        return False
+    _cancelled = True
+    log.info("cancelling setup_env (pid %s)", process.pid)
+
+    # The tree, not the process. setup_env is a shell script whose actual work happens
+    # in children -- uv resolving and downloading, curl fetching a runtime, git doing a
+    # sparse checkout. Killing only the shell leaves those writing into a virtual
+    # environment nobody is watching any more, which is how a half-written environment
+    # that reports itself as installed gets made.
+    if config.IS_WINDOWS:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           capture_output=True, timeout=20,
+                           creationflags=config.subprocess_flags())
+    with contextlib.suppress(OSError):
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        log.warning("setup_env did not stop within 10s; killing it")
+        with contextlib.suppress(OSError):
+            process.kill()
+    return True
 
 MARKER = re.compile(r"^\[setup_env\]\s*(?P<message>.*)$")
 ACCEL_SUMMARY = re.compile(r"^\s*Accelerator\s*:\s*(?P<accel>\S+)")
@@ -194,6 +242,8 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phas
     accelerator = ""
     tail: list[str] = []
 
+    global _running, _cancelled
+    _cancelled = False
     with log_path.open("w", encoding="utf-8") as log_file:
         log.info("starting setup_env")
         process = subprocess.Popen(
@@ -210,6 +260,7 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phas
             creationflags=config.subprocess_flags(),
         )
         assert process.stdout is not None
+        _running = process
         for raw in process.stdout:
             line = raw.rstrip("\n")
             log_file.write(line + "\n")
@@ -247,7 +298,14 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phas
                     on_phase(phase, label)
 
         code = process.wait()
+        _running = None
     log.info("setup_env exited with %s", code)
+
+    if _cancelled:
+        # We stopped it. Reporting a non-zero exit as a failure would put
+        # "Provisioning failed" in the log for someone who pressed Quit, which is the
+        # first thing anyone reads when something is actually wrong.
+        raise Cancelled("setup was cancelled")
 
     if code != 0:
         raise RuntimeError(

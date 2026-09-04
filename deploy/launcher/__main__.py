@@ -625,6 +625,12 @@ class Launcher:
                     on_phases=self._publish_phases,
                 )
 
+            if self._quitting.is_set():
+                # Quit landed while setup was running. It has been cancelled; starting
+                # a service now would leave one behind with nothing to manage it.
+                log.info("bootstrap: quitting, so not starting the service")
+                return
+
             log.info("bootstrap: starting the service")
             self._js(f"window.setPhase({_js_string('done')})")
             self._set_step("Starting the service", None, "loading the GPU runtime", 0)
@@ -657,6 +663,10 @@ class Launcher:
                 self.reload_window()
             log.info("bootstrap: done")
 
+        except provision.Cancelled:
+            # Quit landed mid-setup. Nothing is wrong and there is nothing on screen
+            # left to tell.
+            log.info("bootstrap: setup was cancelled by quitting")
         except Exception as exc:
             log.exception("bootstrap failed")
             self._js(f"window.showError({_js_string(str(exc))})")
@@ -763,6 +773,11 @@ class Launcher:
             log.info("quit cancelled: %s is still installing", job["id"])
             return
         self._quitting.set()
+        # From here on a launch must not be told "already running, I will come
+        # forward": this copy is on its way out and will not come forward, so the
+        # click did nothing and the user had to click a second time.
+        with contextlib.suppress(Exception):
+            single_instance.begin_quitting()
 
         # Everything visible goes now, and the service is stopped afterwards in
         # shutdown(), once the window loop has ended. Stopping first meant up to
@@ -790,6 +805,15 @@ class Launcher:
         is nothing on screen to keep waiting.
         """
         log.info("shutting down the service")
+        # Provisioning first, because it is what starts the service. Closing the
+        # window ends the window loop but leaves bootstrap running in its thread:
+        # setup ran to completion in a process with no interface and then started a
+        # backend, while the next launch -- seeing the guard gone -- provisioned and
+        # started its own on the same port. Setup is resumable, so stopping it costs
+        # the user nothing.
+        with contextlib.suppress(Exception):
+            if provision.cancel():
+                log.info("cancelled the setup that was still running")
         with contextlib.suppress(Exception):
             self.service.unwatch()
         with contextlib.suppress(Exception):
