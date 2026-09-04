@@ -74,6 +74,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
 
+[InstallDelete]
+; Installing adds and overwrites; it never removes something an older version put
+; there. The console used to ship in the payload and no longer does, so without this
+; an upgrade leaves it behind -- 67 files with no interpreter to run them, in the
+; directory a user browses when looking for the application.
+Type: filesandordirs; Name: "{app}\console"
+
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
