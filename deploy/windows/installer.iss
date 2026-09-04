@@ -91,7 +91,21 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#LauncherExe}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#LauncherExe}"; Description: "Start {#AppName}"; Flags: nowait postinstall skipifsilent
+; Through Explorer, not directly, so the application is not a child of Setup.
+;
+; Setup runs with the redirection-trust mitigation enabled -- reasonable for an
+; installer, which must not be tricked into following a junction someone planted. A
+; child process inherits it, and an application that inherits it cannot traverse a
+; junction either. uv keeps its managed Python behind one: the interpreter lives at
+; cpython-3.12.13-... and everything refers to it through the minor-version alias
+; cpython-3.12-..., which on Windows is a junction.
+;
+; So ticking "Start AI Scaler Toolkit" on the last page produced a first run in which
+; `uv sync` died instantly with ERROR_UNTRUSTED_MOUNT_POINT, no Python packages were
+; installed, and setup reported success. Launching through Explorer gives the same
+; process context as the desktop shortcut, which is what the user gets every other
+; time they open it.
+Filename: "{win}\explorer.exe"; Parameters: """{app}\{#LauncherExe}"""; Description: "Start {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 const

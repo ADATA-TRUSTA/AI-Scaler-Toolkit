@@ -318,6 +318,19 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phas
         # install reaches a user.
         raise RuntimeError(f"Provisioning ended without reporting completion. Full log: {log_path}")
 
+    # The banner is what setup_env says, not what it did. It has said "Environment
+    # setup complete" over an environment with no packages in it: `uv sync` failed,
+    # nothing checked its exit code, and the script carried on to the end. That has
+    # been fixed in the script, but "provisioned" is this application's claim to its
+    # user, so it is checked here against the one artefact that has to exist.
+    interpreter = config.venv_dir() / ("Scripts/python.exe" if config.IS_WINDOWS else "bin/python")
+    if not interpreter.is_file():
+        raise RuntimeError(
+            "Setup reported success but installed no Python environment "
+            f"({interpreter} is not there). Full log: {log_path}\n\n"
+            + "\n".join(tail[-15:])
+        )
+
     progress.record_package_count()
     state.save({"provisioned": True, "accelerator": accelerator or None})
     log.info("provisioning complete, accelerator=%s", accelerator or "unknown")

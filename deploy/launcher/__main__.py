@@ -27,6 +27,7 @@ from . import (
     components,
     config,
     env_file,
+    hardening,
     maintenance,
     preflight,
     progress,
@@ -981,6 +982,13 @@ def main(argv: list[str] | None = None) -> int:
         return diagnose()
 
     applog.banner()
+
+    # Before anything reads a path. An installer's child inherits a mitigation that
+    # makes uv's managed Python unreachable, and a first run under it installs nothing
+    # at all -- see hardening.py.
+    if hardening.step_out_of_the_way():
+        log.info("handed over to a copy without the mitigation; exiting")
+        return 0
 
     # Logging in is not a request to install anything. Setup takes eight minutes, opens
     # a window and downloads gigabytes, and doing that because someone turned their

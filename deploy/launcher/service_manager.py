@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -135,11 +136,14 @@ def settle_venv_home() -> None:
 
     uv installs Python as cpython-3.12.13-... and puts a minor-version alias beside it,
     cpython-3.12-..., which on Windows is a junction. That alias is what it records in
-    pyvenv.cfg, so starting the service traverses a mount point -- and Windows refuses
-    that wherever redirection trust is enforced. The service died three times with
-    ERROR_UNTRUSTED_MOUNT_POINT, which uv reports as "os error 448", each time on the
-    launch that followed an upgrade over a running copy, and started normally on the
-    next attempt.
+    pyvenv.cfg, so starting the service traverses a mount point -- which a process
+    running under the redirection-trust mitigation is refused.
+
+    This is a tidy-up, not the fix for that. It cannot be: os.readlink reads the link's
+    target rather than following it, which is the only reason it works at all here --
+    an earlier version used Path.resolve(), which has to traverse the junction, so in
+    the one situation that needed it the call raised and this returned having done
+    nothing. What keeps the mitigation away from us is hardening.step_out_of_the_way().
 
     Resolving it changes nothing else: the alias and its target are the same
     interpreter. Done on every start because uv writes the file again whenever it
@@ -160,9 +164,17 @@ def settle_venv_home() -> None:
             continue
         recorded = value.strip()
         try:
-            resolved = Path(recorded).resolve()
-        except OSError:
+            target = os.readlink(recorded)
+        except (OSError, ValueError):
+            # Not a link, or unreadable. Either way there is nothing to settle.
             return
+        # A junction's target comes back in verbatim form, \\?\C:\..., which is not
+        # something to write into a configuration file other tools read.
+        for prefix in ("\\\\?\\", "\\??\\"):
+            if target.startswith(prefix):
+                target = target[len(prefix):]
+                break
+        resolved = Path(target)
         # Only when it is still an interpreter directory -- Windows keeps python.exe at
         # the top, other platforms keep it under bin/. A resolve that lands somewhere
         # unexpected is not something to write into an environment.
@@ -278,8 +290,6 @@ class ServiceManager:
             "SERVICE_HOST": config.SERVICE_HOST,
             "SERVICE_PORT": str(self.port),
         }
-        import os
-
         merged = os.environ.copy()
         merged.update({k: v for k, v in env.items() if v})
 
