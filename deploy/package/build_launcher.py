@@ -5,9 +5,11 @@ launcher is frozen rather than shipped as scripts. Only the launcher is frozen -
 backend stays a normal uv project, because its environment is built on the user's
 machine against their accelerator and cannot be prebuilt here.
 
-requirements.txt is exported alongside as the record of what went in. It is generated
-from the lock file, never hand-written, so the frozen build and the lock cannot
-disagree about a version.
+What went in is recorded by deploy/uv.lock, which is committed and is what uv builds
+the environment from. A requirements.txt used to be exported beside the launcher
+sources as well -- from that same lock, ignored by git, never shipped, and read by
+nothing. It was a copy of the record rather than the record, kept next to source code
+where it looked like one more thing to maintain.
 """
 
 from __future__ import annotations
@@ -40,21 +42,6 @@ def run(*args: str, cwd: Path) -> None:
         raise SystemExit(f"command failed with exit {proc.returncode}: {' '.join(args)}")
 
 
-def export_requirements(out: Path) -> None:
-    """Record the resolved dependency set. `uv export` reads uv.lock, so this cannot
-    drift from what was actually installed."""
-    result = subprocess.run(
-        ["uv", "export", "--no-dev", "--no-hashes", "--format", "requirements-txt"],
-        cwd=DEPLOY_DIR,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise SystemExit(f"uv export failed:\n{result.stderr.strip()}")
-    out.write_text(result.stdout, encoding="utf-8")
-    print(f"[launcher] wrote {out} ({len(result.stdout.splitlines())} lines)")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default=str(DEPLOY_DIR / "build" / "launcher"),
@@ -67,8 +54,6 @@ def main() -> int:
     out_dir = Path(args.out).resolve()
     work_dir = out_dir / "work"
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    export_requirements(DEPLOY_DIR / "launcher" / "requirements.txt")
 
     # The same icon the payload ships, so the executable, its shortcut and the tray
     # cannot disagree about which mark this build wears.

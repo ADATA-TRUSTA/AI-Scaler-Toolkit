@@ -69,7 +69,7 @@ def resource_root() -> Path:
 
 
 def payload_dir() -> Path:
-    """Root of the shipped payload (backend/, frontend/, console/).
+    """Root of the shipped payload (backend/, frontend/).
 
     Installed builds put the payload beside the launcher; running from a source
     checkout it is the repo root one level up.

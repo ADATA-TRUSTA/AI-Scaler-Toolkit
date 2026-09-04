@@ -34,7 +34,10 @@ BRAND_BY_PLATFORM = {
     "linux": ("dist", "TRUSTA"),
 }
 
-PAYLOAD_DIRS = ("backend", "console")
+# The console stays in the public layout but not in an installation: nothing here
+# runs it, and only the backend gets an environment built for it, so shipping it put
+# 67 files a user could not run into a directory they might try to run them from.
+PAYLOAD_DIRS = ("backend",)
 
 
 def copy_filtered(src: Path, dest: Path) -> int:
@@ -204,9 +207,10 @@ def main() -> int:
 
     if not args.skip_source_check:
         siblings = REPO_ROOT.parent
+        # console is not checked: it is part of the layout, but nothing here copies it
+        # into a payload, so a layout whose console has drifted cannot affect the build.
         check_layout_matches_sources(source, {
             "backend": siblings / "trusta-ast-backend",
-            "console": siblings / "trusta-ast-console",
             "frontend": siblings / "trusta-ast-frontend",
         })
         print(f"[payload] layout at {source} matches the sources beside it")

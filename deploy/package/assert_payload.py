@@ -180,9 +180,20 @@ def main() -> int:
             failures.append("hideChatPanel is not true; the desktop window would show the full chat UI")
 
     root = Path(args.payload).resolve()
-    for required in ("backend/pyproject.toml", "backend/scripts", "console/pyproject.toml"):
+    for required in ("backend/pyproject.toml", "backend/scripts"):
         if not (root / required).exists():
             failures.append(f"payload is missing {required}")
+
+    # The console is part of the product and stays in the public layout, but it has no
+    # place in an installation. Nothing here runs it, and nothing builds an environment
+    # for it -- only the backend is synced -- so what shipped was 67 files that could
+    # not be run, in a directory a user might reasonably try to run.
+    #
+    # Asserted rather than simply not copied. Removing something is only half of it:
+    # a stray entry in PAYLOAD_DIRS, or a layout copied wholesale by a future change,
+    # would put it back with nothing objecting.
+    if (root / "console").exists():
+        failures.append("payload contains console/, which is not installed and cannot run there")
 
     # The installer creates a shortcut to this. Shipping sources instead builds an
     # installer whose shortcut points at nothing -- and it installs cleanly first.
