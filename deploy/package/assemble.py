@@ -33,29 +33,18 @@ def replace(dest_root: Path) -> None:
 
 
 def copy_tree(src_root: Path, dest_root: Path, key: str) -> int:
-    """Copy the INCLUDE list out of src_root, applying the exclusion rules."""
+    """Copy the INCLUDE list out of src_root, applying the exclusion rules.
+
+    Which files those are is layout.source_files, not a walk of its own: packaging
+    checks the assembled layout against the sources using the same function, and a
+    second walk here would let the two disagree about what belongs.
+    """
     copied = 0
-    for pattern in layout.INCLUDE[key]:
-        for src in sorted(src_root.glob(pattern)):
-            rel_top = src.relative_to(src_root).as_posix()
-            if layout.is_excluded(rel_top, key):
-                continue
-            if src.is_file():
-                target = dest_root / rel_top
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, target)
-                copied += 1
-                continue
-            for item in sorted(src.rglob("*")):
-                if not item.is_file():
-                    continue
-                rel = item.relative_to(src_root).as_posix()
-                if layout.is_excluded(rel, key):
-                    continue
-                target = dest_root / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(item, target)
-                copied += 1
+    for rel, src in layout.source_files(src_root, key).items():
+        target = dest_root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
+        copied += 1
     return copied
 
 

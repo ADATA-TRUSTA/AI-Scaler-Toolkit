@@ -13,7 +13,7 @@ Two rules from the spec are load-bearing here:
 from __future__ import annotations
 
 import fnmatch
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 # The three source repositories, and where each lands in the public layout.
 SOURCE_KEYS: tuple[str, ...] = ("backend", "console", "frontend")
@@ -191,3 +191,52 @@ def is_excluded(rel: str, source_key: str) -> bool:
             return True
 
     return False
+
+
+def source_files(src_root, key: str) -> dict[str, Path]:
+    """Every file the layout takes from one source repository.
+
+    Keyed by the path it lands at in the layout, which is the same path it has in the
+    source. Shared by the assembly and by the check that the layout still matches the
+    sources it was assembled from: two walks would drift, and the first anyone would
+    notice is a payload built from a source nobody meant to ship.
+    """
+    src_root = Path(src_root)
+    found: dict[str, Path] = {}
+    for pattern in INCLUDE[key]:
+        for src in sorted(src_root.glob(pattern)):
+            rel_top = src.relative_to(src_root).as_posix()
+            if is_excluded(rel_top, key):
+                continue
+            if src.is_file():
+                found[rel_top] = src
+                continue
+            for item in sorted(src.rglob("*")):
+                if not item.is_file():
+                    continue
+                rel = item.relative_to(src_root).as_posix()
+                if is_excluded(rel, key):
+                    continue
+                found[rel] = item
+    return found
+
+
+def assembled_files(root) -> dict[str, int]:
+    """Every file in an assembled directory, by path and size.
+
+    Directories that appear only after assembly are ignored -- running anything out of
+    a layout leaves __pycache__ behind, and that is not a difference from the source.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return {}
+    out: dict[str, int] = {}
+    for item in root.rglob("*"):
+        if not item.is_file():
+            continue
+        rel = item.relative_to(root).as_posix()
+        parts = PurePosixPath(rel).parts
+        if any(p in EXCLUDE_DIR_NAMES or p.endswith(EXCLUDE_DIR_SUFFIXES) for p in parts[:-1]):
+            continue
+        out[rel] = item.stat().st_size
+    return out

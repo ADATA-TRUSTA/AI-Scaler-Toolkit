@@ -119,20 +119,98 @@ def clear_payload(payload: Path) -> None:
     layout.force_rmtree(parked)
 
 
+def check_layout_matches_sources(source: Path, sources: dict[str, Path]) -> None:
+    """Refuse a layout that no longer matches the repositories it came from.
+
+    The default layout is the mirror in this repository, which is only current after
+    assemble.py has been run into it. Packaging a stale one produces an installer that
+    is wrong in a way nothing announces: it builds, it installs, it runs, and it ships
+    a backend from whenever the mirror was last refreshed. It happened here -- the
+    mirror was 63 files behind the backend -- and what caught it was assert_payload
+    noticing the health endpoint had lost keys, which is luck rather than a check.
+
+    Only possible when the source repositories are reachable, so the release pipeline,
+    which clones them somewhere temporary and assembles in the same run, is unaffected.
+    """
+    for key, repo in sources.items():
+        if not repo.is_dir():
+            continue
+        if key == "frontend":
+            expected = frontend_expectation(repo)
+        else:
+            expected = {rel: path.stat().st_size
+                        for rel, path in layout.source_files(repo, key).items()}
+        actual = layout.assembled_files(source / key)
+        if expected == actual:
+            continue
+
+        missing = sorted(set(expected) - set(actual))
+        extra = sorted(set(actual) - set(expected))
+        changed = sorted(rel for rel in set(expected) & set(actual)
+                         if expected[rel] != actual[rel])
+        detail = []
+        for label, items in (("missing", missing), ("changed", changed), ("no longer in the source", extra)):
+            if items:
+                shown = ", ".join(items[:4])
+                more = f" and {len(items) - 4} more" if len(items) > 4 else ""
+                detail.append(f"    {len(items)} {label}: {shown}{more}")
+        raise SystemExit(
+            "\n".join(
+                [f"[payload] {source / key} does not match {repo}:"]
+                + detail
+                + [f"[payload] Run: python package/assemble.py --into {source}",
+                   "[payload] Or pass --skip-source-check to package the layout as it is."]
+            )
+        )
+
+
+def frontend_expectation(frontend_repo: Path) -> dict[str, int]:
+    """The frontend arrives as build output, so both packages are compared verbatim.
+
+    A stale frontend is the same failure wearing different clothes: it builds, it
+    installs, and it serves an interface from whenever the mirror was last refreshed.
+    """
+    out: dict[str, int] = {}
+    for package in layout.FRONTEND_PACKAGES:
+        for rel, size in layout.assembled_files(frontend_repo / package).items():
+            full = f"{package}/{rel}"
+            if not layout.is_excluded(full, "frontend"):
+                out[full] = size
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=sorted(BRAND_BY_PLATFORM), required=True)
-    parser.add_argument("--out", default="payload", help="payload directory to create")
+    # Where build_installer.py reads from. It used to default to ./payload, which that
+    # script does not look at: a default-flag build wrote a payload nobody packaged and
+    # then built an installer from whatever the previous run had left behind.
+    parser.add_argument("--out", default="",
+                        help="payload directory to create (default: build/payload-<platform>)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--source", default=str(REPO_ROOT), help="assembled layout to read from")
     parser.add_argument("--launcher-dir", default="",
                         help="frozen launcher directory from build_launcher.py. Without it the "
                              "payload ships launcher sources, which is fine for development but "
                              "leaves the installer with no executable to shortcut to")
+    parser.add_argument("--skip-source-check", action="store_true",
+                        help="package the layout even if it no longer matches the source "
+                             "repositories beside it")
     args = parser.parse_args()
 
     source = Path(args.source).resolve()
-    payload = Path(args.out).resolve()
+    payload = Path(args.out).resolve() if args.out else (
+        REPO_ROOT / "deploy" / "build" / f"payload-{args.platform}")
+
+    if not args.skip_source_check:
+        siblings = REPO_ROOT.parent
+        check_layout_matches_sources(source, {
+            "backend": siblings / "trusta-ast-backend",
+            "console": siblings / "trusta-ast-console",
+            "frontend": siblings / "trusta-ast-frontend",
+        })
+        print(f"[payload] layout at {source} matches the sources beside it")
+
     if payload.exists():
         clear_payload(payload)
     payload.mkdir(parents=True)
