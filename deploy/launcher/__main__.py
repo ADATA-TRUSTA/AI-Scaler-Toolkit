@@ -243,6 +243,9 @@ class Launcher:
         self.settings_window: Any = None
         self.tray: Any = None
         self._quitting = threading.Event()
+        # What the window is currently sized to, so a page asking for the size it is
+        # already at costs nothing.
+        self._window_size: tuple[int, int] | None = None
 
     # ---------------------------------------------------------------- window
 
@@ -257,6 +260,13 @@ class Launcher:
         if self.window is None:
             return
         width, height = size
+        # Every page reports the width it needs when it mounts, so the size it is
+        # already at is reported constantly. Acting on those made the log read like a
+        # window resizing itself in a loop -- which is what it looked like to me when
+        # someone was simply switching between two pages that want different widths.
+        if self._window_size == (width, height):
+            return
+        self._window_size = (width, height)
         log.info("resizing the window to %dx%d", width, height)
         with contextlib.suppress(Exception):
             self.window.resize(width, height)

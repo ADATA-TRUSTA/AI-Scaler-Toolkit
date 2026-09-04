@@ -32,6 +32,11 @@ PortStatus = Literal["free", "ours", "foreign"]
 
 SERVICE_LOG = "service.log"
 
+# A service that stops sooner than this never got as far as starting. Uvicorn binds in
+# a few seconds even on a cold cache; the long part of a start is importing torch,
+# which happens after.
+EARLY_EXIT_SECONDS = 15.0
+
 # Fields only this backend's /health returns. Used to tell our own leftover process
 # from an unrelated service that happens to sit on the port.
 FINGERPRINT = ("status", "training_supported", "supported_engines")
@@ -125,6 +130,55 @@ def venv_python() -> Path:
     return venv / ("Scripts/python.exe" if config.IS_WINDOWS else "bin/python")
 
 
+def settle_venv_home() -> None:
+    """Point the environment at the interpreter directory, not at a link to it.
+
+    uv installs Python as cpython-3.12.13-... and puts a minor-version alias beside it,
+    cpython-3.12-..., which on Windows is a junction. That alias is what it records in
+    pyvenv.cfg, so starting the service traverses a mount point -- and Windows refuses
+    that wherever redirection trust is enforced. The service died three times with
+    ERROR_UNTRUSTED_MOUNT_POINT, which uv reports as "os error 448", each time on the
+    launch that followed an upgrade over a running copy, and started normally on the
+    next attempt.
+
+    Resolving it changes nothing else: the alias and its target are the same
+    interpreter. Done on every start because uv writes the file again whenever it
+    syncs, and it is cheap.
+    """
+    config_file = config.venv_dir() / "pyvenv.cfg"
+    try:
+        # utf-8-sig: a byte-order mark would otherwise attach itself to the first key,
+        # which is `home`, and this would quietly find nothing to do.
+        lines = config_file.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+
+    changed = False
+    for index, line in enumerate(lines):
+        key, _, value = line.partition("=")
+        if key.strip() != "home":
+            continue
+        recorded = value.strip()
+        try:
+            resolved = Path(recorded).resolve()
+        except OSError:
+            return
+        # Only when it is still an interpreter directory -- Windows keeps python.exe at
+        # the top, other platforms keep it under bin/. A resolve that lands somewhere
+        # unexpected is not something to write into an environment.
+        looks_right = any((resolved / name).is_file()
+                          for name in ("python.exe", "bin/python3", "bin/python"))
+        if str(resolved) == recorded or not looks_right:
+            return
+        log.info("pyvenv.cfg home %s is a link; recording %s", recorded, resolved)
+        lines[index] = f"home = {resolved}"
+        changed = True
+
+    if changed:
+        with contextlib.suppress(OSError):
+            config_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _log_tail(path: Path, lines: int = 12) -> str:
     """Put the end of the service log in the error itself.
 
@@ -150,6 +204,21 @@ class ServiceManager:
     @property
     def port(self) -> int:
         return state.service_port()
+
+    def _spawn(self, python: Path, environment: dict, service_log: Path) -> None:
+        if self._log_handle is not None:
+            with contextlib.suppress(OSError):
+                self._log_handle.close()
+        log.info("spawning %s -m service.app (cwd=%s)", python, config.backend_dir())
+        self._log_handle = service_log.open("w", encoding="utf-8", errors="replace")
+        self._process = subprocess.Popen(
+            [str(python), "-m", "service.app"],
+            cwd=config.backend_dir(),
+            env=environment,
+            stdout=self._log_handle,
+            stderr=subprocess.STDOUT,
+            creationflags=config.subprocess_flags(),
+        )
 
     def status(self) -> PortStatus:
         return probe(self.port)
@@ -187,6 +256,7 @@ class ServiceManager:
         python = venv_python()
         if not python.is_file():
             raise RuntimeError(f"Python environment not found at {config.venv_dir()}; setup has not run.")
+        settle_venv_home()
 
         # Every start, not just the first. A reinstall, an upgrade over the top, or
         # anyone deleting the file leaves the backend reading .env.example instead --
@@ -217,29 +287,34 @@ class ServiceManager:
         # failed to start left no explanation at all.
         config.log_dir().mkdir(parents=True, exist_ok=True)
         service_log = config.log_dir() / SERVICE_LOG
-        log.info("spawning %s -m service.app (cwd=%s)", python, config.backend_dir())
         log.info("service output -> %s", service_log)
 
-        creation = config.subprocess_flags()
-        self._log_handle = service_log.open("w", encoding="utf-8", errors="replace")
-        self._process = subprocess.Popen(
-            [str(python), "-m", "service.app"],
-            cwd=config.backend_dir(),
-            env=merged,
-            stdout=self._log_handle,
-            stderr=subprocess.STDOUT,
-            creationflags=creation,
-        )
+        self._spawn(python, merged, service_log)
 
         started = time.monotonic()
         deadline = started + wait_sec
         last_report = 0.0
+        retried = False
         while time.monotonic() < deadline:
             if self.status() == "ours":
                 elapsed = time.monotonic() - started
                 log.info("service healthy after %.0fs", elapsed)
                 return
             if self._process.poll() is not None:
+                # A service that dies this fast never began: it failed to spawn, or it
+                # failed on an import. One of those has been seen to come and go --
+                # Windows refusing to traverse the link to the interpreter, right after
+                # an upgrade, on a machine where the very next attempt worked. Trying
+                # once more turns a dead end into a pause. A backend that is genuinely
+                # broken fails the same way twice, a second apart, and reports both.
+                if not retried and time.monotonic() - started < EARLY_EXIT_SECONDS:
+                    retried = True
+                    first = _log_tail(service_log)
+                    log.warning("the service stopped %.0fs in (exit %s); trying once more\n%s",
+                                time.monotonic() - started, self._process.returncode, first)
+                    self._spawn(python, merged, service_log)
+                    started = time.monotonic()
+                    continue
                 raise RuntimeError(
                     f"The service stopped while starting (exit code {self._process.returncode}).\n\n"
                     + _log_tail(service_log)
