@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import layout  # noqa: E402
 import make_icon  # noqa: E402
 
 EXPECTED = {
@@ -194,6 +195,27 @@ def main() -> int:
     # would put it back with nothing objecting.
     if (root / "console").exists():
         failures.append("payload contains console/, which is not installed and cannot run there")
+
+    # Nothing the layout rules exclude may reach a payload. Assembly applies them, but
+    # the payload is a directory on a build machine between then and packaging, and
+    # anything run against it writes there: a launcher started from build/payload-windows
+    # writes backend/.env, and that file carries absolute paths -- an HF_HOME and a
+    # LOG_DIR under one developer's home directory. Two installers were built carrying
+    # exactly that before anything noticed, because the only check on the payload's
+    # contents was a list of things that had to be present.
+    strays = sorted(
+        path.relative_to(root).as_posix()
+        for path in (root / "backend").rglob("*")
+        if path.is_file()
+        and layout.is_excluded(path.relative_to(root / "backend").as_posix(), "backend")
+    )
+    if strays:
+        shown = ", ".join(strays[:5])
+        more = f" and {len(strays) - 5} more" if len(strays) > 5 else ""
+        failures.append(
+            f"payload carries {len(strays)} file(s) the layout excludes: {shown}{more}. "
+            "Something has been run against this payload; rebuild it with make_payload.py."
+        )
 
     # The installer creates a shortcut to this. Shipping sources instead builds an
     # installer whose shortcut points at nothing -- and it installs cleanly first.
