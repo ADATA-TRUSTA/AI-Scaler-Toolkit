@@ -784,8 +784,27 @@ class GgufMemoryEstimator:
         # The mask width is padded, so a ubatch below the floor costs the same as the floor.
         mask_width = max(n_ubatch, _COMPUTE_MASK_UBATCH_FLOOR)
         mask = float(_COMPUTE_MASK_BYTES_PER_CELL) * n_ctx_pad * mask_width
+        # The materialised QK^T score matrix, which flash attention never forms. It
+        # belongs inside the max for the same reason logits and mask do: these tensors
+        # do not coexist, so the buffer tracks the largest rather than their sum.
+        #
+        # Measured against llama-fit-params on Qwen2.5-0.5B-Q8_0 at n_ubatch 512, -fa
+        # off, sweeping n_ctx. Identical numbers on all three backends checked — CUDA,
+        # Vulkan on the same NVIDIA card, and Vulkan on an Intel iGPU:
+        #
+        #   n_ctx    scores    compute measured    max(baseline, scores)
+        #    4096     117            298                 298
+        #    8192     235            298                 298
+        #   16384     470            487                 470
+        #   32768     940            967                 940
+        #   65536    1879           1927                1879
+        #
+        # The buffer stays at the -fa on baseline until the scores tensor grows past
+        # it, then tracks it — which is the max, not the sum. Adding the terms put the
+        # estimate 101% high at n_ctx 8192, where the real cost of turning flash
+        # attention off is nothing at all.
         scores = 0.0 if flash_attn else 4.0 * n_ubatch * n_ctx_pad * info.n_head
-        device_term = _COMPUTE_SAFETY_FACTOR * (max(logits, mask) + scores)
+        device_term = _COMPUTE_SAFETY_FACTOR * max(logits, mask, scores)
 
         gpu = [0.0] * max(n_gpu, 1)
         if n_gpu <= 0:
@@ -832,11 +851,9 @@ class GgufMemoryEstimator:
         Locate a binary that can run the fit-params probe.
 
         Mirrors ConversionManager._resolve_quantize_binary: an explicit ``LLAMA_FIT_PARAMS_BIN``
-        wins, then a legacy standalone ``llama-fit-params`` from a source build, then the
-        official prebuilt unified ``llama`` (from ggml-org/llama-install.sh), which exposes it
-        as a ``fit-params`` subcommand — see `_fit_cmd_prefix`. No source build required, which
-        matters because setup_env only sparse-checks out the Python convert tooling, never a
-        C++ build tree.
+        wins, then a standalone ``llama-fit-params`` - from a source build tree, or from the
+        directory setup_env installs into - and finally a unified ``llama``, which exposes it as
+        a ``fit-params`` subcommand (see `_fit_cmd_prefix`).
         """
         llama_cpp_dir = str(settings.LLAMA_CPP_DIR)
         names = ["llama-fit-params.exe"] if os.name == "nt" else ["llama-fit-params"]
@@ -855,18 +872,18 @@ class GgufMemoryEstimator:
                 ]
             )
 
-        # Prebuilt unified binary (fit-params is a subcommand there). LLAMA_SERVER_BINARY
-        # already resolves it, but only trust that path when it really is the unified
-        # `llama` — a self-built `llama-server` has no fit-params subcommand.
+        # setup_env unpacks llama.cpp's release (or, on Linux, its own build output) into a
+        # single directory, so the standalone tool sits next to the server binary.
         server_binary = str(settings.LLAMA_SERVER_BINARY)
+        server_dir = os.path.dirname(server_binary)
+        if server_dir:
+            candidates.extend(os.path.join(server_dir, name) for name in names)
+
+        # A unified `llama` still works through its `fit-params` subcommand, for anyone who
+        # points LLAMA_SERVER_BINARY at one. A `llama-server` has no such subcommand, so only
+        # the unified name qualifies.
         if os.path.basename(server_binary).lower() in {"llama", "llama.exe"}:
             candidates.append(server_binary)
-        if os.name == "nt":
-            local_app = os.environ.get("LOCALAPPDATA")
-            if local_app:
-                candidates.append(os.path.join(local_app, "Microsoft", "WindowsApps", "llama.exe"))
-        else:
-            candidates.append(os.path.join(os.path.expanduser("~"), ".local", "bin", "llama"))
 
         for candidate in candidates:
             if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -1024,6 +1041,7 @@ class GgufMemoryEstimator:
         gpu_budget_mib: float | None = None,
         host_budget_mib: float | None = None,
         margin_mib: float = DEFAULT_MARGIN_MIB,
+        shared_memory_pool: bool = False,
         **estimate_kwargs: Any,  # noqa: ANN401 - forwarded to estimate()
     ) -> dict[str, Any]:
         """
@@ -1047,9 +1065,15 @@ class GgufMemoryEstimator:
         if kv_quant_grid is None:
             kv_quant_grid = ["f16", "q8_0"]
 
-        budgets = self.resolve_budgets(gpu_budget_mib, host_budget_mib)
+        budgets = self.resolve_budgets(
+            gpu_budget_mib,
+            host_budget_mib,
+            estimate_kwargs.get("n_gpu"),
+            shared_memory_pool=shared_memory_pool,
+        )
         gpu_budget = budgets["gpu_budget_mib"]
         host_budget = budgets["host_budget_mib"]
+        shared_pool = bool(budgets.get("gpu_budget_is_shared_memory"))
 
         rows: list[dict[str, Any]] = []
         truncated = False
@@ -1073,8 +1097,12 @@ class GgufMemoryEstimator:
                     breakdown = est["memory_breakdown_mib"]
                     gpu_total = breakdown["gpu_total"]["total"]
                     host_total = breakdown["host"]["total"]
-                    fits_gpu = gpu_budget is None or gpu_total + margin_mib <= gpu_budget
-                    fits_host = host_budget is None or host_total + margin_mib <= host_budget
+                    # A shared pool moves the non-reclaimable host terms onto the
+                    # GPU side, so the two verdicts stay independent instead of
+                    # charging those bytes twice and rejecting a row that fits.
+                    gpu_charge, host_charge = self.budget_charges(est, shared_pool=shared_pool)
+                    fits_gpu = gpu_budget is None or gpu_charge + margin_mib <= gpu_budget
+                    fits_host = host_budget is None or host_charge + margin_mib <= host_budget
                     rows.append(
                         {
                             "n_gpu_layers": ngl,
@@ -1082,6 +1110,8 @@ class GgufMemoryEstimator:
                             "kv_quant": kv,
                             "gpu_mib": gpu_total,
                             "host_mib": host_total,
+                            "gpu_charge_mib": gpu_charge,
+                            "host_charge_mib": host_charge,
                             "gpu_model": breakdown["gpu_total"]["model"],
                             "gpu_context": breakdown["gpu_total"]["context"],
                             "gpu_compute": breakdown["gpu_total"]["compute"],
@@ -1112,16 +1142,84 @@ class GgufMemoryEstimator:
 
     # ------------------------------------------------------------------ recommend
 
+    # --device values are backend-prefixed, e.g. CUDA0 / Vulkan1 / SYCL0. The
+    # prefix narrows the vendor; Vulkan does not, because it enumerates whatever
+    # it can see. Unmapped prefixes fall through and are reported, never guessed.
+    _DEVICE_VENDOR_PREFIXES = {
+        "cuda": "nvidia",
+        "hip": "amd",
+        "rocm": "amd",
+        "sycl": "intel",
+        "levelzero": "intel",
+        "l0": "intel",
+    }
+
+    @classmethod
+    def _pick_pinned_device(
+        cls, device: str, readable: list[tuple[str, float, bool, str | None]]
+    ) -> tuple[str, float, bool, str | None] | None:
+        """
+        Resolve a --device string to one measured adapter, or None if unsure.
+
+        A pinned device runs the whole load on that one adapter, so its free memory
+        is the only honest budget. Returning None matters as much as returning a
+        match: a wrong guess here sizes the load against the wrong card. The whole
+        record comes back rather than just the size, because the caller also has to
+        know whether that adapter draws its memory from system RAM.
+        """
+        m = re.fullmatch(r"([A-Za-z_]+)(\d*)", device.strip())
+        if not m:
+            return None
+        prefix, idx = m.group(1).lower(), m.group(2)
+        vendor = cls._DEVICE_VENDOR_PREFIXES.get(prefix)
+        pool = [d for d in readable if vendor is None or d[3] == vendor]
+        if not pool:
+            return None
+        if idx == "":
+            return pool[0] if len(pool) == 1 else None
+        i = int(idx)
+        # The backend's own enumeration order is not ours, so an index is only
+        # trustworthy when the vendor narrowed the pool to that many devices.
+        if i < len(pool) and (vendor is not None or len(pool) == 1):
+            return pool[i]
+        return None
+
     @staticmethod
     def resolve_budgets(
-        gpu_budget_mib: float | None, host_budget_mib: float | None
+        gpu_budget_mib: float | None,
+        host_budget_mib: float | None,
+        n_gpu: int | None = None,
+        device: str | None = None,
+        shared_memory_pool: bool = False,
     ) -> dict[str, Any]:
-        """Fill in missing budgets from live hardware, via the shared system monitor."""
+        """
+        Fill in missing budgets from live hardware, via the shared system monitor.
+
+        ``n_gpu`` is how many devices actually take part in the offload -- the same
+        number the request already declares, defaulting to 1. It matters because
+        pooling VRAM is only real when the model is split across cards: llama.cpp
+        does that with --tensor-split, and the guidance is to match the ratio to
+        free VRAM. Summing every adapter found while the request says one GPU
+        participates describes a machine that does not exist.
+
+        ``shared_memory_pool`` states that the GPU budget is a slice of DRAM rather
+        than separate memory, for callers that resolved it themselves and are now
+        passing the numbers down. It is set here too when the hardware read reaches
+        that conclusion on its own.
+        """
         result: dict[str, Any] = {
             "gpu_budget_mib": gpu_budget_mib,
             "host_budget_mib": host_budget_mib,
             "source": "caller",
         }
+        # Whether the GPU draws on system RAM is a property of the budget, not of
+        # who supplied the number. A caller that already resolved it says so here,
+        # otherwise the hardware read below decides. Without this the property was
+        # lost the moment an endpoint passed floats down -- resolve_budgets took
+        # the early return, the flag never appeared, and every shared-pool rule
+        # downstream quietly switched itself off.
+        if shared_memory_pool:
+            result["gpu_budget_is_shared_memory"] = True
         if gpu_budget_mib is not None and host_budget_mib is not None:
             return result
 
@@ -1134,20 +1232,139 @@ class GgufMemoryEstimator:
                     # free_gb is None on backends that cannot read per-device usage
                     # (Intel/DXGI and the generic GPU path); skip those instead of
                     # summing None, and leave the budget unset if none are readable.
-                    readable = [g.free_gb for g in gpu.gpus if g.free_gb is not None]
-                    if readable:
-                        result["gpu_budget_mib"] = round(sum(readable) * 1024, 2)
-                        result["gpu_count"] = len(readable)
+                    #
+                    # Integrated adapters are excluded outright. Their "VRAM" is
+                    # carved out of system RAM, so a box with an iGPU reported ~100
+                    # GB free on top of a 16 GB card and this summed to a 117 GB
+                    # budget -- from which the solver happily recommended a full
+                    # offload that could never fit. An iGPU is not a load target,
+                    # so it must not contribute to the budget for one.
+                    # Paired as (name, free_gb) so the sum stays typed: filtering on
+                    # `g.free_gb is not None` does not narrow the attribute itself.
+                    readable: list[tuple[str, float, bool, str | None]] = [
+                        (
+                            g.name,
+                            g.free_gb,
+                            bool(getattr(g, "is_integrated", False)),
+                            getattr(g, "vendor", None),
+                        )
+                        for g in gpu.gpus
+                        if g.free_gb is not None
+                    ]
+
+                    # A pinned --device runs everything on that one adapter, so its
+                    # own free memory is the budget -- including when the pinned one
+                    # is the iGPU, which is a deliberate choice and not ours to
+                    # override. Only taken when the device resolves unambiguously;
+                    # an unresolved one is reported and falls through rather than
+                    # being guessed at, because guessing sizes the load against the
+                    # wrong card.
+                    pinned = (
+                        GgufMemoryEstimator._pick_pinned_device(device, readable)
+                        if device
+                        else None
+                    )
+                    if device and not pinned:
+                        result["gpu_budget_device_unresolved"] = device
+
+                    if pinned:
+                        result["gpu_budget_mib"] = round(pinned[1] * 1024, 2)
+                        result["gpu_count"] = 1
+                        result["gpu_devices"] = [pinned[0]]
+                        result["gpu_budget_pinned_device"] = device
                         result["source"] = "system_monitor"
+                        # Pinning an iGPU is allowed, but it does not stop that
+                        # adapter's memory from being DRAM. The host budget below
+                        # has to know, or the same bytes get promised twice.
+                        if pinned[2]:
+                            result["gpu_budget_is_shared_memory"] = True
+                    else:
+                        discrete = [(n, f) for n, f, integrated, _ in readable if not integrated]
+                        skipped = [n for n, _, integrated, _ in readable if integrated]
+
+                        # Prefer discrete devices, but do not leave a machine whose
+                        # only GPU is integrated without a budget at all -- an
+                        # iGPU-only box is a legitimate target, it just must not be
+                        # *added* to a real card's memory.
+                        if discrete:
+                            usable = discrete
+                        else:
+                            usable = [(n, f) for n, f, _, _ in readable]
+                            skipped = []
+                            if usable:
+                                result["gpu_budget_is_shared_memory"] = True
+
+                        # Only pool across as many devices as the offload uses.
+                        # Biggest first, because --main-gpu wants the largest card
+                        # and a single-GPU load lands on the one with room.
+                        if usable and isinstance(n_gpu, int) and n_gpu >= 1:
+                            usable.sort(key=lambda d: d[1], reverse=True)
+                            if len(usable) > n_gpu:
+                                result["gpu_devices_not_counted"] = [
+                                    name for name, _ in usable[n_gpu:]
+                                ]
+                                usable = usable[:n_gpu]
+
+                        if usable:
+                            result["gpu_budget_mib"] = round(
+                                sum(free for _, free in usable) * 1024, 2
+                            )
+                            result["gpu_count"] = len(usable)
+                            result["gpu_devices"] = [name for name, _ in usable]
+                            result["source"] = "system_monitor"
+                        if skipped:
+                            result["gpu_excluded_integrated"] = skipped
             if host_budget_mib is None:
                 dram = getattr(system_monitor.get_cpu_resource("usage"), "dram", None)
                 free_gb = getattr(dram, "free_gb", None) if dram is not None else None
                 if free_gb is not None:
-                    result["host_budget_mib"] = round(free_gb * 1024, 2)
+                    host_mib = round(free_gb * 1024, 2)
+                    # A shared-memory adapter carves its "VRAM" out of this very
+                    # pool, so the GPU budget is not memory on top of DRAM -- it is
+                    # a reservation out of it. Reporting both in full describes
+                    # twice the memory the box has, and both ceilings then pass for
+                    # a load that fits neither. Only the budget this call derived
+                    # is subtracted; one the caller stated is theirs to reconcile.
+                    reserved = (
+                        result["gpu_budget_mib"]
+                        if result.get("gpu_budget_is_shared_memory")
+                        else None
+                    )
+                    if reserved:
+                        result["host_budget_reserved_for_gpu_mib"] = reserved
+                        host_mib = round(max(0.0, host_mib - reserved), 2)
+                    result["host_budget_mib"] = host_mib
                     result["source"] = "system_monitor"
         except Exception as e:
             logger.warning(f"[GgufEstimator] Could not read hardware budgets: {e}")
         return result
+
+    @staticmethod
+    def budget_charges(estimate: dict[str, Any], *, shared_pool: bool) -> tuple[float, float]:
+        """
+        Split one estimate into what each budget is charged: ``(gpu, host)``.
+
+        Two pools -- a real card -- charge the GPU its own total and the host
+        everything else. Moving a tensor from one to the other genuinely frees
+        space, so the two ceilings are independent and this is just the breakdown.
+
+        One pool -- an adapter whose "VRAM" is carved out of system RAM -- is not.
+        The host terms that cannot be reclaimed, the CPU-side KV cache and the
+        compute buffers, move to the GPU side: they compete for the very bytes the
+        adapter draws on, so offloading them frees nothing and the search must see
+        them. Only the mmapped weights stay on the host side, because those are
+        file-backed page cache the kernel can drop under pressure.
+
+        Every byte is charged exactly once either way, which is what lets callers
+        keep checking the two ceilings independently: on a shared pool the budgets
+        were split out of one DRAM figure, so ``gpu <= gpu_budget`` together with
+        ``host <= host_budget`` still implies the pool holds the load.
+        """
+        breakdown = estimate["memory_breakdown_mib"]
+        gpu, host = breakdown["gpu_total"]["total"], breakdown["host"]
+        if shared_pool:
+            return gpu + host["context"] + host["compute"], host["model"]
+        return gpu, host["total"]
 
     def recommend(  # noqa: PLR0913 - one knob per lever the search may pull
         self,
@@ -1164,6 +1381,7 @@ class GgufMemoryEstimator:
         target_utilization: float = 0.9,
         kv_cache_types: list[str] | None = None,
         verify: bool = True,
+        shared_memory_pool: bool = False,
         **estimate_kwargs: Any,  # noqa: ANN401 - forwarded to estimate()
     ) -> dict[str, Any]:
         """
@@ -1198,7 +1416,12 @@ class GgufMemoryEstimator:
         except (FileNotFoundError, RuntimeError) as e:
             return {"error": str(e), "model_path": model_path}
 
-        budgets = self.resolve_budgets(gpu_budget_mib, host_budget_mib)
+        budgets = self.resolve_budgets(
+            gpu_budget_mib,
+            host_budget_mib,
+            estimate_kwargs.get("n_gpu"),
+            shared_memory_pool=shared_memory_pool,
+        )
         gpu_budget = budgets["gpu_budget_mib"]
         if gpu_budget is None:
             return {
@@ -1207,6 +1430,7 @@ class GgufMemoryEstimator:
                 "budgets_mib": budgets,
             }
         host_budget = budgets["host_budget_mib"]
+        shared_pool = bool(budgets.get("gpu_budget_is_shared_memory"))
         slots = info.n_block + 1
         target = gpu_budget - margin_mib
 
@@ -1214,7 +1438,7 @@ class GgufMemoryEstimator:
             est = self.estimate(
                 model_path, include_per_layer=False, **{**estimate_kwargs, **kwargs}
             )
-            return est["memory_breakdown_mib"]["gpu_total"]["total"], est
+            return self.budget_charges(est, shared_pool=shared_pool)[0], est
 
         pinned = n_ctx > 0
         ctx_floor = min(n_ctx, n_ctx_min) if pinned else n_ctx_min
@@ -1284,7 +1508,11 @@ class GgufMemoryEstimator:
                     **offload,
                     "n_ctx": chosen_ctx,
                     "kv_quant": kv,
-                    "gpu_mib": used,
+                    # What the GPU holds, and what the search weighed it against.
+                    # The two differ only on a shared pool; reporting the search
+                    # figure as "gpu" there would overstate the card.
+                    "gpu_mib": est["memory_breakdown_mib"]["gpu_total"]["total"],
+                    "pool_mib": used,
                     "estimate": est,
                     "constraint": constraint,
                 }
@@ -1314,10 +1542,12 @@ class GgufMemoryEstimator:
                 )
                 if exact is None:
                     break
-                exact_total = exact["memory_breakdown_mib"]["gpu_total"]["total"]
+                # Same yardstick as the search, or the correction chases a
+                # number the target was never measured against.
+                exact_total = self.budget_charges(exact, shared_pool=shared_pool)[0]
                 if exact_total <= target:
                     break
-                correction_mib += exact_total - best["gpu_mib"]
+                correction_mib += exact_total - best["pool_mib"]
                 retried = solve(target - correction_mib)
                 if retried is None:
                     break
@@ -1335,15 +1565,18 @@ class GgufMemoryEstimator:
             }
 
         estimate = best.pop("estimate")
-        host_mib = estimate["memory_breakdown_mib"]["host"]["total"]
+        pool_mib = best.pop("pool_mib")
+        # What the host budget still owes, which on a shared pool is only the part
+        # the GPU side was not already charged for.
+        host_mib = self.budget_charges(estimate, shared_pool=shared_pool)[1]
         args = self._format_server_args(best, flash_attn=estimate_kwargs.get("flash_attn", True))
 
         # Utilisation is reported against the measured figure when one is available, since
         # that is what the GPU will actually hold.
         exact_total: float | None = None
         if exact is not None:
-            exact_total = exact["memory_breakdown_mib"]["gpu_total"]["total"]
-        allocated = exact_total if exact_total is not None else best["gpu_mib"]
+            exact_total = self.budget_charges(exact, shared_pool=shared_pool)[0]
+        allocated = exact_total if exact_total is not None else pool_mib
 
         usable = max(target, 0.0)
         utilization = (allocated / usable) if usable > 0 else 0.0
@@ -1361,13 +1594,14 @@ class GgufMemoryEstimator:
                 "usable_budget_mib": round(usable, 2),
                 "allocated_mib": round(allocated, 2),
                 "allocated_source": "llama_cpp" if exact_total is not None else "analytic",
-                "analytic_mib": best["gpu_mib"],
+                "analytic_mib": pool_mib,
                 "headroom_mib": headroom,
                 "utilization_pct": round(utilization * 100, 1),
                 "within_budget": allocated <= usable,
                 "meets_target": utilization >= target_utilization,
                 "target_pct": round(target_utilization * 100, 1),
                 "correction_mib": round(correction_mib, 2),
+                "includes_host_nonreclaimable": shared_pool,
             },
             "memory_breakdown_mib": estimate["memory_breakdown_mib"],
             "placement": estimate["placement"],
@@ -1376,6 +1610,14 @@ class GgufMemoryEstimator:
             "notes": estimate["notes"],
         }
 
+        if shared_pool:
+            result["notes"].append(
+                "This GPU shares system RAM, so its budget is a slice of DRAM rather than "
+                "separate memory. The figure charged against it therefore includes the "
+                "host-side KV cache and compute buffers; only the mmapped weights are left "
+                "out, because the kernel can reclaim those. Offloading fewer layers frees "
+                "nothing here -- shorten the context or quantize the KV cache instead."
+            )
         if utilization < target_utilization:
             result["notes"].append(
                 f"Allocates {allocated:.0f} of {usable:.0f} MiB usable VRAM "
@@ -1409,7 +1651,7 @@ class GgufMemoryEstimator:
             result["verification"] = {
                 "source": "llama_cpp",
                 "memory_breakdown_mib": exact["memory_breakdown_mib"],
-                "gpu_delta_mib": round(exact_total - best["gpu_mib"], 2),
+                "gpu_delta_mib": round(exact_total - pool_mib, 2),
             }
         elif verify:
             result["notes"].append(
@@ -1431,6 +1673,7 @@ class GgufMemoryEstimator:
         n_ctx_max: int = 0,
         target_utilization: float = 0.9,
         verify: bool = True,
+        shared_memory_pool: bool = False,
         **estimate_kwargs: Any,  # noqa: ANN401 - forwarded to estimate()
     ) -> dict[str, Any]:
         """
@@ -1469,8 +1712,12 @@ class GgufMemoryEstimator:
 
         # Only ask the hardware for what the caller did not state.
         budgets = self.resolve_budgets(
-            gpu_budgets_mib[0] if gpu_budgets_mib else None, host_budget_mib
+            gpu_budgets_mib[0] if gpu_budgets_mib else None,
+            host_budget_mib,
+            estimate_kwargs.get("n_gpu"),
+            shared_memory_pool=shared_memory_pool,
         )
+        shared_pool = bool(budgets.get("gpu_budget_is_shared_memory"))
         if gpu_budgets_mib:
             gpu_budgets = sorted({float(b) for b in gpu_budgets_mib})
         elif budgets["gpu_budget_mib"] is not None:
@@ -1503,11 +1750,17 @@ class GgufMemoryEstimator:
                     n_ctx_min=n_ctx_min,
                     n_ctx_max=n_ctx_max,
                     gpu_budget_mib=budget,
-                    host_budget_mib=host_budget_mib,
+                    # The budget resolved once above, not the raw argument: passing
+                    # a bare None down made every candidate re-read live DRAM, so
+                    # they disagreed with each other and with the figure reported
+                    # at the top of this response -- and none of them carried the
+                    # reservation a shared pool needs.
+                    host_budget_mib=budgets["host_budget_mib"],
                     margin_mib=margin_mib,
                     target_utilization=target_utilization,
                     kv_cache_types=[kv],
                     verify=verify,
+                    shared_memory_pool=shared_pool,
                     **estimate_kwargs,
                 )
                 candidates.append(self._plan_candidate(kv, result, info, model_mib))

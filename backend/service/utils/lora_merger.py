@@ -30,6 +30,79 @@ def _read_mem_available_gib() -> int | None:
     return None
 
 
+def _read_raw_config(model_path: str) -> dict | None:
+    """Read a checkpoint's raw config.json, from a directory or the HF hub cache."""
+    import json
+    from pathlib import Path
+
+    local = Path(model_path) / "config.json"
+    if not local.is_file():
+        if "/" not in model_path or Path(model_path).exists():
+            return None
+        try:
+            from huggingface_hub import try_to_load_from_cache
+
+            hit = try_to_load_from_cache(repo_id=model_path, filename="config.json")
+        except Exception:
+            return None
+        if not isinstance(hit, str) or not Path(hit).is_file():
+            return None
+        local = Path(hit)
+    try:
+        return json.loads(local.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _restore_dropped_config_keys(base_model_path: str, output_path: str) -> None:
+    """
+    Put back config keys that a load/save round-trip silently drops.
+
+    A config class keeps only the fields it declares, so any key the installed
+    transformers does not know about is lost when the merged model is saved.
+    Consumers that read the raw JSON then break: llama.cpp's GGUF converter
+    reads Gemma 4's ``text_config.global_head_dim`` directly and dies with
+    ``KeyError`` when it is absent, after the whole merge has already run.
+
+    Only keys *missing* from the merged config are restored, so values the merge
+    legitimately changed are never overwritten. Best-effort: a merge that cannot
+    be topped up is still a valid merge, so problems are logged, not raised.
+    """
+    import json
+    from pathlib import Path
+
+    base_config = _read_raw_config(base_model_path)
+    merged_path = Path(output_path) / "config.json"
+    if base_config is None or not merged_path.is_file():
+        return
+
+    try:
+        merged_config = json.loads(merged_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        logger.warning(f"Cannot read the merged config to restore dropped keys: {e}")
+        return
+
+    restored: list[str] = []
+
+    def _fill(source: dict, target: dict, prefix: str = "") -> None:
+        for key, value in source.items():
+            if key not in target:
+                target[key] = value
+                restored.append(prefix + key)
+            elif isinstance(value, dict) and isinstance(target[key], dict):
+                _fill(value, target[key], f"{prefix}{key}.")
+
+    _fill(base_config, merged_config)
+    if not restored:
+        return
+    try:
+        merged_path.write_text(json.dumps(merged_config, indent=2), encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"Cannot write the merged config back: {e}")
+        return
+    logger.info(f"Restored config keys dropped on save: {', '.join(restored)}")
+
+
 def _resolve_device_map(offload_folder: str | None, requested_device_map: str | None) -> str:
     """
     Resolve merge device placement.
@@ -356,6 +429,7 @@ def merge_lora(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         model.save_pretrained(output_path, safe_serialization=True, max_shard_size="10GB")
+        _restore_dropped_config_keys(base_model_path, output_path)
 
         # Also save tokenizer
         tokenizer = AutoTokenizer.from_pretrained(base_model_path)

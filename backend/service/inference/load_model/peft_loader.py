@@ -42,6 +42,48 @@ def is_peft_model(model_path: str) -> bool:
     return adapter_config.exists()
 
 
+def _restore_device_placement_skip_keys(
+    model: "PeftModelType", skip_keys: str | list[str] | None
+) -> int:
+    """
+    Re-apply the base model's ``_skip_keys_device_placement`` to accelerate's hooks.
+
+    transformers dispatches an offloaded model with
+    ``skip_keys=model._skip_keys_device_placement``; PEFT re-dispatches the wrapped
+    model and does not forward that argument, so every ``AlignDevicesHook`` ends up
+    with ``skip_keys=None``. accelerate then routes those kwargs through
+    ``send_to_device``, which *rebuilds* a dict instead of passing the same object --
+    so a dict the layers mutate to talk to each other is silently copied per layer.
+
+    Gemma 4 shares KV across layers through exactly such a dict: layer 22 writes
+    ``shared_kv_states[22]`` into its own copy and layer 24 raises ``KeyError: 22``.
+    The base model alone works because transformers' dispatch got it right; only
+    adding the adapter breaks it. A single-device load carries no hooks, so this is
+    a no-op there.
+
+    Returns the number of hooks patched.
+    """
+    if not skip_keys:
+        return 0
+    try:
+        from accelerate.hooks import AlignDevicesHook, SequentialHook
+    except ImportError:  # pragma: no cover - accelerate is a hard dependency
+        return 0
+
+    patched = 0
+    for module in model.modules():
+        hook = getattr(module, "_hf_hook", None)
+        if hook is None:
+            continue
+        candidates = hook.hooks if isinstance(hook, SequentialHook) else [hook]
+        for candidate in candidates:
+            # Leave an explicitly-set skip list alone; only repair the wiped one.
+            if isinstance(candidate, AlignDevicesHook) and not candidate.skip_keys:
+                candidate.skip_keys = skip_keys
+                patched += 1
+    return patched
+
+
 def load_peft_model(
     model_path: str,
     base_model: "PreTrainedModel",
@@ -84,6 +126,10 @@ def load_peft_model(
                     flattened.append(str(item))
             base_model._no_split_modules = flattened
 
+        # Read this before wrapping: PEFT's re-dispatch drops it, and the wrapper
+        # does not expose the base model's class attribute reliably.
+        skip_keys = getattr(base_model, "_skip_keys_device_placement", None)
+
         # Load the LoRA adapters onto the base model
         model = PeftModel.from_pretrained(
             base_model,
@@ -91,6 +137,12 @@ def load_peft_model(
             token=hf_token,
             max_memory=kwargs.get("max_memory", None),
         )
+        patched = _restore_device_placement_skip_keys(model, skip_keys)
+        if patched:
+            logger.info(
+                f"[PEFT] Restored skip_keys={skip_keys} on {patched} offload hooks "
+                "that PEFT's re-dispatch cleared"
+            )
         logger.info("[PEFT] Adapters loaded successfully")
         return model
     except Exception as e:

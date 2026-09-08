@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import torch
 
-from .config_models import InferenceConfig
+from .config_models import InferenceConfig, InferenceEngine
 from .inference.async_server_client import (
     AsyncServerClient,
     client_for_config,
@@ -19,7 +19,7 @@ from .inference.async_server_client import (
     resolve_server_endpoint,
 )
 from .inference.model_inference_process import ModelInferenceProcess
-from .settings import configure_logging
+from .settings import configure_logging, effective_llama_binary
 
 logger = configure_logging(__name__)
 
@@ -59,8 +59,19 @@ class ModelManager:
         self._stale_async_clients: list[AsyncServerClient] = []
         self._async_stop_events: dict[str, asyncio.Event] = {}
         self._async_stop_lock = Lock()
+        # Classification of the last failure on the async HTTP path. The worker process
+        # records its own errors and /inference/error_details reads those, but a server
+        # engine never goes through the worker to generate, so without this an OOM on
+        # this path reached the UI as an opaque string. See _record_async_error.
+        self._last_async_error: dict[str, Any] | None = None
 
         self._initialized = True
+
+    def _record_async_error(self, exc: BaseException) -> None:
+        """Keep the classification AsyncServerClient attached to a failed generation."""
+        payload = getattr(exc, "error_payload", None)
+        if isinstance(payload, dict):
+            self._last_async_error = payload
 
     # ---------------------- Async server-engine path ----------------------
     def uses_async_http(self) -> bool:
@@ -150,7 +161,7 @@ class ModelManager:
         Close the active + stale async clients from a sync context.
 
         Schedules the async ``aclose`` on the running event loop if there is one;
-        otherwise drops the references (httpx AsyncClient closes itself on GC).
+        otherwise drops the references (httpx2 AsyncClient closes itself on GC).
         """
         clients = [c for c in ([self._async_client] + self._stale_async_clients) if c is not None]
         self._async_client = None
@@ -170,7 +181,7 @@ class ModelManager:
             loop = asyncio.get_running_loop()
             loop.create_task(_close_all())
         except RuntimeError:
-            pass  # no running loop; GC will close the underlying httpx clients
+            pass  # no running loop; GC will close the underlying httpx2 clients
 
     # ---------------------- Utility Helpers ----------------------
     def _save_config(self, config: InferenceConfig) -> None:
@@ -232,7 +243,7 @@ class ModelManager:
             self.config = None
             self.pending_config = None
             # Close the cached async client (and any pending stale ones) so the
-            # httpx keep-alive connections are released rather than leaked. This
+            # httpx2 keep-alive connections are released rather than leaked. This
             # is sync, so schedule the async close on the running loop when there
             # is one; otherwise fall back to GC.
             self._close_async_clients_best_effort()
@@ -470,6 +481,9 @@ class ModelManager:
         client = await self._acquire_async_client()
         messages = self._as_messages(prompt, system_prompt)
         stop_event = self._register_async_stop(request_id)
+        # A fresh attempt: drop the previous failure so /inference/error_details cannot
+        # serve a stale OOM for a request that has not failed.
+        self._last_async_error = None
         try:
             if stop_event is None:
                 return await client.generate(messages, params, request_id=request_id)
@@ -500,6 +514,9 @@ class ModelManager:
                 }
             finally:
                 stop_task.cancel()
+        except Exception as e:
+            self._record_async_error(e)
+            raise
         finally:
             self._unregister_async_stop(request_id)
 
@@ -538,11 +555,15 @@ class ModelManager:
         client = await self._acquire_async_client()
         messages = self._as_messages(prompt, system_prompt)
         stop_event = self._register_async_stop(request_id)
+        self._last_async_error = None
         try:
             async for item in client.generate_stream(
                 messages, params, request_id=request_id, stop_event=stop_event
             ):
                 yield item
+        except Exception as e:
+            self._record_async_error(e)
+            raise
         finally:
             self._unregister_async_stop(request_id)
 
@@ -577,10 +598,33 @@ class ModelManager:
             "device_allocation": process_status.get(
                 "device_allocation"
             ),  # added: device allocation stats
+            # Server-engine metadata published by the worker once loading finished
+            "llama_capabilities": process_status.get("llama_capabilities"),
+            "llama_model_meta": process_status.get("llama_model_meta"),
+            "served_context_length": process_status.get("served_context_length"),
+            "prefill_strategy": process_status.get("prefill_strategy"),
+            "loaded_at": process_status.get("loaded_at"),
             "n_gpu_layers": cfg.n_gpu_layers if cfg else None,
             "n_ctx": cfg.n_ctx if cfg else None,
             "n_batch": cfg.n_batch if cfg else None,
+            # llama.cpp splits -c across its -np slots, so callers deriving the
+            # per-request window need the slot count alongside n_ctx.
+            "llama_server_np": cfg.llama_server_np if cfg else None,
             "llama_server_extra_args": cfg.llama_server_extra_args if cfg else None,
+            # Which fields extra_args overrode, so a reader can tell an effective
+            # value apart from the one the load request asked for.
+            "llama_server_extra_arg_overrides": (
+                cfg.llama_server_extra_arg_overrides if cfg else None
+            ),
+            # Named, not guessed: a co-resident tool that has to find this
+            # process cannot know whether the host runs the unified `llama` or
+            # a source-built `llama-server`. None for engines that live inside
+            # this service, where there is no separate process to point at.
+            "llama_server_binary": (
+                effective_llama_binary(cfg.llama_server_binary)
+                if cfg and cfg.engine == InferenceEngine.LLAMA_SERVER
+                else None
+            ),
             "vllm_gpu_memory_utilization": (cfg.vllm_gpu_memory_utilization if cfg else None),
             "vllm_max_model_len": cfg.vllm_max_model_len if cfg else None,
             "vllm_dtype": cfg.vllm_dtype if cfg else None,
@@ -598,6 +642,17 @@ class ModelManager:
             "vllm_hf_overrides": cfg.vllm_hf_overrides if cfg else None,
             "vllm_chat_template": cfg.vllm_chat_template if cfg else None,
             "vllm_tool_call_parser": cfg.vllm_tool_call_parser if cfg else None,
+            "vllm_reasoning_parser": cfg.vllm_reasoning_parser if cfg else None,
+            "vllm_server_extra_args": cfg.vllm_server_extra_args if cfg else None,
+            "vllm_lmcache_enabled": cfg.vllm_lmcache_enabled if cfg else None,
+            "vllm_lmcache_max_local_cpu_size": (
+                cfg.vllm_lmcache_max_local_cpu_size if cfg else None
+            ),
+            "vllm_lmcache_local_disk": cfg.vllm_lmcache_local_disk if cfg else None,
+            "vllm_lmcache_max_local_disk_size": (
+                cfg.vllm_lmcache_max_local_disk_size if cfg else None
+            ),
+            "vllm_lmcache_chunk_size": cfg.vllm_lmcache_chunk_size if cfg else None,
         }
 
         # GPU memory usage: prefer the numbers reported by the worker process
@@ -618,8 +673,16 @@ class ModelManager:
         return status
 
     def get_error_details(self) -> dict | None:
-        """Return detailed error info, including the full traceback."""
-        return self.inference_process.get_error_details()
+        """
+        Return detailed error info, including the full traceback.
+
+        The worker process is the richer source — it has the exit code, stderr and the
+        port to probe — so it wins whenever it has something. A server engine generates
+        over direct HTTP without going through the worker, though, so a failure there
+        leaves the worker with nothing to report; the classification AsyncServerClient
+        attached to the exception is what covers that case.
+        """
+        return self.inference_process.get_error_details() or self._last_async_error
 
     def cleanup(self) -> None:
         """Release resources (called on application shutdown)."""

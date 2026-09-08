@@ -47,11 +47,10 @@ if _PROJECT_ROOT not in sys.path:
 from service.config_models import TrainingConfig  # noqa: E402
 from service.settings import REDIS_DB, REDIS_HOST, REDIS_PORT, configure_logging  # noqa: E402
 from service.training.core import (  # noqa: E402
-    ModelLoader,
+    EventType,
     Phase,
-    StrategyFactory,
     build_resource_snapshot,
-    load_training_dataset,
+    build_training_components,
     log_mem,
     save_training_results,
     start_memory_sampler,
@@ -104,15 +103,27 @@ def main() -> None:
 
     def _push_status(payload: dict) -> None:
         """
-        Send a status update (rank 0 only).
+        Send a status update.
 
         Primary path  : stdout — immediate, synchronous, no polling lag.
         Backup path   : Redis — written only for terminal states (saved/error)
                         so the parent can recover if the process is killed
                         before stdout is fully read.
+
+        Progress-style statuses are rank 0 only, but ERRORS are reported from
+        every rank. A data-parallel OOM fires on whichever rank is unluckiest,
+        and gating those on rank 0 meant the parent saw only
+        "deepspeed exited with return code N" with `is_oom=False`: the real
+        traceback reached the server log and never `writer.error`,
+        `/training/error_details`, or the OOM-specific handling. That made the
+        most likely multi-GPU failure the worst-reported one.
         """
-        if not _IS_RANK0:
+        is_error = payload.get("status") == "error"
+        if not _IS_RANK0 and not is_error:
             return
+        if not _IS_RANK0:
+            # Say which rank, or two ranks failing looks like one confused one.
+            payload = {**payload, "rank": _RANK}
 
         # 1. stdout — always, for all statuses
         print(f"{_STATUS_PREFIX}{json.dumps(payload)}", flush=True)
@@ -170,27 +181,30 @@ def main() -> None:
             _sample_interval = float(os.getenv("TRAINING_MEM_SAMPLE_INTERVAL", "5.0"))
             _sampler = start_memory_sampler(interval=_sample_interval, on_sample=_on_mem_sample)
 
-        strategy = StrategyFactory.get_strategy(training_config, ds_config_path)
-        training_args = strategy.get_training_args()
-
-        _emit_stage(Phase.LOADING_TOKENIZER)
-        model_loader = ModelLoader(training_config, hf_token)
-        tokenizer = model_loader.load_tokenizer()
-        _emit_stage(Phase.LOADING_DATASET)
-        dataset = load_training_dataset(training_config.dataset_path)
-        dataset = strategy.preprocess_dataset(dataset, tokenizer)
-        _emit_stage(Phase.LOADING_MODEL)
-        model = model_loader.load_model()
+        # The shared setup sequence -- same one training_process.py runs for a
+        # single GPU. This used to be hand-duplicated here and drifted: image
+        # training and the eval split were both missing.
+        components = build_training_components(
+            training_config,
+            hf_token,
+            ds_config_path,
+            on_stage=_emit_stage,
+            # _emit_event is already rank-0 guarded internally.
+            on_note=lambda msg, payload: _emit_event(EventType.INFO, msg=msg, data=payload),
+        )
+        strategy = components.strategy
+        training_args = components.training_args
+        model = components.model
         if _IS_RANK0:
-            try:
-                from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
-
-                logger.info(f"[MEMPROBE] is_deepspeed_zero3_enabled={is_deepspeed_zero3_enabled()}")
-            except Exception as _e:
-                logger.info(f"[MEMPROBE] could not query is_deepspeed_zero3_enabled: {_e}")
             log_mem("after_model_load")
         _emit_stage(Phase.PREPARING_TRAINER)
-        trainer = strategy.prepare_trainer(model, tokenizer, dataset, training_args)
+        trainer = strategy.prepare_trainer(
+            model,
+            components.processing_class,
+            components.dataset,
+            training_args,
+            eval_dataset=components.eval_dataset,
+        )
         if _IS_RANK0:
             log_mem("after_trainer_prepare")
 
@@ -209,42 +223,52 @@ def main() -> None:
                 step = int(state.global_step or 0)
                 max_steps = int(state.max_steps or _total_steps or 1)
                 last_log = state.log_history[-1] if state.log_history else {}
+                if not isinstance(last_log, dict):
+                    last_log = {}
+
+                # `on_log` fires for train and for eval; the Trainer prefixes eval
+                # entries with `eval_`. Taking `loss or eval_loss` folded the two
+                # curves into one, so an evaluation point landed in the training
+                # history and read as a sudden jump. Split them, exactly as the
+                # single-GPU path in training_process.py does -- these payloads are
+                # consumed by the same writer and the same UI, so they have to carry
+                # the same keys.
+                is_eval = last_log.get("eval_loss") is not None
+                split = "eval" if is_eval else "train"
+                if is_eval:
+                    loss_raw = last_log.get("eval_loss")
+                    acc = last_log.get("eval_accuracy") or last_log.get("eval_mean_token_accuracy")
+                else:
+                    loss_raw = last_log.get("loss")
+                    acc = last_log.get("mean_token_accuracy")
+
                 loss_val: float | None = None
-                if isinstance(last_log, dict):
-                    raw = last_log.get("loss") or last_log.get("eval_loss")
-                    if raw is not None:
-                        loss_val = float(raw)
+                if loss_raw is not None:
+                    try:
+                        loss_val = float(loss_raw)
+                    except (TypeError, ValueError):
+                        loss_val = None
 
                 progress = step / max_steps if max_steps else 0.0
 
+                metric_payload = {
+                    "timestamp": time.time(),
+                    "step": step,
+                    "total": max_steps,
+                    "progress": progress,
+                    "loss": loss_val,
+                    "learning_rate": last_log.get("learning_rate"),
+                    "epoch": last_log.get("epoch"),
+                    "accuracy": acc,
+                    "split": split,
+                }
+
                 # Structured metric event — the parent worker persists it to the
                 # job log and the metrics history (single rpush path via the writer).
-                _emit_event(
-                    "metric",
-                    phase=Phase.TRAINING,
-                    data={
-                        "timestamp": time.time(),
-                        "step": step,
-                        "total": max_steps,
-                        "progress": progress,
-                        "loss": loss_val,
-                        "learning_rate": last_log.get("learning_rate"),
-                        "epoch": last_log.get("epoch"),
-                    },
-                )
+                _emit_event("metric", phase=Phase.TRAINING, data=metric_payload)
 
                 # Coarse progress for the manager's status fields.
-                _push_status(
-                    {
-                        "status": "progress",
-                        "step": step,
-                        "total": max_steps,
-                        "progress": progress,
-                        "loss": loss_val,
-                        "learning_rate": last_log.get("learning_rate"),
-                        "epoch": last_log.get("epoch"),
-                    }
-                )
+                _push_status({"status": "progress", **metric_payload})
             except Exception:
                 pass
 
@@ -272,8 +296,72 @@ def main() -> None:
         # The memory sampler is already running (started before loading).
         trainer.train()
 
+        # Generation check, before the save and while the trained model is still
+        # the live engine -- same placement and reasoning as the single-GPU path in
+        # training_process.py: eval_loss uses the same collator and the same
+        # completion_only_loss as training, so it cannot detect a model that
+        # converged on a degenerate rule ("answer Simon for any person"); only
+        # asking it a question can.
+        #
+        # Without this, `generation_check_path` was silently a no-op for
+        # num_gpus > 1: the multi-GPU branch of training_process.py returns as
+        # soon as this subprocess exits, long before its own generation check
+        # runs, so the field did nothing on exactly the path used for the models
+        # where a degenerate rule costs the most to discover late.
+        #
+        # Runs on EVERY rank, not just rank 0. Generating drives a forward pass,
+        # and under ZeRO-3 each one is a collective: a rank that skipped it would
+        # leave the others blocked in an all-gather while it went on to the save
+        # -- the same constraint the save below documents. Reporting is still
+        # rank 0 only, which _emit_event enforces internally.
+        _check_path = getattr(training_config, "generation_check_path", None)
+        if _check_path:
+            # Imported outside the try: an ImportError from our own package is a
+            # bug worth surfacing, not something to downgrade to "check skipped",
+            # and the handler below needs collective_world_size to be bound.
+            from service.training.core.generation_check import (
+                collective_world_size,
+                load_probes,
+                run_generation_check,
+            )
+
+            try:
+                _verdict = run_generation_check(
+                    trainer.model, components.processing_class, load_probes(_check_path)
+                )
+                _emit_event(EventType.INFO, msg="generation check", data=_verdict)
+                if _verdict["failed"]:
+                    logger.warning(
+                        f"[TrainingScript] rank={_RANK} generation check: "
+                        f"{_verdict['passed']}/{_verdict['total']} probes passed -- "
+                        "the loss curve alone would not have shown this"
+                    )
+            except Exception as _check_err:
+                # On one process the verdict is a report, not a gate: the adapter
+                # is still worth saving, so the run carries on.
+                #
+                # Across ranks it has to fail. Whatever went wrong left this rank
+                # outside a collective the others are still inside, so continuing
+                # to save_training_results() -- itself a collective -- would strand
+                # them until NCCL's watchdog fires with a timeout that names
+                # neither this rank nor this cause. Raising hands it to the
+                # handler below, which reports the error with is_oom set and exits
+                # non-zero so the launcher tears the whole job down.
+                if collective_world_size() > 1:
+                    raise
+                logger.warning(
+                    f"[TrainingScript] rank={_RANK} generation check failed: {_check_err}"
+                )
+                _emit_event(
+                    EventType.INFO,
+                    msg="generation check skipped",
+                    data={"reason": str(_check_err)},
+                )
+
         # All ranks must participate in save (ZeRO-3 GatheredParameters requires it).
-        save_training_results(trainer, tokenizer, training_config)
+        # processing_class, not the tokenizer: an image run must save the
+        # processor, or the output has no processor_config.json for inference.
+        save_training_results(trainer, components.processing_class, training_config)
 
         # Terminal state: stdout first, then Redis backup.
         _push_status({"status": "saved"})

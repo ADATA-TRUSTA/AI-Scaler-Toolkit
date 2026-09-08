@@ -20,6 +20,11 @@ checkpoints/
 .cache/
 finetune_output/
 backend/service/utils/llama.cpp/
+# Local vLLM CPU build sandbox (vendored source clone + its own venv). backend/pyproject.toml
+# excludes this path from pyright on the grounds that it is gitignored, so the entry has to
+# exist here for that to be true -- otherwise a CPU build drops thousands of vendored files
+# into git status.
+backend/service/inference/engines/vllm_server_cpu/
 
 # Backend runtime state (regenerated at runtime; must not be committed even if upstream ships them)
 backend/service/configs/current_*.json

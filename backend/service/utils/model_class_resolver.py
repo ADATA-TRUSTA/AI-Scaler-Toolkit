@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any
 from transformers import AutoConfig, AutoModelForCausalLM
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from transformers import PretrainedConfig, PreTrainedModel
 
 logger = logging.getLogger(__name__)
@@ -172,6 +174,24 @@ def find_bridge_module_paths(model: "PreTrainedModel", text_hidden_size: int | N
     return [n for n in candidates if not any(o != n and n.startswith(o + ".") for o in candidates)]
 
 
+def resolve_text_hidden_size(config: "PretrainedConfig | None") -> int | None:
+    """
+    Return the text tower's hidden size, the width a bridge must emit.
+
+    Composite multimodal configs keep it on the text sub-config (Gemma 4 has no
+    top-level ``hidden_size`` at all), while text-only configs expose it
+    directly. Returns None when neither carries it, which leaves bridge
+    detection disabled rather than guessing a width.
+    """
+    if config is None:
+        return None
+    for cfg in (getattr(config, "text_config", None), config):
+        size = getattr(cfg, "hidden_size", None)
+        if isinstance(size, int) and size > 0:
+            return size
+    return None
+
+
 def load_model_config(
     model_name_or_path: str,
     token: str | None = None,
@@ -229,17 +249,51 @@ def is_multimodal_model(
     return is_multimodal_config(config)
 
 
-def _read_checkpoint_keys(model_dir: str) -> set:
-    """Read weight names from a local checkpoint without loading any tensors."""
-    import json
+def _resolve_checkpoint_file(model_name_or_path: str, filename: str) -> "Path | None":
+    """
+    Locate a checkpoint file, in a local directory or in the HF hub cache.
+
+    Checkpoints are commonly referenced by repo id (``Qwen/Qwen3.5-35B-A3B``)
+    rather than by directory, and the cache layout
+    (``hub/models--org--name/snapshots/<sha>/``) is not something to
+    hand-assemble. Never hits the network: an uncached repo yields None.
+    """
     from pathlib import Path
 
-    d = Path(model_dir)
-    index = d / "model.safetensors.index.json"
-    if index.is_file():
+    local = Path(model_name_or_path) / filename
+    if local.is_file():
+        return local
+    # Anything that resolves on disk is a directory reference, not a repo id.
+    if "/" not in model_name_or_path or Path(model_name_or_path).exists():
+        return None
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        hit = try_to_load_from_cache(repo_id=model_name_or_path, filename=filename)
+    except Exception as e:
+        logger.debug(
+            f"[ModelClassResolver] Cache lookup failed for {model_name_or_path}/{filename}: {e}"
+        )
+        return None
+    # try_to_load_from_cache returns a str on a hit, or a sentinel object /
+    # None when the file is absent or the repo is not cached.
+    return Path(hit) if isinstance(hit, str) and Path(hit).is_file() else None
+
+
+def _read_checkpoint_keys(model_name_or_path: str) -> set:
+    """
+    Read weight names from a checkpoint without loading any tensors.
+
+    Accepts a local directory or a repo id already present in the hub cache;
+    yields an empty set when neither resolves.
+    """
+    import json
+
+    index = _resolve_checkpoint_file(model_name_or_path, "model.safetensors.index.json")
+    if index is not None:
         return set(json.loads(index.read_text()).get("weight_map", {}))
-    single = d / "model.safetensors"
-    if single.is_file():
+    single = _resolve_checkpoint_file(model_name_or_path, "model.safetensors")
+    if single is not None:
         from safetensors import safe_open
 
         with safe_open(str(single), framework="pt") as f:
@@ -270,6 +324,12 @@ def build_zero3_key_mapping(
     ``model.`` prefix back. Returns None when the checkpoint has no such rename,
     so unaffected architectures are left untouched.
 
+    Transformers fixed this upstream by scoping each sub-model's transforms to
+    that sub-model's prefix, so the rename can no longer reach the composite
+    model's keys. On such a version the workaround must NOT fire -- it would add
+    an unscoped rename on top of correctly scoped ones. The presence of
+    ``WeightRenaming.scope_prefix`` is what tells the two apart.
+
     Detection reads the config's model types and the checkpoint's key names
     directly -- it never instantiates the model, because this runs while the
     ZeRO-3 ``zero.Init`` context is active, under which building even a meta
@@ -281,6 +341,13 @@ def build_zero3_key_mapping(
         from transformers.core_model_loading import WeightRenaming
     except Exception as e:  # pragma: no cover - depends on transformers internals
         logger.warning(f"[ModelClassResolver] Cannot inspect conversion mapping: {e}")
+        return None
+
+    if hasattr(WeightRenaming, "scope_prefix"):
+        logger.debug(
+            "[ModelClassResolver] transformers scopes sub-model weight renames; "
+            "the ZeRO-3 key_mapping workaround is not needed"
+        )
         return None
 
     config = load_model_config(model_name_or_path, token=token, local_files_only=local_files_only)
@@ -302,6 +369,14 @@ def build_zero3_key_mapping(
 
     checkpoint_keys = _read_checkpoint_keys(model_name_or_path)
     if not checkpoint_keys:
+        # Without the key names the workaround cannot be justified, so it is
+        # skipped -- but silently skipping it costs a ZeRO-3 run its language
+        # weights, so say so rather than looking like "no rename needed".
+        logger.warning(
+            f"[ModelClassResolver] Could not read checkpoint keys for '{model_name_or_path}'; "
+            "skipping the ZeRO-3 key_mapping check. If this checkpoint needs the workaround, "
+            "its language weights will not bind under ZeRO-3."
+        )
         return None
 
     for mt in model_types:
@@ -317,9 +392,15 @@ def build_zero3_key_mapping(
             ):
                 if "language_model" not in src:
                     continue
-                stripped = src.lstrip("^").rstrip("$")
-                # The rename fires only if checkpoint keys actually carry this path.
-                if any(stripped in k for k in checkpoint_keys):
+                # The rename fires only if checkpoint keys actually carry this
+                # path. The source pattern is a regex, so match it as one -- its
+                # literal spelling varies across transformers versions
+                # ("^model.language_model." vs r"^model\.language_model\.(.+)$").
+                try:
+                    pattern = re.compile(src)
+                except re.error:
+                    continue
+                if any(pattern.match(k) for k in checkpoint_keys):
                     mapping = {r"^model\.language_model\.": "language_model."}
                     logger.info(
                         f"[ModelClassResolver] Applying ZeRO-3 key_mapping workaround "

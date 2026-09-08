@@ -81,6 +81,37 @@ def _read_hf_arch(path: str) -> str | None:
     return None
 
 
+# Keys an HF config.json uses for the window the model was trained for, most
+# specific first. Older Llama forks and several VLMs set only one of them.
+_HF_CONTEXT_KEYS = ("max_position_embeddings", "n_positions", "seq_length", "max_seq_len")
+
+
+def _read_hf_context_length(path: str) -> int | None:
+    """
+    Read the trained context window from config.json.
+
+    Multimodal configs keep the language-model fields under ``text_config``, so the
+    top level of a VLM config carries no window at all; look there too.
+    """
+    config_path = path if path.endswith("config.json") else os.path.join(path, "config.json")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as e:
+        logger.debug(f"[ModelFamily] Could not read HF config from {config_path}: {e}")
+        return None
+
+    nested = config.get("text_config")
+    for block in (config, nested if isinstance(nested, dict) else {}):
+        for key in _HF_CONTEXT_KEYS:
+            value = block.get(key)
+            if isinstance(value, bool) or not isinstance(value, int):
+                continue
+            if value > 0:
+                return value
+    return None
+
+
 @lru_cache(maxsize=64)
 def _resolve_cached_repo_file(ref: str, filename: str) -> str | None:
     """
@@ -130,6 +161,33 @@ def read_model_arch(model_path: str | None) -> str | None:
     except OSError:
         return None
     return _read_arch_cached(path, mtime)
+
+
+@lru_cache(maxsize=64)
+def _read_context_length_cached(path: str, _mtime: float) -> int | None:
+    """Resolve a model's trained context window. ``_mtime`` only keys the cache."""
+    if os.path.isdir(path) or path.endswith("config.json"):
+        return _read_hf_context_length(path)
+    # A GGUF states its own ceiling as n_ctx_train, which llama-server already
+    # publishes over /v1/models; re-reading the file here would only duplicate it.
+    return None
+
+
+def read_model_context_length(model_path: str | None) -> int | None:
+    """
+    Return the context window a model declares it was trained for, or None.
+
+    This is the model's own ceiling, not the window a given load serves. Cached per
+    (path, mtime) like ``read_model_arch``, and reads the same config.json.
+    """
+    path = _localize(model_path, "config.json")
+    if not path:
+        return None
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    return _read_context_length_cached(path, mtime)
 
 
 @lru_cache(maxsize=32)

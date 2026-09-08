@@ -6,6 +6,9 @@ Supports MoE (Mixture of Experts) models.
 """
 
 import logging
+import os
+import re
+from pathlib import Path
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)
@@ -22,48 +25,162 @@ try:
 except Exception:
     AutoConfig = None
 
+# Optional accelerate for meta-device instantiation (the parameter-counting path)
+try:
+    from accelerate import init_empty_weights  # type: ignore
+except Exception:
+    init_empty_weights = None
 
-# Parameter counts for common models (unit: Billion parameters)
-MODEL_SIZES = {
-    # Llama family
-    "llama-7b": 7.0,
-    "llama-13b": 13.0,
-    "llama-30b": 30.0,
-    "llama-65b": 65.0,
-    "llama-2-7b": 7.0,
-    "llama-2-13b": 13.0,
-    "llama-2-70b": 70.0,
-    "llama-3-8b": 8.0,
-    "llama-3-70b": 70.0,
-    # Mistral family
-    "mistral-7b": 7.0,
-    "mixtral-8x7b": 47.0,  # actual active params
-    # Qwen family
-    "qwen3-4b": 4.0,
-    "qwen3-14b": 14.0,
-    "qwen3-32b": 32.0,
-    "qwen3-Next-80B-A3B-Instruct": 78.59,  # MoE: 512 experts, 10 active per token
-    # Gemma family
-    "gemma3-4b": 4.0,
-    "gemma3-12b": 12.0,
-    # TinyLlama
-    "tinyllama-1.1b": 1.1,
-    # ChatGLM family
-    "chatglm-6b": 6.0,
-    "chatglm2-6b": 6.0,
-    "chatglm3-6b": 6.0,
-    # OpenAI GSS-Opt family
-    "gss-opt-20b": 20.0,
-    "gss-opt-120b": 120.0,
-}
+
+def _hf_token() -> str | None:
+    """
+    Token for gated repos (Gemma, Llama), or None.
+
+    Resolved per call rather than at import, so a token added to .env takes effect on
+    restart without this module having to be the first thing that reads it. Shares the
+    helper download_manager uses, so one place decides where the token comes from.
+    """
+    try:
+        from ..utils.token_utils import load_hf_token
+
+        return load_hf_token() or None
+    except Exception:  # pragma: no cover - estimation must not fail over a missing token
+        return None
+
+
+def _hf_endpoint() -> str:
+    """
+    Base URL for the Hub, honouring HF_ENDPOINT so a mirror or proxy is respected.
+
+    Hardcoding huggingface.co would ignore the redirect an on-premise install relies
+    on, which is the same class of mistake as assuming the Hub is reachable at all.
+    """
+    return os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+
+
+# Whether the Hub answered the last time we tried. None means untested.
+#
+# Without this, an air-gapped host pays the timeout on every model it is asked about:
+# huggingface_hub retries five times with backoff, which measured 159 seconds for a
+# single un-downloaded model. The endpoint is supposed to answer "will this fit", not
+# hang for two and a half minutes before admitting it does not know.
+_hub_reachable: bool | None = None
+
+
+def _hub_is_reachable(timeout: float = 2.0) -> bool:
+    """
+    Whether the Hub can be reached, probed once per process.
+
+    HF_HUB_OFFLINE is honoured first: it is the standard way to tell this stack not to
+    touch the network, and a deployment that sets it should never wait on a socket.
+    """
+    global _hub_reachable
+
+    if os.environ.get("HF_HUB_OFFLINE", "").strip() in {"1", "true", "True"}:
+        return False
+    if _hub_reachable is not None:
+        return _hub_reachable
+
+    try:
+        import httpx2
+
+        httpx2.head(f"{_hf_endpoint()}/api/models", timeout=timeout, follow_redirects=True)
+        _hub_reachable = True
+    except Exception as e:
+        logger.info(
+            f"Hugging Face Hub unreachable ({type(e).__name__}); estimates will use local "
+            "data only for the rest of this process"
+        )
+        _hub_reachable = False
+    return _hub_reachable
+
+
+def _mark_hub_unreachable() -> None:
+    """Record that the Hub failed, so the next model does not wait on it again."""
+    global _hub_reachable
+    if _hub_reachable is not False:
+        logger.info("Hub request failed; skipping remote lookups for the rest of this process")
+    _hub_reachable = False
+
+
+def _remote_config_available(model_name: str, timeout: float = 3.0) -> bool:
+    """
+    Whether the Hub will serve this model's config, decided within ``timeout``.
+
+    Asked before handing the fetch to transformers, because huggingface_hub cannot be
+    bounded from outside: it retries five times, and against an unreachable address
+    each attempt waits on the OS connect timeout — 159 seconds in total, measured, and
+    HF_HUB_ETAG_TIMEOUT does not shorten it. Once this has answered, the window in
+    which the link can die before transformers starts is milliseconds rather than
+    minutes.
+
+    A refusal (gated repo, unknown model) means the network is fine and only this
+    model is out of reach, so the Hub is not marked down for it.
+    """
+    try:
+        import httpx2
+
+        headers = {"Authorization": f"Bearer {_hf_token()}"} if _hf_token() else {}
+        response = httpx2.head(
+            f"{_hf_endpoint()}/{model_name}/resolve/main/config.json",
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=True,
+        )
+    except Exception as e:
+        logger.info(f"Hub did not answer for {model_name} ({type(e).__name__})")
+        _mark_hub_unreachable()
+        return False
+
+    if response.status_code >= 400:
+        logger.info(
+            f"Hub will not serve the config for {model_name} (HTTP {response.status_code}); "
+            "estimating from the model name"
+        )
+        return False
+    return True
+
+
+# Names whose *size* cannot be read off them, for the last-resort path only.
+#
+# There used to be a table of ~20 popular models here, used whenever the config could
+# not be read. It is gone: the parameter count now comes from the checkpoint itself
+# (see _count_parameters), which is exact for every architecture transformers can
+# build, including the MoE and multimodal cases a name or a hand-written table gets
+# badly wrong.
+#
+# What remains is a guard for the fallback. Reading a size out of a model id works for
+# "Llama-3-70B" but is catastrophically wrong for MoE naming conventions:
+#
+#   Mixtral-8x7B        -> reads 7B,   actually 46.7B   (6.7x under)
+#   Qwen1.5-MoE-A2.7B   -> reads 2.7B, actually 14.3B   (5.3x under)
+#
+# "A3B" and "8x7B" describe *active* or *per-expert* size; the total is not in the
+# name at all and no arithmetic recovers it. Under-reporting is the direction that
+# hurts — it says a model fits when it does not — so the fallback refuses rather than
+# guesses when it sees one of these.
+MOE_NAME_MARKERS = (
+    r"\d+x\d+\.?\d*b",  # Mixtral-8x7B, Mixtral-8x22B
+    r"-a\d+\.?\d*b",  # Qwen1.5-MoE-A2.7B, Qwen3-235B-A22B
+    r"\bmoe\b",  # explicit MoE in the name
+)
+
+# How much to add to a size read off a model name. Names carry the rounded marketing
+# figure, which sits below the real total because it excludes embeddings: measured
+# against safetensors totals, gpt-oss-20b is really 21.5B and gemma-3-4b is 4.3B,
+# both 7.5% over their names. Erring high is the safe direction here.
+NAME_ESTIMATE_MARGIN = 1.10
 
 
 class MemoryEstimator:
     """Memory requirement estimator - supports HuggingFace configs and MoE models."""
 
     def __init__(self) -> None:
-        self.model_sizes = MODEL_SIZES
         self._config_cache = {}  # Cache for loaded configs
+        # model id -> was the config read off local disk rather than fetched from the
+        # Hub. Gates trust_remote_code; see _load_model_config.
+        self._config_is_local: dict[str, bool] = {}
+        self._param_cache: dict[str, float] = {}  # model id -> parameter count (B)
 
     def _load_model_config(self, model_name: str) -> Any | None:  # noqa: ANN401 - transformers PretrainedConfig or None
         """
@@ -82,179 +199,261 @@ class MemoryEstimator:
             logger.warning("transformers is not installed; cannot load model config automatically")
             return None
 
-        try:
-            config = AutoConfig.from_pretrained(
-                model_name, trust_remote_code=True, local_files_only=True
-            )
+        # Local first, so an already-downloaded model never touches the network. Falling
+        # through to the Hub is what makes the accurate path reachable at all: this
+        # endpoint answers "will it fit" *before* downloading, and local_files_only=True
+        # meant that case always missed. config.json is a few KB, not the weights, and
+        # transformers caches it.
+        #
+        # The remote attempt is skipped entirely when the Hub is known to be out of
+        # reach. huggingface_hub retries five times with backoff, which on an air-gapped
+        # host means 159 seconds of waiting per un-downloaded model — measured — before
+        # falling back to a guess it could have made immediately.
+        attempts = (True, False) if _hub_is_reachable() else (True,)
+        for local_only in attempts:
+            try:
+                # Ask about the file ourselves first, with a timeout we control. The
+                # process-level probe cannot cover a link that dies between checks, and
+                # transformers cannot be bounded from outside once it starts.
+                if not local_only and not _remote_config_available(model_name):
+                    return None
+                config = AutoConfig.from_pretrained(
+                    model_name,
+                    # from_pretrained executes Python from the repo when the config
+                    # declares an auto_map, so this flag is a code-execution decision,
+                    # not a compatibility one. It is granted only for a checkpoint that
+                    # is already on this disk: the operator put it there and loading it
+                    # would run the same code anyway. A repo id that merely arrived in a
+                    # request has cleared no such bar — this endpoint takes an arbitrary
+                    # model_name, has no authentication, and the service runs with
+                    # allow_origins=["*"], so any page the operator visits can reach it.
+                    # A remote checkpoint whose architecture needs custom code therefore
+                    # falls back to the name estimate (size_source="model_name") instead.
+                    trust_remote_code=local_only,
+                    local_files_only=local_only,
+                    token=_hf_token(),
+                )
+            except ValueError as e:
+                # transformers parsed a real response and refused it — an unknown
+                # architecture, or one whose custom code this will not run. The network
+                # is fine, so the Hub must not be marked down over it.
+                if local_only:
+                    logger.debug(f"Config for {model_name} not usable from disk: {e}")
+                    continue
+                logger.warning(
+                    f"Could not build a config for {model_name} from the Hub ({e}); "
+                    "falling back to estimating from the model name"
+                )
+                return None
+            except Exception as e:
+                if local_only:
+                    logger.debug(f"Config for {model_name} not in the local cache: {e}")
+                    continue
+                # A fetch that failed after the probe said yes means the link is not
+                # dependable; stop trying for the rest of this process rather than
+                # paying the timeout again on the next model.
+                _mark_hub_unreachable()
+                # Gated repos (Gemma, Llama) answer 401 without a token. Say so: what
+                # follows is markedly less accurate.
+                logger.warning(
+                    f"Could not read the config for {model_name} ({e}); "
+                    "falling back to estimating from the model name"
+                )
+                return None
             self._config_cache[model_name] = config
-            logger.info(f"Loaded model config: {model_name}")
+            self._config_is_local[model_name] = local_only
+            logger.info(
+                f"Loaded model config from the {'local cache' if local_only else 'Hub'}: "
+                f"{model_name}"
+            )
             return config
-        except Exception as e:
-            logger.warning(f"Failed to load model config {model_name}: {e}")
+
+        if len(attempts) == 1:
+            logger.info(
+                f"{model_name} is not in the local cache and the Hub is unreachable; "
+                "estimating from the model name"
+            )
+        return None
+
+    def _count_parameters(self, model_name: str, config: Any) -> float | None:  # noqa: ANN401 - transformers PretrainedConfig
+        """
+        Total parameter count in billions, or None when it cannot be established.
+
+        Builds the model on PyTorch's meta device: every tensor gets a shape and a
+        dtype but no storage, so a 120B checkpoint costs nothing to instantiate and
+        no weights are downloaded. Counting the result is then exact for whatever
+        transformers builds — MoE experts, vision and audio towers, tied embeddings —
+        rather than re-deriving each architecture's arithmetic here and getting it
+        wrong in a different way for each new family. This is the technique behind
+        `accelerate estimate-memory`.
+
+        Cross-checked against the checkpoint's own safetensors index when the Hub can
+        be reached, and the larger of the two wins. num_parameters() counts
+        nn.Parameters only, so an architecture that keeps weights in buffers reports
+        low (Qwen3-Next by 2%); the index is what is actually on disk. Erring high is
+        the safe direction: under-reporting says a model fits when it does not.
+
+        Building the model runs the repo's modeling code for a custom architecture, so
+        that is allowed only for a config that came off local disk — the same bar
+        _load_model_config applies. A remote checkpoint needing custom code therefore
+        yields no meta-device count, but the safetensors index still does: that half
+        reads published metadata and executes nothing, so such a model keeps an exact
+        figure. Only when both halves come back empty does the caller reach the name
+        estimate.
+        """
+        if model_name in self._param_cache:
+            return self._param_cache[model_name]
+
+        counted = self._count_via_meta_device(
+            config, trust_remote_code=self._config_is_local.get(model_name, False)
+        )
+        on_disk = self._count_via_safetensors_index(model_name)
+
+        if counted is None and on_disk is None:
+            return None
+        best = max(v for v in (counted, on_disk) if v is not None)
+
+        if counted is not None and on_disk is not None:
+            drift = abs(counted - on_disk) / on_disk
+            if drift > 0.01:
+                logger.info(
+                    f"{model_name}: meta-device count {counted:.2f}B vs checkpoint "
+                    f"{on_disk:.2f}B ({drift:.1%}); using {best:.2f}B"
+                )
+
+        self._param_cache[model_name] = best
+        return best
+
+    def _count_via_meta_device(
+        self,
+        config: Any,  # noqa: ANN401 - transformers PretrainedConfig
+        *,
+        trust_remote_code: bool = False,
+    ) -> float | None:
+        """
+        Instantiate on the meta device and count. None if the class cannot be built.
+
+        ``trust_remote_code`` decides whether a checkpoint carrying its own modelling
+        code may have that code imported and run. init_empty_weights() only skips
+        allocating tensor storage; it does not sandbox the import. Pass True only for a
+        checkpoint already on local disk.
+        """
+        if init_empty_weights is None:
+            logger.warning("accelerate is not installed; cannot count parameters exactly")
             return None
 
-    def _calculate_params_from_config(self, config: Any) -> tuple[float, bool, dict]:  # noqa: ANN401 - transformers PretrainedConfig
-        """
-        Compute the model parameter count from a config.
+        try:
+            from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
-        Args:
-            config: model config object
+            from ..utils.model_class_resolver import is_multimodal_config
 
-        Returns:
-            (params(B), is_moe, details)
+            # Deliberately *not* resolve_model_class(): that prefers CausalLM even for
+            # multimodal checkpoints, because a text-dataset fine-tune wants the text
+            # stack and ZeRO-3 needs it. Its own docstring notes the consequence — such
+            # a load "may expose no vision tower at all" — which is exactly the weights
+            # this has to account for. Counting wants the whole checkpoint, so the
+            # preference is inverted here.
+            #
+            # AutoModel is not an option either: it drops the LM head, which on a small
+            # model is a whole vocabulary table (SmolVLM-256M came out 11% light).
+            candidates = (
+                (AutoModelForImageTextToText, AutoModelForCausalLM)
+                if is_multimodal_config(config)
+                else (AutoModelForCausalLM, AutoModelForImageTextToText)
+            )
+            model = None
+            for model_class in candidates:
+                try:
+                    with init_empty_weights():
+                        model = model_class.from_config(config, trust_remote_code=trust_remote_code)
+                    break
+                except Exception as e:
+                    logger.debug(f"{model_class.__name__} cannot build this config: {e}")
+            if model is None:
+                logger.warning("No auto class could build this config on the meta device")
+                return None
+            # from_config does not tie on the meta device, so a tied lm_head would be
+            # counted as a second copy of the embedding table — 27% over on
+            # Qwen2.5-0.5B, whose vocabulary is a quarter of the model.
+            model.tie_weights()
+            return model.num_parameters() / 1e9
+        except Exception as e:
+            logger.warning(f"Could not build the model on the meta device: {e}")
+            return None
+
+    def _count_via_safetensors_index(self, model_name: str) -> float | None:
         """
-        params_info = {
-            "total_params": 0,
-            "active_params": 0,
+        Parameter count from the Hub's safetensors index — what is actually on disk.
+
+        Skipped for local paths (no repo to ask about) and whenever the Hub is out of
+        reach — this is a cross-check on the meta-device count, never the only source,
+        so an offline host loses a little accuracy rather than waiting on a socket.
+        """
+        if "/" not in model_name or Path(model_name).exists():
+            return None
+        if not _hub_is_reachable():
+            return None
+
+        try:
+            import httpx2
+
+            headers = {"Authorization": f"Bearer {_hf_token()}"} if _hf_token() else {}
+            response = httpx2.get(
+                f"{_hf_endpoint()}/api/models/{model_name}",
+                headers=headers,
+                timeout=3.0,
+            )
+            response.raise_for_status()
+            total = (response.json().get("safetensors") or {}).get("total")
+            return total / 1e9 if total else None
+        except Exception as e:
+            logger.debug(f"No safetensors index for {model_name}: {e}")
+            return None
+
+    def _describe_architecture(self, config: Any) -> dict:  # noqa: ANN401 - transformers PretrainedConfig
+        """
+        Read the shape of the model off its config, for the parts of the estimate that
+        are not the weights: activations and KV cache need the hidden size, layer count
+        and head layout, and the response reports the MoE layout.
+        """
+        info = {
+            "architecture": getattr(config, "architectures", ["unknown"])[0]
+            if getattr(config, "architectures", None)
+            else "unknown",
             "is_moe": False,
             "num_experts": 0,
             "experts_per_token": 0,
-            "architecture": getattr(config, "architectures", ["unknown"])[0]
-            if hasattr(config, "architectures")
-            else "unknown",
         }
 
-        # Multimodal models (e.g. Gemma 3) - use text_config
-        if hasattr(config, "text_config") and config.text_config is not None:
-            logger.info("Multimodal model detected; using text_config for the calculation")
-            config = config.text_config
+        # Multimodal checkpoints keep the language model under text_config; the towers
+        # beside it are already in the parameter count, but the KV cache is the text
+        # tower's alone.
+        text_config = getattr(config, "text_config", None) or config
 
-        # Detect MoE models
-        is_moe = False
-        num_experts = 0
-        experts_per_token = 1
-        moe_intermediate_size = None
-        shared_expert_intermediate_size = None
+        for experts_attr in ("num_local_experts", "n_routed_experts", "num_experts"):
+            experts = getattr(text_config, experts_attr, 0) or 0
+            if experts > 1:
+                info["is_moe"] = True
+                info["num_experts"] = experts
+                info["experts_per_token"] = getattr(text_config, "num_experts_per_tok", 2)
+                break
 
-        # Mixtral-style MoE
-        if hasattr(config, "num_local_experts"):
-            is_moe = True
-            num_experts = getattr(config, "num_local_experts", 8)
-            experts_per_token = getattr(config, "num_experts_per_tok", 2)
-            params_info["num_experts"] = num_experts
-            params_info["experts_per_token"] = experts_per_token
-            params_info["is_moe"] = True
-
-        # DeepSeek-style MoE
-        elif hasattr(config, "n_routed_experts"):
-            is_moe = True
-            num_experts = getattr(config, "n_routed_experts", 8)
-            experts_per_token = getattr(config, "num_experts_per_tok", 2)
-            params_info["num_experts"] = num_experts
-            params_info["experts_per_token"] = experts_per_token
-            params_info["is_moe"] = True
-
-        # Qwen3-Next-style MoE (uses num_experts)
-        elif hasattr(config, "num_experts") and getattr(config, "num_experts", 0) > 1:
-            is_moe = True
-            num_experts = getattr(config, "num_experts", 8)
-            experts_per_token = getattr(config, "num_experts_per_tok", 2)
-            moe_intermediate_size = getattr(config, "moe_intermediate_size", None)
-            shared_expert_intermediate_size = getattr(
-                config, "shared_expert_intermediate_size", None
-            )
-            params_info["num_experts"] = num_experts
-            params_info["experts_per_token"] = experts_per_token
-            params_info["is_moe"] = True
-            params_info["moe_intermediate_size"] = moe_intermediate_size
-            params_info["shared_expert_intermediate_size"] = shared_expert_intermediate_size
-
-        # Basic model parameters
-        hidden_size = getattr(config, "hidden_size", 4096)
-        num_layers = getattr(config, "num_hidden_layers", 32)
-        intermediate_size = getattr(config, "intermediate_size", hidden_size * 4)
-        vocab_size = getattr(config, "vocab_size", 32000)
-        num_attention_heads = getattr(config, "num_attention_heads", 32)
-        num_key_value_heads = getattr(config, "num_key_value_heads", num_attention_heads)
-
-        # Token embedding params
-        embedding_params = vocab_size * hidden_size
-
-        # Attention params (per layer)
-        # Q, K, V projections + output projection
-        attention_params_per_layer = (
-            hidden_size * hidden_size  # Q
-            + hidden_size
-            * (hidden_size // num_attention_heads)
-            * num_key_value_heads  # K (GQA support)
-            + hidden_size
-            * (hidden_size // num_attention_heads)
-            * num_key_value_heads  # V (GQA support)
-            + hidden_size * hidden_size  # output projection
+        info["hidden_size"] = getattr(text_config, "hidden_size", 4096)
+        info["num_layers"] = getattr(text_config, "num_hidden_layers", 32)
+        info["intermediate_size"] = getattr(
+            text_config, "intermediate_size", info["hidden_size"] * 4
         )
+        info["vocab_size"] = getattr(text_config, "vocab_size", 32000)
 
-        # FFN params (per layer)
-        if is_moe:
-            # MoE: router + (experts * FFN_size)
-            # Each expert holds gate_proj, up_proj, down_proj
-            router_params = hidden_size * num_experts
-
-            # Use moe_intermediate_size when present (Qwen3-Next style)
-            expert_intermediate_size = (
-                moe_intermediate_size if moe_intermediate_size is not None else intermediate_size
-            )
-
-            # Params per expert: gate(hidden->intermediate) + up(hidden->intermediate) + down(intermediate->hidden)
-            params_per_expert = (
-                (hidden_size * expert_intermediate_size)
-                + (hidden_size * expert_intermediate_size)
-                + (expert_intermediate_size * hidden_size)
-            )
-            expert_params = num_experts * params_per_expert
-
-            # Shared expert (if present)
-            shared_expert_params = 0
-            if shared_expert_intermediate_size is not None and shared_expert_intermediate_size > 0:
-                shared_expert_params = (
-                    (hidden_size * shared_expert_intermediate_size)
-                    + (hidden_size * shared_expert_intermediate_size)
-                    + (shared_expert_intermediate_size * hidden_size)
-                )
-
-            ffn_params_per_layer = router_params + expert_params + shared_expert_params
-
-            # Active params: only the selected experts take part in the computation
-            active_expert_params = experts_per_token * params_per_expert
-            active_ffn_params_per_layer = (
-                router_params + active_expert_params + shared_expert_params
-            )
-        else:
-            # Standard FFN: gate + up + down projections
-            ffn_params_per_layer = (
-                (hidden_size * intermediate_size)
-                + (hidden_size * intermediate_size)
-                + (intermediate_size * hidden_size)
-            )
-            active_ffn_params_per_layer = ffn_params_per_layer
-
-        # Layer norm params (negligible, included for completeness)
-        norm_params_per_layer = hidden_size * 2  # pre-attention norm + post-ffn norm
-
-        # Total params
-        total_layer_params = num_layers * (
-            attention_params_per_layer + ffn_params_per_layer + norm_params_per_layer
-        )
-
-        active_layer_params = num_layers * (
-            attention_params_per_layer + active_ffn_params_per_layer + norm_params_per_layer
-        )
-
-        # Output layer (lm_head)
-        output_params = vocab_size * hidden_size
-
-        # Totals
-        total_params = embedding_params + total_layer_params + output_params
-        active_params = embedding_params + active_layer_params + output_params
-
-        params_info["total_params"] = total_params / 1e9  # convert to Billion
-        params_info["active_params"] = active_params / 1e9
-        params_info["hidden_size"] = hidden_size
-        params_info["num_layers"] = num_layers
-        params_info["intermediate_size"] = intermediate_size
-        params_info["vocab_size"] = vocab_size
-
-        # Return total_params (used for memory estimation), is_moe, and the details
-        return params_info["total_params"], is_moe, params_info
+        # The KV cache is sized by the *key/value* head count, not the model's hidden
+        # size. Under GQA those differ by the grouping factor — Qwen3-32B has 64
+        # attention heads sharing 8 KV heads — so reading hidden_size here overstates
+        # the cache by that factor.
+        heads = getattr(text_config, "num_attention_heads", 32) or 32
+        info["num_attention_heads"] = heads
+        info["num_key_value_heads"] = getattr(text_config, "num_key_value_heads", heads) or heads
+        info["head_dim"] = getattr(text_config, "head_dim", None) or info["hidden_size"] // heads
+        return info
 
     def extract_model_size(self, model_name: str) -> float | None:
         """
@@ -266,41 +465,48 @@ class MemoryEstimator:
         Returns:
             Parameter count (Billion) or None
         """
-        # Prefer loading the config from HuggingFace
         config = self._load_model_config(model_name)
         if config is not None:
-            try:
-                size, is_moe, info = self._calculate_params_from_config(config)
-                logger.info(f"Params computed from config: {size:.2f}B (MoE: {is_moe})")
-                return size
-            except Exception as e:
-                logger.warning(f"Failed to compute params from config: {e}")
+            counted = self._count_parameters(model_name, config)
+            if counted is not None:
+                return counted
 
-        # Fall back to name matching
-        model_name_lower = model_name.lower()
+        return self._guess_size_from_name(model_name)
 
-        # Try the predefined table
-        for key, size in self.model_sizes.items():
-            if key in model_name_lower:
-                return size
+    def _guess_size_from_name(self, model_name: str) -> float | None:
+        """
+        Last resort: read a size out of the model id.
 
-        # Try extracting a number from the name
-        # e.g. "7b", "13b", "70b"
-        import re
+        Only reached when the config could not be read at all — a gated repo with no
+        HF_TOKEN, or a private model offline. Returns None rather than a number
+        whenever the name cannot be trusted, because a confident wrong answer here
+        becomes a confident wrong "it fits".
+        """
+        name = model_name.lower()
 
-        # Match the XXb form
-        match = re.search(r"(\d+\.?\d*)b", model_name_lower)
-        if match:
-            size = float(match.group(1))
-            return size
+        # MoE names advertise active or per-expert size, never the total, and the gap
+        # is 5-7x rather than a few percent. No margin covers that, so do not guess.
+        for marker in MOE_NAME_MARKERS:
+            if re.search(marker, name):
+                logger.warning(
+                    f"{model_name} looks like an MoE checkpoint and its config could not "
+                    "be read; refusing to estimate from the name, which would report the "
+                    "active size rather than the total"
+                )
+                return None
 
-        # Match the XX-billion form
-        match = re.search(r"(\d+\.?\d*)-?billion", model_name_lower)
-        if match:
-            return float(match.group(1))
+        match = re.search(r"(\d+\.?\d*)b", name) or re.search(r"(\d+\.?\d*)-?billion", name)
+        if not match:
+            logger.warning(f"Cannot extract the parameter count from the model name: {model_name}")
+            return None
 
-        logger.warning(f"Cannot extract the parameter count from the model name: {model_name}")
-        return None
+        size = float(match.group(1)) * NAME_ESTIMATE_MARGIN
+        logger.warning(
+            f"Estimating {model_name} from its name: {match.group(1)}B plus a "
+            f"{NAME_ESTIMATE_MARGIN:.0%} margin -> {size:.2f}B. Provide HF_TOKEN or "
+            "download the model for an exact figure."
+        )
+        return size
 
     def estimate_memory_requirements(
         self,
@@ -323,40 +529,44 @@ class MemoryEstimator:
         Returns:
             Dict with the memory estimation result
         """
-        # Try loading the config for full details
         config = self._load_model_config(model_name)
-        is_moe = False
         params_info = {}
+        model_size_b = None
 
         if config is not None:
-            try:
-                model_size_b, is_moe, params_info = self._calculate_params_from_config(config)
-                logger.info(f"Computed from config: {model_size_b:.2f}B params (MoE: {is_moe})")
-            except Exception as e:
-                logger.warning(f"Config calculation failed; falling back to name extraction: {e}")
-                model_size_b = self.extract_model_size(model_name)
-        else:
-            # Extract the model size (fallback path)
-            model_size_b = self.extract_model_size(model_name)
+            params_info = self._describe_architecture(config)
+            model_size_b = self._count_parameters(model_name, config)
+            if model_size_b is not None:
+                params_info["total_params"] = model_size_b
+                logger.info(
+                    f"Counted from the checkpoint: {model_size_b:.2f}B params "
+                    f"(MoE: {params_info['is_moe']})"
+                )
+
+        if model_size_b is None:
+            # No usable config: everything below is inferred from the name.
+            params_info = {}
+            model_size_b = self._guess_size_from_name(model_name)
 
         if model_size_b is None:
             return {
                 "error": "Cannot determine the model size",
                 "model_name": model_name,
-                "suggestion": "Check the model name, or install transformers",
+                "suggestion": (
+                    "The config could not be read and the name does not carry a reliable "
+                    "size. Set HF_TOKEN for a gated repo, or download the model first."
+                ),
             }
 
-        # Model weight memory
-        # For MoE, use total_params (all experts) rather than active_params
-        total_params_for_memory = (
-            params_info.get("total_params", model_size_b) if is_moe else model_size_b
-        )
-        model_memory = self._calculate_model_memory(total_params_for_memory, quantization)
+        is_moe = bool(params_info.get("is_moe"))
+        # The count is the total across all experts, which is what the weights cost:
+        # inference keeps every expert resident regardless of routing.
+        model_memory = self._calculate_model_memory(model_size_b, quantization)
 
         # Activation memory (intermediate results during inference)
         # Use the actual config when available, otherwise estimate.
         # When params_info is truthy, hidden_size/num_layers are already ints
-        # (see _calculate_params_from_config).
+        # (see _describe_architecture).
         hidden_size = cast(
             int,
             params_info.get("hidden_size")
@@ -372,18 +582,39 @@ class MemoryEstimator:
 
         activation_memory = 0
         if include_activations:
+            # The logits tensor dominates this term, so the vocabulary size matters more
+            # than anything else here; fall back to the largest in common use when the
+            # config could not be read.
             activation_memory = self._calculate_activation_memory_with_config(
-                hidden_size, num_layers, batch_size, sequence_length, quantization
+                hidden_size,
+                num_layers,
+                batch_size,
+                sequence_length,
+                quantization,
+                vocab_size=cast(int, params_info.get("vocab_size", 151936)),
             )
 
-        # KV cache memory
-        kv_cache_memory = self._calculate_kv_cache_memory_with_config(
-            hidden_size, num_layers, batch_size, sequence_length
-        )
+        # KV cache memory. With a config the cached width is num_key_value_heads x
+        # head_dim. Without one the head layout is unknown and the geometry is guessed,
+        # so the fallback helper owns that case — it assumes MHA and adds the band-edge
+        # margin. Re-deriving it here is what let the two drift apart before.
+        if params_info:
+            kv_cache_memory = self._calculate_kv_cache_memory_with_config(
+                num_layers,
+                batch_size,
+                sequence_length,
+                kv_width=cast(int, params_info["num_key_value_heads"] * params_info["head_dim"]),
+            )
+        else:
+            kv_cache_memory = self._calculate_kv_cache_memory(
+                model_size_b, batch_size, sequence_length
+            )
 
-        # Runtime overhead (Python/Torch/CUDA etc.)
+        # Runtime overhead. Only the device share belongs in a GPU budget — the Python
+        # process, the framework and the library code live in system RAM, and adding
+        # them here charged every VRAM figure about 1.3 GB it does not need.
         overhead_breakdown = self._estimate_runtime_overhead(quantization)
-        overhead_memory = overhead_breakdown["total"]
+        overhead_memory = overhead_breakdown["device_total"]
 
         # Total memory requirement
         total_memory = model_memory + activation_memory + kv_cache_memory + overhead_memory
@@ -399,6 +630,11 @@ class MemoryEstimator:
         result = {
             "model_name": model_name,
             "model_size_billions": round(model_size_b, 2),
+            # Whether the figures were counted from the checkpoint or inferred from the
+            # model's name. On the name path the parameter count, hidden size and layer
+            # count are all guesses, so every number below inherits that uncertainty;
+            # clients should present it as an approximation, not a measurement.
+            "size_source": "config" if params_info else "model_name",
             "quantization": quantization,
             "memory_breakdown_gb": {
                 "model_weights": round(model_memory, 2),
@@ -407,14 +643,16 @@ class MemoryEstimator:
                 "overhead": round(overhead_memory, 2),
                 "total": round(total_memory, 2),
             },
+            # Split by where the memory lives: only device_total is part of the GPU
+            # requirement above, the host entries are system RAM.
             "overhead_details_gb": {
                 "python_runtime": round(overhead_breakdown["python_runtime"], 2),
                 "pytorch_framework": round(overhead_breakdown["pytorch_framework"], 2),
-                "cuda_context": round(overhead_breakdown["cuda_context"], 2),
-                "cuda_libraries": round(overhead_breakdown["cuda_libraries"], 2),
                 "transformers_lib": round(overhead_breakdown["transformers_lib"], 2),
+                "host_total": round(overhead_breakdown["host_total"], 2),
+                "device_context": round(overhead_breakdown["device_context"], 2),
                 "quantization_lib": round(overhead_breakdown["quantization_lib"], 2),
-                "cuda_driver": round(overhead_breakdown["cuda_driver"], 2),
+                "device_total": round(overhead_breakdown["device_total"], 2),
                 "total": round(overhead_breakdown["total"], 2),
             },
             "recommendations": {
@@ -431,22 +669,21 @@ class MemoryEstimator:
             ],
         }
 
-        # MoE-specific info
+        # MoE-specific info. Active params are deliberately absent: they describe how
+        # much compute a token costs, not how much memory the weights need, and every
+        # expert is resident either way. Reporting them next to a memory estimate
+        # invited sizing a GPU against the active figure.
         if is_moe:
             result["moe_info"] = {
                 "is_moe": True,
                 "num_experts": params_info.get("num_experts", 0),
                 "experts_per_token": params_info.get("experts_per_token", 0),
-                "total_params_billions": round(params_info.get("total_params", 0), 2),
-                "active_params_billions": round(params_info.get("active_params", 0), 2),
+                "total_params_billions": round(model_size_b, 2),
             }
             result["notes"].append(
                 f"MoE model: {params_info.get('num_experts')} experts, "
-                f"{params_info.get('experts_per_token')} experts per token"
-            )
-            result["notes"].append(
-                f"Total params: {params_info.get('total_params', 0):.2f}B, "
-                f"active params: {params_info.get('active_params', 0):.2f}B"
+                f"{params_info.get('experts_per_token')} active per token. "
+                f"All {model_size_b:.2f}B parameters stay resident."
             )
 
         # Config info
@@ -471,9 +708,12 @@ class MemoryEstimator:
                 "Actual memory use varies with the framework and runtime (CUDA/driver/libraries)",
                 "Reserving a 20% safety margin is recommended",
                 (
-                    "CUDA environment detected; the extra overhead is included"
-                    if (torch and hasattr(torch, "cuda") and torch.cuda.is_available())
-                    else "CPU-only environment; overhead is lower"
+                    f"{overhead_breakdown['accelerator']} accelerator detected; its "
+                    f"context is counted ({overhead_breakdown['device_total']:.2f} GB). "
+                    f"A further {overhead_breakdown['host_total']:.2f} GB of framework "
+                    "overhead sits in system RAM, not on the device"
+                    if overhead_breakdown["accelerator"] != "cpu"
+                    else "No accelerator detected; the estimate covers device memory only"
                 ),
             ]
         )
@@ -482,93 +722,86 @@ class MemoryEstimator:
 
     def _estimate_runtime_overhead(self, quantization: str) -> dict[str, float]:
         """
-        Estimate the detailed runtime memory overhead (GB).
+        Non-weight memory the runtime needs, split by where it actually lives.
 
-        Includes:
-        - Base Python process memory (~0.3 GB)
-        - PyTorch framework overhead (~0.5-1.0 GB, version dependent)
-        - CUDA context initialization (~0.5-1.0 GB per GPU)
-        - CUDA core library workspaces (cuBLAS, cuDNN, cuSPARSE ~0.5-1.5 GB)
-        - Transformers library (~0.2-0.5 GB)
-        - Quantization library (bitsandbytes ~0.3-0.5 GB)
-        - CUDA driver and runtime (~0.2-0.3 GB)
+        Only ``device_total`` belongs in a GPU budget. The host entries — the Python
+        process, the framework and library code — sit in system RAM and were previously
+        summed into the same figure, adding about 1.3 GB of RAM costs to every VRAM
+        requirement.
 
-        Returns:
-            Dict with the per-item overhead breakdown and the total
+        The device figures were 10x too large as well. Measured on CUDA (RTX 5060 Ti,
+        torch 2.11+cu130) as the gap between what nvidia-smi reports and what torch has
+        allocated for tensors, after loading a model and running a forward pass:
 
-        Note: these are empirical values; actual numbers depend on the driver version,
-        CUDA version, GPU generation and settings.
+            Qwen2.5-0.5B    134 MiB          SmolLM2-135M     90 MiB
+            bare context + one matmul: 181 MiB
+
+        against the 2.15 GB the old constants claimed (0.8 context + 1.1 libraries +
+        0.25 driver, scaled by compute capability). 0.35 GB below leaves roughly 2x
+        headroom over the largest measurement without dominating the estimate.
+
+        Anything that is not CUDA but is a GPU — Intel XPU here — used to fall into a
+        "CPU-only" branch and be charged nothing at all, which is the wrong direction.
+        It now takes the same figure.
+
+        On XPU only a lower bound could be measured: torch 2.11+xpu on an Intel iGPU
+        reserves 2 MiB for a bare context and 41.8 MiB beyond the weights once a model
+        is loaded. The driver-side total is not readable there — the backend already
+        carries a workaround for XPU lacking mem_get_info — so this is under-counted
+        rather than measured. 0.35 GB sits above that bound and inside the range CUDA
+        measured, which is the best that can be said without a working counter. Note an
+        integrated GPU draws from system RAM rather than dedicated VRAM, so the figure
+        matters far less there than on a discrete card.
         """
+        accelerator = self._detect_accelerator()
+
         overhead = {
+            # Host-side: system RAM, not VRAM.
             "python_runtime": 0.3,  # Python process and core libraries
-            "pytorch_framework": 0.0,
-            "cuda_context": 0.0,
-            "cuda_libraries": 0.0,
+            "pytorch_framework": 0.8 if accelerator != "cpu" else 0.5,
             "transformers_lib": 0.2,
+            # Device-side: what the GPU itself holds beyond the weights.
+            "device_context": 0.0,
             "quantization_lib": 0.0,
-            "cuda_driver": 0.0,
         }
 
-        # PyTorch framework overhead (depends on CUDA support)
-        if torch and torch.cuda.is_available():
-            overhead["pytorch_framework"] = 0.8  # the CUDA build is larger
+        if accelerator != "cpu":
+            # Context, kernels and library workspaces, measured rather than assumed.
+            overhead["device_context"] = 0.35
+            # bitsandbytes loads its kernels onto the device.
+            if quantization.lower() in {"int8", "int4", "nf4", "fp4"}:
+                overhead["quantization_lib"] = 0.4
+        elif quantization.lower() in {"int8", "int4", "nf4", "fp4"}:
+            overhead["quantization_lib"] = 0.1
 
-            # Detect GPU info to adjust the estimate
-            try:
-                device_count = torch.cuda.device_count()
-                device_name = torch.cuda.get_device_name(0) if device_count > 0 else "Unknown"
-                compute_capability = (
-                    torch.cuda.get_device_capability(0) if device_count > 0 else (0, 0)
-                )
+        host_total = (
+            overhead["python_runtime"]
+            + overhead["pytorch_framework"]
+            + overhead["transformers_lib"]
+        )
+        device_total = overhead["device_context"] + overhead["quantization_lib"]
 
-                # CUDA context (per GPU)
-                # Newer GPUs (Compute Capability >= 8.0, Ampere+) may need more
-                if compute_capability[0] >= 8:  # Ampere (A100, RTX 30xx) or newer
-                    overhead["cuda_context"] = 0.8 * device_count
-                elif compute_capability[0] >= 7:  # Volta/Turing (V100, T4, RTX 20xx)
-                    overhead["cuda_context"] = 0.6 * device_count
-                else:  # older GPUs
-                    overhead["cuda_context"] = 0.5 * device_count
-
-                # CUDA core library workspaces (cuBLAS, cuDNN, cuSPARSE etc.)
-                # Adjusted by GPU generation and CUDA version
-                if compute_capability[0] >= 8:
-                    # Newer GPUs support more CUDA core features (Tensor Cores, etc.)
-                    overhead["cuda_libraries"] = 1.1
-                elif compute_capability[0] >= 7:
-                    overhead["cuda_libraries"] = 0.8
-                else:
-                    overhead["cuda_libraries"] = 0.5
-
-                # CUDA driver and runtime
-                overhead["cuda_driver"] = 0.25
-
-                logger.debug(
-                    f"GPU detected: {device_name} (Compute {compute_capability[0]}.{compute_capability[1]})"
-                )
-            except Exception as e:
-                # If GPU detection fails, use conservative estimates
-                logger.warning(f"GPU detection failed; using defaults: {e}")
-                overhead["cuda_context"] = 0.6
-                overhead["cuda_libraries"] = 0.8
-                overhead["cuda_driver"] = 0.25
-        else:
-            # CPU-only environment
-            overhead["pytorch_framework"] = 0.5
-            overhead["cuda_context"] = 0.0
-            overhead["cuda_libraries"] = 0.0
-            overhead["cuda_driver"] = 0.0
-
-        # Quantization library (bitsandbytes, only when quantization is used)
-        if quantization.lower() in {"int8", "int4", "nf4", "fp4"}:
-            # bitsandbytes loads CUDA kernels and quantization constants
-            overhead["quantization_lib"] = 0.4 if torch and torch.cuda.is_available() else 0.1
-
-        # Total overhead
-        total = sum(overhead.values())
-        overhead["total"] = round(total, 2)
-
+        overhead["host_total"] = round(host_total, 2)
+        overhead["device_total"] = round(device_total, 2)
+        # Kept for callers that reported a single number; it is host + device, so it
+        # is not a GPU figure.
+        overhead["total"] = round(host_total + device_total, 2)
+        overhead["accelerator"] = accelerator  # type: ignore[assignment]
         return overhead
+
+    @staticmethod
+    def _detect_accelerator() -> str:
+        """Which kind of accelerator torch can see: "cuda", "xpu" or "cpu"."""
+        if torch is None:
+            return "cpu"
+        try:
+            if torch.cuda.is_available():
+                return "cuda"
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                return "xpu"
+        except Exception:  # pragma: no cover - a broken driver must not fail the estimate
+            logger.warning("Accelerator detection failed; assuming CPU")
+        return "cpu"
 
     def _calculate_model_memory(self, model_size_b: float, quantization: str) -> float:
         """
@@ -603,11 +836,18 @@ class MemoryEstimator:
     def _calculate_activation_memory(
         self, model_size_b: float, batch_size: int, sequence_length: int, quantization: str
     ) -> float:
-        """More precise inference activation memory estimate (fallback path)."""
+        """
+        Activation memory without a config (fallback path).
+
+        The term is dominated by the logits tensor, whose width is the vocabulary — and
+        with no config that is unknown. 151936 is the largest in common use (the Qwen
+        families); assuming it over-reports a smaller vocabulary rather than under, in
+        keeping with the rest of this path.
+        """
         hidden_size = self._estimate_hidden_size(model_size_b)
         num_layers = self._estimate_num_layers(model_size_b)
         return self._calculate_activation_memory_with_config(
-            hidden_size, num_layers, batch_size, sequence_length, quantization
+            hidden_size, num_layers, batch_size, sequence_length, quantization, vocab_size=151936
         )
 
     def _calculate_activation_memory_with_config(
@@ -617,41 +857,148 @@ class MemoryEstimator:
         batch_size: int,
         sequence_length: int,
         quantization: str,
+        vocab_size: int = 32000,
     ) -> float:
-        """Compute activation memory from the actual config."""
+        """
+        Peak activation memory for a forward pass, which the logits tensor dominates.
+
+        The output projection produces one score per vocabulary entry per position, so
+        it is batch x sequence x vocab — far larger than anything the layers keep live.
+        Measured with torch's allocator on CUDA, weights subtracted:
+
+            model             vocab    seq    measured    batch*seq*vocab*2 bytes
+            Qwen2.5-0.5B     151936    128     47.3 MiB       37.1 MiB
+                                       512    158.4 MiB      148.4 MiB
+                                      2048    606.6 MiB      593.5 MiB
+            SmolLM2-135M      49152    128     12.1 MiB       12.0 MiB
+                                      2048    195.0 MiB      192.0 MiB
+
+        The same model on an Intel XPU (torch 2.11+xpu) tracks the logits tensor even
+        more closely — 38.2 / 149.3 / 597.5 MiB at the three lengths — so the shape is
+        not a CUDA artefact.
+
+        Re-measured on Linux (WSL2, torch 2.13+cu129, same RTX 5060 Ti) the logits term
+        holds but the residual does not. SmolLM2 matches Windows almost exactly — 0.1 /
+        0.6 / 2.3 / 9.1 MiB at 128 / 512 / 2048 / 8192 — while Qwen2.5-0.5B carries a
+        roughly 33 MiB constant workspace where Windows measured 10-13:
+
+            seq     measured   logits   residual
+            128         70.2     37.1       33.1
+            512        181.3    148.4       32.9
+            2048       629.5    593.5       36.0
+            8192      2420.1   2374.0       46.1
+
+        A 16 MiB floor did not cover that: at 128 and 512 tokens the estimate came out
+        below the measurement, which is the direction that says a model fits when it
+        does not. The floor is 64 MiB, about twice the largest constant seen.
+
+        Whether the constant is the OS or the torch version cannot be separated here —
+        the Windows figures were taken on torch 2.11+cu and that install has since been
+        replaced by the XPU build the training tests need. It does not change the fix:
+        the formula has to cover both, and one of them needs 33 MiB.
+
+        The residual grows slowly with sequence length on top of that constant, and the
+        10% margin covers the growth from 2048 tokens up — the floor is what carries the
+        short-sequence cases, where the whole term is small in absolute terms anyway.
+
+        The previous formula (sequence x hidden x layers / 30, no recorded derivation)
+        had no logits term at all and came out 216x low: 2.8 MiB against 606.6 measured.
+
+        Assumes a single forward over the whole sequence, which is what prefill does.
+        A decode step computes logits for one position only, so this is the peak rather
+        than the steady state — the right figure for "will it fit".
+        """
         # 16-bit dtypes (none/fp16/bf16) use 2 bytes per element; quantized
         # weights use a rough 1-byte approximation for activations.
         bytes_per_element = 2 if quantization.lower() in ("none", "fp16", "bf16") else 1
 
-        # Inference only needs to keep a small slice of the intermediate layers
-        raw_memory = (
-            batch_size * sequence_length * hidden_size * num_layers * bytes_per_element
-        ) / (1024**3)
-        return raw_memory / 30  # roughly 1/30 of training
+        logits = batch_size * sequence_length * vocab_size * bytes_per_element / (1024**3)
+        # 10% plus a 64 MiB floor covers the measured residual on both platforms above.
+        # The floor is set by Linux's ~33 MiB constant workspace, not by Windows' 10-13.
+        return logits * 1.10 + 64 / 1024
 
     def _calculate_kv_cache_memory(
         self, model_size_b: float, batch_size: int, sequence_length: int
     ) -> float:
-        """Adjust the KV cache toward realistic values (fallback path)."""
+        """
+        KV cache without a config (fallback path).
+
+        With no config the head layout is unknown, so this assumes MHA — every
+        attention head keeping its own K and V, i.e. a per-token width of hidden_size.
+        That is the largest the cache can be, and over-estimating is the safe
+        direction for a "will it fit" answer.
+
+        For a GQA model that ceiling leaves 3-15x of headroom, so the geometry guess
+        underneath it barely matters. For a model that really is MHA it leaves almost
+        none — measured against the guessed geometry, phi-2 came out at 1.00x, falcon-7b
+        and Phi-3-mini at 1.11x, gpt-neox-20b and bloom-1b7 at 1.3x. Those are the models
+        where the step functions are the only thing standing between the answer and an
+        under-estimate, and a band's lower edge is where they are thinnest: the tables
+        return one value for everything from 13B to 30B, so a deep, narrow model sitting
+        just under a threshold is the case that can go negative.
+
+        Hence the margin. It is not a fudge for the tables being poor — they measure
+        1.00-2.67x across 18 models and never under (see _estimate_hidden_size) — it is
+        cover for the band edges, on a path whose parameter count is already a guess
+        carrying NAME_ESTIMATE_MARGIN for the same reason.
+        """
         hidden_size = self._estimate_hidden_size(model_size_b)
         num_layers = self._estimate_num_layers(model_size_b)
-        return self._calculate_kv_cache_memory_with_config(
-            hidden_size, num_layers, batch_size, sequence_length
+        exact = self._calculate_kv_cache_memory_with_config(
+            num_layers, batch_size, sequence_length, kv_width=hidden_size
         )
+        return exact * NAME_ESTIMATE_MARGIN
 
     def _calculate_kv_cache_memory_with_config(
-        self, hidden_size: int, num_layers: int, batch_size: int, sequence_length: int
+        self, num_layers: int, batch_size: int, sequence_length: int, kv_width: int
     ) -> float:
-        """Compute the KV cache from the actual config."""
-        bytes_per_element = 2  # FP16
+        """
+        Exact KV cache size: 2 (K and V) x layers x batch x tokens x kv_width x 2 bytes.
 
-        kv_cache = (
-            2 * num_layers * batch_size * sequence_length * hidden_size * bytes_per_element
-        ) / (1024**3)
-        return kv_cache * 0.6  # about 60% is used on average in practice
+        ``kv_width`` is num_key_value_heads x head_dim, which is what an attention layer
+        actually caches. This used to pass hidden_size and then scale the result by 0.6
+        ("about 60% is used on average in practice"). Both parts were wrong, in opposite
+        directions:
+
+          - hidden_size assumes MHA. Under GQA the cache is smaller by the grouping
+            factor, so the figure came out 2.4-4.2x high on every model measured
+            (Qwen2.5-0.5B 4.2x, Qwen3-32B 3.0x, gpt-oss-20b 3.4x, Mixtral 2.4x).
+          - the 0.6 then removed 40% regardless, which for a genuine MHA model turns
+            the answer into an under-estimate — the direction that says a model fits
+            when it does not.
+
+        There is no averaging to do here: the caller asks for a specific batch size and
+        sequence length, and the cache for those has to be allocated in full.
+        """
+        bytes_per_element = 2  # FP16 / BF16
+
+        return (2 * num_layers * batch_size * sequence_length * kv_width * bytes_per_element) / (
+            1024**3
+        )
 
     def _estimate_hidden_size(self, model_size_b: float) -> int:
-        """Estimate the hidden size."""
+        """
+        Hidden size for a model whose config could not be read.
+
+        The tables here and in _estimate_num_layers arrived with no recorded derivation,
+        so they were checked against the real configs of 18 models spanning 0.1B-72B and
+        8 families (Qwen2.5, Qwen3, SmolLM2, Phi, Llama-derived, Falcon, GPT-NeoX, BLOOM).
+        What matters is the product layers x hidden, since that is what the KV cache is
+        proportional to. Against the real product:
+
+            worst over-estimate   2.67x  (SmolLM2-135M, deliberately deep and narrow)
+            worst under-estimate  1.00x  (phi-2, landing exactly on a table row)
+            median                ~1.25x
+
+        Never under, which is the property that matters for "will it fit".
+
+        A scaling law was fitted as a replacement — params = 12 x layers x hidden^2 with
+        a fixed aspect ratio, the usual dense-transformer relation, calibrated over the
+        same 18 models. It came out at 1.06-2.67x: no better. MoE models are why nothing
+        derived from the parameter count can do much better here, as their count is
+        inflated by experts that add no attention layers, and on the name path there is
+        no way to tell. The tables stay.
+        """
         if model_size_b <= 1:
             return 2048
         elif model_size_b <= 3:
@@ -668,7 +1015,11 @@ class MemoryEstimator:
             return 12288
 
     def _estimate_num_layers(self, model_size_b: float) -> int:
-        """Estimate the number of layers."""
+        """
+        Layer count for a model whose config could not be read.
+
+        Only meaningful together with _estimate_hidden_size — see the measurement there.
+        """
         if model_size_b <= 1:
             return 22
         elif model_size_b <= 3:

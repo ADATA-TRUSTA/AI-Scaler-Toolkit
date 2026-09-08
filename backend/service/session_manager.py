@@ -1,6 +1,7 @@
 """
 Session management with Redis (fallback to in-memory store).
-- Primary: Redis using REDIS_URL env (default: redis://localhost:6379/0)
+- Redis is used only when REDIS_URL is set. Without it the in-memory store is the
+  store, not a consolation for a failed connection.
 - Optional TTL via SESSION_TTL_SECONDS env (default: 86400 seconds).
 
 Stored format per session_id: JSON list of messages
@@ -75,10 +76,18 @@ class InMemoryStore(BaseStore):
 class RedisStore(BaseStore):
     """Redis-backed session store with JSON-encoded history."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, connect_timeout: float = 2.0) -> None:
         import redis  # type: ignore
 
-        self._redis = redis.Redis.from_url(url, decode_responses=True)
+        # With no timeout this inherits the operating system's, which on Windows is
+        # tens of seconds per attempt -- paid during startup, before the server binds,
+        # by every installation that does not run Redis.
+        self._redis = redis.Redis.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=connect_timeout,
+            socket_timeout=connect_timeout,
+        )
         # simple ping to validate connectivity
         self._redis.ping()
 
@@ -135,8 +144,21 @@ class SessionManager:
 
     def __init__(self) -> None:
         self.ttl = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
-        url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        # Only when asked for. The default used to be redis://localhost:6379/0, which
+        # assumes a Redis on every machine that runs this -- and a desktop install has
+        # none and never will. The cost was not a warning: connecting is done during
+        # startup, before the server binds, so every launch waited out a TCP timeout
+        # to learn what the configuration already said. It was over half the time
+        # between starting the service and it answering.
+        #
+        # Redis remains the right store where sessions are shared between processes.
+        # Set REDIS_URL there. Here, in-memory is not a fallback, it is the answer.
+        url = os.getenv("REDIS_URL", "").strip()
         self._store: BaseStore
+        if not url:
+            logger.info("Session store: in-memory (REDIS_URL is not set)")
+            self._store = InMemoryStore()
+            return
         try:
             self._store = RedisStore(url)
             logger.info("Session store: Redis connected at %s", url)

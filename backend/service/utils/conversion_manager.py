@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from service.model_registry import model_registry
-from service.settings import HF_HOME
+from service.settings import HF_HOME, LLAMA_SERVER_BINARY
 
 logger = logging.getLogger(__name__)
 
@@ -66,32 +66,38 @@ class ConversionManager:
         """
         Resolve a quantize binary.
 
-        Prefers an explicit `LLAMA_QUANTIZE_BIN`, then a legacy standalone
-        `llama-quantize`, then the official prebuilt unified `llama` (from
-        ggml-org/llama-install.sh), which exposes quantize as a `quantize`
-        subcommand — see `_quantize_cmd_prefix`. No source build required.
+        Prefers an explicit `LLAMA_QUANTIZE_BIN`, then a standalone `llama-quantize` - from a
+        source build tree, or from the directory setup_env installs into - and finally a unified
+        `llama`, which exposes quantize as a `quantize` subcommand (see `_quantize_cmd_prefix`).
         """
+        names = ["llama-quantize.exe", "llama-quantize"] if os.name == "nt" else ["llama-quantize"]
         candidates = []
 
         configured = os.getenv("LLAMA_QUANTIZE_BIN", "").strip()
         if configured:
             candidates.append(configured)
 
-        candidates.extend(
-            [
-                os.path.join(self.llama_cpp_dir, "build", "bin", "llama-quantize"),
-                os.path.join(self.llama_cpp_dir, "bin", "llama-quantize"),
-                os.path.join(self.llama_cpp_dir, "llama-quantize"),
-            ]
-        )
+        for name in names:
+            candidates.extend(
+                [
+                    os.path.join(self.llama_cpp_dir, "build", "bin", name),
+                    os.path.join(self.llama_cpp_dir, "bin", name),
+                    os.path.join(self.llama_cpp_dir, name),
+                ]
+            )
 
-        # Prebuilt unified binary (quantize is a subcommand there).
-        if os.name == "nt":
-            local_app = os.environ.get("LOCALAPPDATA")
-            if local_app:
-                candidates.append(os.path.join(local_app, "Microsoft", "WindowsApps", "llama.exe"))
-        else:
-            candidates.append(os.path.join(os.path.expanduser("~"), ".local", "bin", "llama"))
+        # setup_env unpacks llama.cpp's release (or, on Linux, its own build output) into a
+        # single directory, so the standalone tool sits next to the server binary.
+        server_binary = str(LLAMA_SERVER_BINARY)
+        server_dir = os.path.dirname(server_binary)
+        if server_dir:
+            candidates.extend(os.path.join(server_dir, name) for name in names)
+
+        # A unified `llama` still works through its `quantize` subcommand, for anyone who points
+        # LLAMA_SERVER_BINARY at one. A `llama-server` has no such subcommand, so only the
+        # unified name qualifies.
+        if os.path.basename(server_binary).lower() in {"llama", "llama.exe"}:
+            candidates.append(server_binary)
 
         for candidate in candidates:
             if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -275,9 +281,20 @@ class ConversionManager:
         register_model: bool = True,
         work_dir: str | None = None,
         status_callback: Callable[[str], None] | None = None,
+        keep_merged_dir: bool = False,
     ) -> dict[str, Any]:
-        """Convert HF/LoRA model to GGUF synchronously."""
+        """
+        Convert HF/LoRA model to GGUF synchronously.
+
+        ``keep_merged_dir`` hands the merged LoRA checkpoint to the caller
+        instead of deleting it, for callers that need to derive more artefacts
+        (an mmproj carrying a trained bridge) from the merged weights. The
+        caller then owns ``merged_temp_dir`` and must remove it. Only honoured
+        on success -- a failed conversion always cleans up after itself.
+        """
         temp_dir = None
+        merged_model_dir = None
+        succeeded = False
         is_lora = os.path.exists(os.path.join(model_path, "adapter_config.json"))
         script_to_run = self.script_path
         target_model_path = model_path
@@ -373,14 +390,17 @@ class ConversionManager:
                     base_model_path=base_model_path,
                 )
 
+            succeeded = True
             return {
                 "output_path": output_path,
                 "actual_output_file": actual_output_file,
                 "is_lora": is_lora,
                 "base_model_path": base_model_path,
+                "merged_model_path": merged_model_dir,
+                "merged_temp_dir": temp_dir if keep_merged_dir else None,
             }
         finally:
-            if temp_dir and os.path.exists(temp_dir):
+            if temp_dir and os.path.exists(temp_dir) and not (keep_merged_dir and succeeded):
                 shutil.rmtree(temp_dir)
 
     @staticmethod
@@ -451,6 +471,35 @@ class ConversionManager:
         self._copy_tokenizer(base_model_path or model_path, dest_dir)
         logger.info("[Conversion] Language tower extracted to %s", dest_dir)
 
+    def _adapter_trains_bridge(self, model_path: str) -> bool:
+        """
+        True when a PEFT adapter carries trained cross-modal bridge weights.
+
+        Decides where the mmproj must come from. Under the default scope an
+        adapter only touches the language tower, so the vision half of the base
+        model is still faithful and is the cheaper mmproj source. Once the
+        bridge is trained (``multimodal_scope='text_and_bridge'``, which lands
+        in ``modules_to_save``), a base-derived mmproj would silently ship the
+        *untrained* projector and throw the run's whole visual adaptation away.
+
+        Read from the adapter rather than passed down from the training config
+        so it also holds for adapters produced elsewhere.
+        """
+        adapter_config = os.path.join(model_path, "adapter_config.json")
+        if not os.path.exists(adapter_config):
+            return False
+        try:
+            with open(adapter_config, encoding="utf-8") as f:
+                return bool(json.load(f).get("modules_to_save"))
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(
+                "Could not read %s to decide the mmproj source (%s); assuming the "
+                "bridge was not trained",
+                adapter_config,
+                e,
+            )
+            return False
+
     def _is_multimodal(self, model_path: str | None) -> bool:
         """True when a checkpoint has a vision (or audio) config -> needs mmproj."""
         if not model_path:
@@ -475,8 +524,9 @@ class ConversionManager:
         Export the vision projector (mmproj) GGUF for a multimodal model.
 
         llama.cpp represents a VLM as two files: the language GGUF and this
-        mmproj. LoRA only adapts the language tower, so the vision half is
-        exported from the (unchanged) base model. Best-effort: llama.cpp
+        mmproj. The caller picks ``source_model_path``: the base model when the
+        run left the vision half untouched, the merged model when it trained the
+        bridge (see ``_adapter_trains_bridge``). Best-effort: llama.cpp
         supports mmproj for many but not all vision architectures, so a failure
         here is logged and returns None rather than failing the whole job -- the
         language GGUF is still valid on its own.
@@ -534,6 +584,9 @@ class ConversionManager:
         intermediate_name = f"{model_dir_name}-{intermediate_outtype.upper()}.gguf"
         intermediate_path = os.path.join(output_dir, intermediate_name)
 
+        # A trained bridge lives in the adapter, so its mmproj has to be derived
+        # from the merged weights -- ask the conversion to keep them around.
+        bridge_trained = export_mmproj and self._adapter_trains_bridge(model_path)
         conversion_result = self._convert_to_gguf(
             model_path=model_path,
             output_path=intermediate_path,
@@ -542,8 +595,44 @@ class ConversionManager:
             register_model=False,
             work_dir=work_dir,
             status_callback=status_callback,
+            keep_merged_dir=bridge_trained,
         )
+        merged_temp_dir = conversion_result.get("merged_temp_dir")
 
+        try:
+            return self._finish_convert_and_quantize(
+                model_path=model_path,
+                output_dir=output_dir,
+                model_dir_name=model_dir_name,
+                quantization_type=quantization_type,
+                intermediate_outtype=intermediate_outtype,
+                base_model_path=base_model_path,
+                work_dir=work_dir,
+                status_callback=status_callback,
+                export_mmproj=export_mmproj,
+                bridge_trained=bridge_trained,
+                conversion_result=conversion_result,
+            )
+        finally:
+            if merged_temp_dir and os.path.exists(merged_temp_dir):
+                shutil.rmtree(merged_temp_dir)
+
+    def _finish_convert_and_quantize(
+        self,
+        *,
+        model_path: str,
+        output_dir: str,
+        model_dir_name: str,
+        quantization_type: str,
+        intermediate_outtype: str,
+        base_model_path: str | None,
+        work_dir: str | None,
+        status_callback: Callable[[str], None] | None,
+        export_mmproj: bool,
+        bridge_trained: bool,
+        conversion_result: dict[str, Any],
+    ) -> dict[str, str]:
+        """Quantize the converted GGUF and export the mmproj companion."""
         quantize_binary = self.quantize_binary or self._resolve_quantize_binary()
         self.quantize_binary = quantize_binary
         if not quantize_binary:
@@ -571,11 +660,26 @@ class ConversionManager:
         )
 
         # For a vision-language model, also export the mmproj companion so the
-        # GGUF pair can actually do image inference. The vision half comes from
-        # the base model (LoRA only touched the language tower).
+        # GGUF pair can actually do image inference. Under the default scope the
+        # vision half is untouched, so the base model is the source; once the
+        # bridge has been trained it only exists in the merged weights, and
+        # exporting from the base would silently discard it.
         mmproj_output_path = None
         resolved_base = conversion_result.get("base_model_path") or base_model_path
-        mmproj_source = resolved_base or model_path
+        merged_model_path = conversion_result.get("merged_model_path")
+        if bridge_trained and merged_model_path and os.path.exists(merged_model_path):
+            mmproj_source = merged_model_path
+            logger.info(
+                "[Conversion] Adapter carries a trained bridge; exporting mmproj from the "
+                "merged model instead of the base"
+            )
+        else:
+            if bridge_trained:
+                logger.warning(
+                    "[Conversion] Adapter carries a trained bridge but the merged model is "
+                    "unavailable; the exported mmproj will hold the UNTRAINED projector"
+                )
+            mmproj_source = resolved_base or model_path
         if export_mmproj and self._is_multimodal(mmproj_source):
             if status_callback:
                 status_callback("export mmproj")

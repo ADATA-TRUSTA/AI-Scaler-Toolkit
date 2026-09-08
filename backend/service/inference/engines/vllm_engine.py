@@ -1,11 +1,14 @@
 """vLLM engine: launches and health-checks an OpenAI-compatible vLLM server."""
 
 import glob
+import ipaddress
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -14,7 +17,7 @@ from multiprocessing import Queue
 from multiprocessing.synchronize import Event as EventClass
 from typing import IO, Any
 
-import httpx
+import httpx2
 import psutil
 from openai import APIError, OpenAI
 
@@ -46,12 +49,31 @@ logger = configure_logging(__name__)
 # Values of vllm_tool_call_parser that mean "serve chat only".
 _TOOL_PARSER_OFF_VALUES = frozenset({"off", "none", "disabled", "false", "0"})
 
-# Name of the probe helper run inside the isolated vllm_server venv, and the
-# marker it prints. A marker is needed because importing the parsers makes vLLM
-# log INFO lines to stdout alongside the answer.
+# Name of the probe helper run under the interpreter vLLM runs from, and the marker
+# it prints. A marker is needed because importing the parsers makes vLLM log INFO
+# lines to stdout alongside the answer.
 _TOOL_PARSER_PROBE_SCRIPT = "vllm_tool_parser_probe.py"
 _TOOL_PARSER_PROBE_MARKER = "TRUSTA_TOOL_PARSER="
+_TOOL_PARSER_PROBE_AMBIGUOUS_MARKER = "TRUSTA_TOOL_PARSER_AMBIGUOUS="
 _TOOL_PARSER_PROBE_TIMEOUT_S = 120
+# A bare `import lmcache` only touches the package; generous enough for a cold
+# filesystem, still trivial next to the model load it is there to pre-empt.
+_LMCACHE_IMPORT_PROBE_TIMEOUT_S = 60
+
+# Tie-break order when auto-detection is ambiguous (several parsers round-trip the
+# same probe call). First match wins; anything not listed here is never auto-picked
+# and tool calling stays off instead. Widest / most stable general parser first.
+#
+# "qwen3_xml" covers the tag-family tie seen on Qwen3.5 (verified against
+# QuantTrio/Qwen3.5-4B-AWQ, vLLM 0.27.1): its chat template's <tool_call> body is
+# <function=name><parameter=x>value</parameter></function>, which "mimo",
+# "qwen3_coder" and "qwen3_xml" all round-trip identically because vLLM registers
+# all three names under the very same Qwen3EngineToolParser class (see
+# vllm.tool_parsers.__init__); "seed_oss" and "step3p5" are separate classes that
+# happen to also accept this tag shape but exist for unrelated model families, so
+# they are not preferred. Picking any of the three Qwen3EngineToolParser aliases
+# is equivalent -- "qwen3_xml" is the most self-describing name to read in a log.
+_TOOL_PARSER_AMBIGUOUS_PREFERENCE = ("hermes", "qwen3_xml")
 
 
 _REQUIRED_NVIDIA_RUNTIME_LIBS = (
@@ -157,6 +179,10 @@ class VllmRuntimeContext:
     api_key: str = ""
     health_timeout_s: float = 0.0
     served_model_name: str | None = None
+    # Window vLLM resolved for this load, straight off its own model card. Reported
+    # even when --max-model-len was never passed, which is when vLLM sizes the window
+    # itself and the config therefore has no number to offer.
+    served_context_length: int | None = None
     current_request_id: str | None = None
 
     client: OpenAI | None = None
@@ -381,9 +407,8 @@ class VllmEngine(BaseEngine):
         These are the fixed CLI arguments passed on every vLLM server start.
         """
         model_source = config.model_path or config.model_name
-        max_model_len = config.vllm_max_model_len or config.n_ctx
         served_model_name = VLLM_SERVED_MODEL_NAME or model_source
-        return [
+        args = [
             "--model",
             model_source,
             "--host",
@@ -394,15 +419,20 @@ class VllmEngine(BaseEngine):
             config.vllm_dtype,
             "--gpu-memory-utilization",
             str(config.vllm_gpu_memory_utilization),
-            "--max-model-len",
-            str(max_model_len),
-            "--cpu-offload-gb",
-            str(config.vllm_cpu_offload_gb),
-            "--served-model-name",
-            served_model_name,
-            "--tensor-parallel-size",
-            str(config.vllm_tensor_parallel_size),
         ]
+        if config.vllm_max_model_len is not None:
+            args.extend(["--max-model-len", str(config.vllm_max_model_len)])
+        args.extend(
+            [
+                "--cpu-offload-gb",
+                str(config.vllm_cpu_offload_gb),
+                "--served-model-name",
+                served_model_name,
+                "--tensor-parallel-size",
+                str(config.vllm_tensor_parallel_size),
+            ]
+        )
+        return args
 
     def _perf_args(self, config: InferenceConfig) -> list[str]:
         """Conditional performance/behaviour flags: quantization, KV cache, prefix cache, logging."""
@@ -494,7 +524,29 @@ class VllmEngine(BaseEngine):
         if tool_call_parser:
             args.extend(["--enable-auto-tool-choice", "--tool-call-parser", tool_call_parser])
 
+        # Reasoning models (DeepSeek-R1, Qwen3-thinking, gpt-oss...) need a reasoning
+        # parser to split reasoning_content from the final content / tool_calls.
+        # Unlike --enable-auto-tool-choice this flag stands alone.
+        reasoning_parser = self._resolve_reasoning_parser(config)
+        if reasoning_parser:
+            args.extend(["--reasoning-parser", reasoning_parser])
+
         return args
+
+    def _resolve_reasoning_parser(self, config: InferenceConfig) -> str | None:
+        """
+        Decide which vLLM reasoning parser to launch with.
+
+        Unlike the tool-call parser there is deliberately no ``auto``: a reasoning
+        parser keys off a model-specific thinking delimiter that cannot be
+        round-tripped as reliably as a tool call, so guessing risks mangling output.
+        ``off`` (the default) emits nothing; any other value is passed to vLLM as-is.
+        """
+        raw = str(getattr(config, "vllm_reasoning_parser", None) or "off").strip()
+        if raw.lower() in _TOOL_PARSER_OFF_VALUES:
+            logger.info("[Worker] vLLM reasoning parser disabled by config (%s)", raw)
+            return None
+        return raw
 
     def _resolve_tool_call_parser(self, config: InferenceConfig) -> str | None:
         """
@@ -542,16 +594,16 @@ class VllmEngine(BaseEngine):
         """
         Ask vLLM's own parsers which one understands this model's tool-call syntax.
 
-        Runs a helper in the isolated vllm_server venv, which renders one tool call
+        Runs a helper under the interpreter vLLM runs from, which renders one tool call
         through the model's chat template and then offers the result to every
         registered parser. That derives the answer from the model and from vLLM
         itself, so nothing here has to track parser names or their syntax, and it
         keeps working when vLLM adds or renames parsers.
 
-        Returns None whenever the answer is not unambiguous -- no match, several
-        matches, a template that cannot render a tool call, or a probe failure --
-        because launching with the wrong parser mangles output, which is worse than
-        serving chat only.
+        Returns None on no match, a template that cannot render a tool call, or a
+        probe failure, because launching with the wrong parser mangles output,
+        which is worse than serving chat only. Several matches is handed to
+        ``_pick_ambiguous_tool_call_parser`` rather than treated as a flat failure.
         """
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), _TOOL_PARSER_PROBE_SCRIPT)
         if not os.path.isfile(script):
@@ -560,7 +612,7 @@ class VllmEngine(BaseEngine):
 
         interpreter = self._resolve_venv_python()
         if not interpreter:
-            logger.warning("[Worker] tool-parser probe skipped: no vllm_server venv interpreter")
+            logger.warning("[Worker] tool-parser probe skipped: no vLLM venv interpreter")
             return None
 
         # Only the hub cache location matters here, so build a minimal env rather
@@ -586,6 +638,13 @@ class VllmEngine(BaseEngine):
         for line in (proc.stdout or "").splitlines():
             if line.startswith(_TOOL_PARSER_PROBE_MARKER):
                 return line[len(_TOOL_PARSER_PROBE_MARKER) :].strip() or None
+            if line.startswith(_TOOL_PARSER_PROBE_AMBIGUOUS_MARKER):
+                candidates = [
+                    c.strip()
+                    for c in line[len(_TOOL_PARSER_PROBE_AMBIGUOUS_MARKER) :].split(",")
+                    if c.strip()
+                ]
+                return self._pick_ambiguous_tool_call_parser(candidates)
 
         detail = (proc.stderr or "").strip().splitlines()
         logger.info(
@@ -596,8 +655,36 @@ class VllmEngine(BaseEngine):
         )
         return None
 
+    def _pick_ambiguous_tool_call_parser(self, candidates: list[str]) -> str | None:
+        """
+        Break a tie among several parsers that all round-tripped the probe call.
+
+        Picks the first name in ``_TOOL_PARSER_AMBIGUOUS_PREFERENCE`` that appears
+        among ``candidates``, tentatively -- unlike a clean auto-detect, this is a
+        guess among several plausible answers, so it is logged loudly rather than
+        silently. Nothing listed matching means none of the candidates is trusted
+        enough to guess, so tool calling stays off.
+        """
+        for preferred in _TOOL_PARSER_AMBIGUOUS_PREFERENCE:
+            if preferred in candidates:
+                logger.warning(
+                    "[Worker] vLLM tool-call parser auto-detect was ambiguous (%s); "
+                    "tentatively using '%s'. Set vllm_tool_call_parser explicitly and "
+                    "verify streaming tool calls.",
+                    ",".join(candidates),
+                    preferred,
+                )
+                return preferred
+        logger.warning(
+            "[Worker] vLLM tool-call parser auto-detect ambiguous (%s) and none is in "
+            "the preference list; leaving tool calling off. Set vllm_tool_call_parser "
+            "explicitly.",
+            ",".join(candidates),
+        )
+        return None
+
     def _resolve_venv_python(self) -> str | None:
-        """Path to the isolated vllm_server venv interpreter, or None if absent."""
+        """Path to the interpreter vLLM runs from (the project venv), or None if absent."""
         try:
             venv_bin = os.path.join(self._resolve_vllm_server_dir(), ".venv", "bin")
         except RuntimeError:
@@ -608,21 +695,55 @@ class VllmEngine(BaseEngine):
                 return candidate
         return None
 
+    def _lmcache_args(self, config: InferenceConfig) -> list[str]:
+        """
+        LMCache KV connector wiring, expressed as ``--kv-transfer-config``.
+
+        ``kv_role`` is ``kv_both``: one standalone server both writes and reads prefix KV.
+        ``use_native`` stays False so the adapter inside the ``lmcache`` package is used
+        rather than vLLM's vendored one, which did not import against lmcache 0.5.3.
+        That pairing was established against vllm 0.20.1 and has not been re-checked
+        against the 0.27.1 / lmcache 0.5.4 this now resolves to.
+        Tier sizes and chunk size are env vars, not CLI flags; see ``_lmcache_env``.
+        """
+        if not getattr(config, "vllm_lmcache_enabled", False):
+            return []
+
+        kv_transfer_config = {
+            "kv_connector": "LMCacheConnectorV1",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"use_native": False},
+        }
+        return ["--kv-transfer-config", json.dumps(kv_transfer_config)]
+
+    def _extra_args(self, config: InferenceConfig) -> list[str]:
+        """User-supplied ``vllm_server_extra_args``, passed to ``vllm serve`` verbatim."""
+        return [
+            str(x)
+            for x in (getattr(config, "vllm_server_extra_args", None) or [])
+            if str(x).strip()
+        ]
+
     def _build_server_cmd(self, config: InferenceConfig) -> list[str]:
         """
         Assemble the full ``vllm serve <args...>`` command.
 
-        Each group (core/perf/mm/template) has its own method to ease unit testing.
+        Each group (core/perf/mm/template/lmcache) has its own method to ease unit testing.
+        ``_extra_args`` is appended last so a user override wins: vLLM uses argparse,
+        and when a flag appears twice, the later occurrence takes effect. That includes
+        overriding the ``--kv-transfer-config`` that ``_lmcache_args`` builds.
         """
         cmd: list[str] = ["vllm", "serve"]
         cmd.extend(self._core_args(config))
         cmd.extend(self._perf_args(config))
         cmd.extend(self._mm_args(config))
         cmd.extend(self._template_args(config))
+        cmd.extend(self._lmcache_args(config))
+        cmd.extend(self._extra_args(config))
         return cmd
 
     def _resolve_vllm_server_dir(self) -> str:
-        """Resolve the project directory of the isolated vllm_server environment."""
+        """Resolve the project directory whose ``.venv`` holds vllm (the repo root by default)."""
         project_dir = VLLM_SERVER_PROJECT_DIR
         if not os.path.isdir(project_dir):
             raise RuntimeError(f"VLLM_SERVER_PROJECT_DIR does not exist: {project_dir}")
@@ -634,7 +755,7 @@ class VllmEngine(BaseEngine):
 
         Return order is the preference order: the venv's
         ``python -m vllm.entrypoints.cli.main`` >
-        system ``uv run --project ... python -m vllm.entrypoints.cli.main``.
+        system ``uv run --no-project --python ... python -m vllm.entrypoints.cli.main``.
 
         The ``.venv/bin/vllm`` console script is deliberately not executed, so
         that containers mounting the venv at a different absolute path still
@@ -651,8 +772,8 @@ class VllmEngine(BaseEngine):
         prefixes: list[list[str]] = []
 
         # Try both "python" and "python3" — uv venv may only create one depending
-        # on the host system. Using the venv binary directly avoids uv project
-        # discovery walking up the tree and picking up the backend's pyproject.toml.
+        # on the host system. Using the venv binary directly keeps the spawn
+        # independent of uv being installed at all.
         venv_bin = os.path.join(project_dir, ".venv", "bin")
         found_python_bin: str | None = None
         for py_name in ("python", "python3"):
@@ -664,9 +785,9 @@ class VllmEngine(BaseEngine):
 
         uv_path = shutil.which("uv")
         if uv_path:
-            # Use --no-project so uv does not traverse up the directory tree and
-            # accidentally pick up the backend's pyproject.toml (now at repo root).
-            # Explicitly pass --python to pin to the isolated venv's interpreter.
+            # Use --no-project so uv does not re-resolve or re-sync this project on
+            # the way to spawning vllm; the venv is already built by setup_env.
+            # Explicitly pass --python to pin to that venv's interpreter.
             uv_cmd = [uv_path, "run", "--no-project"]
             if found_python_bin:
                 uv_cmd += ["--python", found_python_bin]
@@ -677,12 +798,12 @@ class VllmEngine(BaseEngine):
             raise RuntimeError(
                 f"vLLM launcher unavailable: no executable at "
                 f"{venv_bin} and `uv` not found on PATH. "
-                "Please set up the vllm_server isolated environment first."
+                "Run setup_env on a CUDA host (it syncs `--extra cuda --extra vllm`) first."
             )
         return prefixes
 
     def _discover_runtime_library_dirs(self, project_venv: str) -> list[str]:
-        """Find shared-library dirs in the isolated venv that must join ``LD_LIBRARY_PATH``."""
+        """Find shared-library dirs in the vLLM venv that must join ``LD_LIBRARY_PATH``."""
         discovered: list[str] = []
         seen: set[str] = set()
         search_roots = [
@@ -729,7 +850,7 @@ class VllmEngine(BaseEngine):
         return discovered
 
     def _find_shared_library(self, project_venv: str, pattern: str) -> str | None:
-        """Locate a given shared library inside the isolated venv."""
+        """Locate a given shared library inside the vLLM venv."""
         for lib_root_name in ("lib", "lib64"):
             lib_root = os.path.join(project_venv, lib_root_name)
             if not os.path.isdir(lib_root):
@@ -739,8 +860,35 @@ class VllmEngine(BaseEngine):
                     return os.path.abspath(candidate)
         return None
 
-    def _repair_isolated_nvidia_runtime(self, project_dir: str) -> None:
-        """Repair NVIDIA runtime wheels that were not fully unpacked in the isolated vLLM env."""
+    def _installed_package_version(self, project_venv: str, package_name: str) -> str | None:
+        """
+        Version of a distribution installed in the given venv, read from its dist-info.
+
+        The wheel this repairs is present but incompletely unpacked, so the dist-info
+        directory is there and names the version the lockfile resolved. That is the
+        version to reinstall — see _repair_vllm_nvidia_runtime.
+        """
+        normalized = re.sub(r"[-_.]+", "_", package_name).lower()
+        for lib_root_name in ("lib", "lib64"):
+            lib_root = os.path.join(project_venv, lib_root_name)
+            if not os.path.isdir(lib_root):
+                continue
+            pattern = os.path.join(lib_root, "**", f"{normalized}-*.dist-info")
+            for candidate in glob.iglob(pattern, recursive=True):
+                stem = os.path.basename(candidate)[: -len(".dist-info")]
+                name_part, _, version = stem.rpartition("-")
+                if version and re.sub(r"[-_.]+", "_", name_part).lower() == normalized:
+                    return version
+        return None
+
+    def _repair_vllm_nvidia_runtime(self, project_dir: str) -> None:
+        """
+        Repair NVIDIA runtime wheels that were not fully unpacked in the vLLM venv.
+
+        Note this reinstalls into whatever venv VLLM_SERVER_PROJECT_DIR points at, which
+        by default is this project's own -- the same one training runs in, not a
+        throwaway. It only fires when a required library is genuinely missing.
+        """
         project_venv = os.path.join(project_dir, ".venv")
         missing_pairs = [
             (lib_name, package_name)
@@ -753,12 +901,12 @@ class VllmEngine(BaseEngine):
         uv_path = shutil.which("uv")
         if not uv_path:
             raise RuntimeError(
-                "vLLM isolated env is missing required NVIDIA runtime libraries and `uv` is unavailable for repair."
+                "The vLLM venv is missing required NVIDIA runtime libraries and `uv` is unavailable for repair."
             )
 
         python_bin = os.path.join(project_venv, "bin", "python")
         if not (os.path.isfile(python_bin) and os.access(python_bin, os.X_OK)):
-            raise RuntimeError(f"vLLM isolated env missing python interpreter: {python_bin}")
+            raise RuntimeError(f"The vLLM venv has no python interpreter: {python_bin}")
 
         repair_env = os.environ.copy()
         active_venv = repair_env.get("VIRTUAL_ENV")
@@ -766,6 +914,42 @@ class VllmEngine(BaseEngine):
             repair_env.pop("VIRTUAL_ENV", None)
 
         missing_packages = list(dict.fromkeys(package for _, package in missing_pairs))
+
+        # Pin every package to the version this venv already records. VLLM_SERVER_PROJECT_DIR
+        # now defaults to the repo root, so this venv is usually the one the service itself
+        # is running from — an unpinned `uv pip install` would let the resolver pick a newer
+        # NVIDIA runtime than the pinned torch beside it was built against, break the live
+        # process, and drift the environment away from uv.lock. Reinstalling the identical
+        # version repairs the unpacking without changing what is resolved.
+        specs: list[str] = []
+        unpinnable: list[str] = []
+        for package_name in missing_packages:
+            version = self._installed_package_version(project_venv, package_name)
+            if version is None:
+                unpinnable.append(package_name)
+            else:
+                specs.append(f"{package_name}=={version}")
+
+        if unpinnable:
+            # Not an unpacking failure: the distribution is absent entirely, so there is
+            # no recorded version to hold to and installing one means resolving it fresh.
+            # That is setup's job, where uv.lock governs the answer.
+            raise RuntimeError(
+                "vLLM venv is missing NVIDIA runtime libraries and the packages providing "
+                f"them are not installed at all ({', '.join(unpinnable)}). Refusing to "
+                f"resolve them into {project_venv}, which would bypass uv.lock and can "
+                "pull a runtime the pinned torch was not built against. Run "
+                "scripts/linux/setup_env.sh on this host (it syncs `--extra cuda "
+                "--extra vllm`) instead."
+            )
+
+        if os.path.abspath(project_venv) == os.path.abspath(sys.prefix):
+            logger.warning(
+                "[Worker] The vLLM venv is this service's own environment (%s); "
+                "reinstalling %s in place at their recorded versions",
+                project_venv,
+                ", ".join(specs),
+            )
 
         cmd = [
             uv_path,
@@ -776,9 +960,9 @@ class VllmEngine(BaseEngine):
         ]
         for package_name in missing_packages:
             cmd.extend(["--reinstall-package", package_name])
-        cmd.extend(missing_packages)
+        cmd.extend(specs)
         logger.warning(
-            "[Worker] Missing NVIDIA runtime libraries %s in isolated vLLM env; repairing with: %s",
+            "[Worker] Missing NVIDIA runtime libraries %s in the vLLM venv; repairing with: %s",
             ", ".join(lib_name for lib_name, _ in missing_pairs),
             " ".join(cmd),
         )
@@ -811,7 +995,7 @@ class VllmEngine(BaseEngine):
         ]
         if unresolved:
             raise RuntimeError(
-                "vLLM isolated env still missing NVIDIA runtime libraries after uv pip repair: "
+                "The vLLM venv is still missing NVIDIA runtime libraries after uv pip repair: "
                 + ", ".join(unresolved)
             )
 
@@ -820,17 +1004,93 @@ class VllmEngine(BaseEngine):
             ", ".join(lib_name for lib_name, _ in missing_pairs),
         )
 
-    def _build_server_env(self) -> dict[str, str]:
+    def _lmcache_env(self, config: InferenceConfig) -> dict[str, str]:
+        """
+        Build the ``LMCACHE_*`` environment for the vLLM subprocess.
+
+        LMCache reads its engine config from env vars rather than ``vllm serve`` flags.
+        Returns an empty dict when disabled, leaving the default path's env untouched.
+        """
+        if not getattr(config, "vllm_lmcache_enabled", False):
+            return {}
+
+        env = {
+            "LMCACHE_CHUNK_SIZE": str(config.vllm_lmcache_chunk_size),
+            "LMCACHE_LOCAL_CPU": "True",
+            "LMCACHE_MAX_LOCAL_CPU_SIZE": str(config.vllm_lmcache_max_local_cpu_size),
+            # Not a tuning knob: vLLM roots its prefix-hash chain at NONE_HASH, which
+            # falls back to os.urandom(32) when the seed is unset, so chunk keys would
+            # differ between two runs of the same prompt. Losing hash randomisation in
+            # this subprocess is harmless here and is what vLLM advises.
+            "PYTHONHASHSEED": "0",
+        }
+
+        local_disk = config.vllm_lmcache_local_disk
+        if local_disk:
+            # Resolve before use. A relative path lands wherever the launcher happened
+            # to cd to -- the repo root under scripts/linux/run_service.sh, but
+            # service/ under the Docker entrypoint -- and `file://./x` is not a valid
+            # file URL either: urlparse reads the "." as a host and the remainder as an
+            # absolute path. Every other path field in this repo resolves to absolute.
+            local_disk = os.path.abspath(os.path.expanduser(local_disk))
+            os.makedirs(local_disk, exist_ok=True)
+            env["LMCACHE_LOCAL_DISK"] = f"file://{local_disk}"
+            env["LMCACHE_MAX_LOCAL_DISK_SIZE"] = str(config.vllm_lmcache_max_local_disk_size)
+
+        logger.info(
+            "[Worker] LMCache enabled: chunk_size=%s cpu_tier=%sGB disk_tier=%s",
+            config.vllm_lmcache_chunk_size,
+            config.vllm_lmcache_max_local_cpu_size,
+            f"{config.vllm_lmcache_max_local_disk_size}GB at {local_disk}"
+            if local_disk
+            else "disabled",
+        )
+        return env
+
+    @staticmethod
+    def _is_loopback_bind(host: str) -> bool:
+        """Whether the vLLM server bind address is reachable from this host only."""
+        candidate = host.strip().strip("[]").lower()
+        if candidate in {"localhost", "::1"}:
+            return True
+        try:
+            return ipaddress.ip_address(candidate).is_loopback
+        except ValueError:
+            # A hostname we cannot resolve to a literal: assume it is routable
+            return False
+
+    def _admin_endpoint_env(self) -> dict[str, str]:
+        """
+        Enable vLLM's admin endpoints, but only while the server stays on loopback.
+
+        vLLM 0.20.1 mounts ``/reset_prefix_cache`` (used by ``cleanup_generation_memory``)
+        only under ``VLLM_SERVER_DEV_MODE``; without it the cleanup call 404s. The same
+        flag also mounts ``/update_weights`` and ``/collective_rpc``, which must never be
+        reachable off-host -- so a routable ``VLLM_SERVER_HOST`` turns the flag back off
+        instead of exposing them.
+        """
+        if not self._is_loopback_bind(VLLM_SERVER_HOST):
+            logger.warning(
+                "[Worker] VLLM_SERVER_HOST=%s is not loopback; leaving "
+                "VLLM_SERVER_DEV_MODE off. Prefix cache cleanup will report as degraded.",
+                VLLM_SERVER_HOST,
+            )
+            return {}
+        return {"VLLM_SERVER_DEV_MODE": "1"}
+
+    def _build_server_env(self, config: InferenceConfig) -> dict[str, str]:
         """Build the environment variables for the vLLM subprocess."""
         env = os.environ.copy()
         env.setdefault("VLLM_LOGGING_LEVEL", VLLM_LOGGING_LEVEL)
         env["HF_HUB_OFFLINE"] = "1"
+        env.update(self._admin_endpoint_env())
+        env.update(self._lmcache_env(config))
 
         project_venv = os.path.join(self._resolve_vllm_server_dir(), ".venv")
         active_venv = env.get("VIRTUAL_ENV")
         if active_venv and os.path.abspath(active_venv) != os.path.abspath(project_venv):
             logger.info(
-                "[Worker] Clearing inherited VIRTUAL_ENV=%s for isolated vLLM env %s",
+                "[Worker] Clearing inherited VIRTUAL_ENV=%s for the vLLM venv %s",
                 active_venv,
                 project_venv,
             )
@@ -845,7 +1105,43 @@ class VllmEngine(BaseEngine):
         env["PATH"] = os.pathsep.join([os.path.join(project_venv, "bin"), env.get("PATH", "")])
         return env
 
-    def _validate_runtime_environment(self) -> None:
+    def _assert_lmcache_importable(self, config: InferenceConfig) -> None:
+        """
+        Fail now, not four minutes into a load, when LMCache is on but not installed.
+
+        Without this the missing package only surfaces once the server subprocess has
+        started and begun loading weights, so the operator waits out a full model load
+        to be told about a one-line dependency problem.
+        """
+        if not getattr(config, "vllm_lmcache_enabled", False):
+            return
+
+        interpreter = self._resolve_venv_python() or sys.executable
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
+                [interpreter, "-c", "import lmcache"],
+                capture_output=True,
+                text=True,
+                timeout=_LMCACHE_IMPORT_PROBE_TIMEOUT_S,
+                check=False,
+            )
+        except (subprocess.SubprocessError, OSError) as e:
+            # Inconclusive, not negative: let the load proceed rather than block it on
+            # a probe that could not run. The classifier still names the cause on death.
+            logger.warning("[Worker] LMCache import probe failed to run: %s", e)
+            return
+
+        if proc.returncode == 0:
+            return
+
+        raise RuntimeError(
+            "vllm_lmcache_enabled is set but the lmcache package is not importable by "
+            f"{interpreter}. Install it into the environment vLLM runs from "
+            "(`uv sync --extra vllm`), or set vllm_lmcache_enabled=false. "
+            f"probe_stderr={(proc.stderr or '').strip()[-300:]}"
+        )
+
+    def _validate_runtime_environment(self, config: InferenceConfig) -> None:
         """
         Full environment check before load_model proceeds, to surface actionable errors early.
 
@@ -854,6 +1150,7 @@ class VllmEngine(BaseEngine):
           2. At least one launcher is available (venv
               ``python -m vllm.entrypoints.cli.main`` or system uv).
         3. ``VLLM_PORT`` is within 1-65535.
+        4. ``lmcache`` is importable, when the config asks for it.
 
         Failures raise directly; the caller's ``load_model`` try/except reports
         the error to the main process via status_queue.
@@ -861,9 +1158,11 @@ class VllmEngine(BaseEngine):
         # 1+2: resolve project dir and launcher prefixes (both raise on failure)
         project_dir = self._resolve_vllm_server_dir()
         self._resolve_launch_prefixes()
-        self._repair_isolated_nvidia_runtime(project_dir)
+        self._repair_vllm_nvidia_runtime(project_dir)
         # 3: port range
         self._resolve_vllm_port()
+        # 4: optional dependency, checked only when the config depends on it
+        self._assert_lmcache_importable(config)
 
     def _start_server_process(self, config: InferenceConfig) -> None:
         port = self._resolve_vllm_port()
@@ -883,14 +1182,18 @@ class VllmEngine(BaseEngine):
         ]
 
         last_error: Exception | None = None
-        env = self._build_server_env()
+        # Clear first: _build_server_env can raise (LMCache creates its disk tier
+        # there), and the failure handler staples _get_error_reason() onto whatever
+        # it raises. Left uncleared, that is the *previous* run's stderr, so a
+        # permission error arrives wearing an unrelated traceback.
         with self.runtime.stderr_buffer_lock:
             self.runtime.stderr_recent_lines.clear()
+        env = self._build_server_env(config)
 
         for cmd in launch_candidates:
             try:
                 logger.info(
-                    "[Worker] Starting vLLM server (isolated env): %s",
+                    "[Worker] Starting vLLM server: %s",
                     " ".join(cmd),
                 )
                 self.runtime.server_process = subprocess.Popen(
@@ -1073,6 +1376,26 @@ class VllmEngine(BaseEngine):
             f"stderr_excerpt={report.to_text()}"
         )
 
+    def _record_served_context_length(self, cards: list[Any], served_model_id: str) -> None:
+        """
+        Keep ``max_model_len`` off the model card the readiness probe already fetched.
+
+        vLLM fills that field from the *effective* ``model_config.max_model_len``, so it
+        is the answer whether or not ``--max-model-len`` was passed. Without it, a load
+        that let vLLM size its own window has no window to report, and a client falls
+        back to a generic default -- which is how a long conversation ends up paying a
+        full re-prefill every turn.
+        """
+        self.runtime.served_context_length = None
+        for card in cards:
+            if str(getattr(card, "id", "")) != served_model_id:
+                continue
+            value = getattr(card, "max_model_len", None)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                self.runtime.served_context_length = value
+                logger.info("[Worker] vLLM serves max_model_len=%s", value)
+            return
+
     def _resolve_served_model_name(self, config: InferenceConfig) -> str:
         preferred = (
             VLLM_SERVED_MODEL_NAME
@@ -1094,17 +1417,20 @@ class VllmEngine(BaseEngine):
                 if self.runtime.client is None:
                     raise RuntimeError("OpenAI client not initialized")
                 models_response = self.runtime.client.models.list(timeout=5.0)
-                model_ids = [
-                    item.id
+                cards = [
+                    item
                     for item in getattr(models_response, "data", [])
                     if getattr(item, "id", None)
                 ]
+                model_ids = [item.id for item in cards]
 
-                if preferred in model_ids:
-                    return str(preferred)
-                if model_ids:
-                    return str(model_ids[0])
-                return str(preferred)
+                resolved = str(
+                    preferred
+                    if preferred in model_ids
+                    else (model_ids[0] if model_ids else preferred)
+                )
+                self._record_served_context_length(cards, resolved)
+                return resolved
             except (APIError, OSError, ValueError, TypeError) as e:
                 last_error = str(e)
                 time.sleep(1.0)
@@ -1135,7 +1461,7 @@ class VllmEngine(BaseEngine):
             # is available or the port is misconfigured, instead of wasting time
             # on client creation, subprocess start and health polling.
             self.status_queue.put({"status": "loading", "stage": "vllm_env_validate"})
-            self._validate_runtime_environment()
+            self._validate_runtime_environment(config)
 
             self.status_queue.put({"status": "loading", "stage": "vllm_server_start"})
             self.runtime.base_url = self._build_base_url()
@@ -1155,6 +1481,7 @@ class VllmEngine(BaseEngine):
                     "total_modules": None,
                     "layer_lines": [],
                     "memory_usage": None,
+                    "served_context_length": self.runtime.served_context_length,
                 }
             )
             logger.info(
@@ -1174,7 +1501,9 @@ class VllmEngine(BaseEngine):
         _ = params
         messages = self._normalize_messages(prompt)
 
-        def _content_to_text(content: Any) -> str:  # noqa: ANN401 - OpenAI message content is str or multi-part list
+        def _content_to_text(
+            content: Any,  # noqa: ANN401 - OpenAI message content is str or multi-part list
+        ) -> str:
 
             # Multimodal multi-part case: keep only text, represent image/audio
             # with a placeholder
@@ -1298,7 +1627,7 @@ class VllmEngine(BaseEngine):
         )
 
         try:
-            with httpx.Client(timeout=5.0) as http:
+            with httpx2.Client(timeout=5.0) as http:
                 response = http.post(url, headers=headers)
                 response.raise_for_status()
             logger.info("[Worker] vLLM reset_prefix_cache OK (%s)", url)
@@ -1308,7 +1637,7 @@ class VllmEngine(BaseEngine):
                     "result": "vLLM prefix cache reset",
                 }
             )
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             # The endpoint may be disabled in some vLLM builds; not fatal
             status_code = e.response.status_code if e.response is not None else None
             logger.warning(
@@ -1324,7 +1653,7 @@ class VllmEngine(BaseEngine):
                     ),
                 }
             )
-        except (httpx.HTTPError, OSError) as e:
+        except (httpx2.HTTPError, OSError) as e:
             logger.warning("[Worker] vLLM reset_prefix_cache error: %s", e)
             self.data_queue.put(
                 {

@@ -21,6 +21,7 @@ ERROR_CUDA_MISMATCH = "cuda_mismatch"
 ERROR_SHARED_LIBRARY_MISSING = "shared_library_missing"
 ERROR_TEMPLATE = "chat_template"
 ERROR_QUANTIZATION = "quantization"
+ERROR_LMCACHE = "lmcache"
 ERROR_UNKNOWN = "unknown"
 
 
@@ -96,6 +97,20 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "awq",
             "gptq",
             "fp8",
+        ),
+    ),
+    # Deliberately last, and deliberately narrow. LMCache logs plenty of INFO lines
+    # through its own logger even when VLLM_LOGGING_LEVEL is ERROR, so a bare
+    # "lmcache" substring would relabel every unrelated failure (an OOM, a bad model
+    # path) as an LMCache problem the moment the connector is enabled. These keywords
+    # only appear when the connector itself cannot be loaded or wired up.
+    (
+        ERROR_LMCACHE,
+        (
+            "no module named 'lmcache'",
+            "lmcacheconnectorv1",
+            "lmcache_integration",
+            "unsupported connector",
         ),
     ),
 )
@@ -239,6 +254,10 @@ def _build_summary(category: str, important_tail: list[str], tail: list[str]) ->
         ERROR_SHARED_LIBRARY_MISSING: "missing CUDA shared library runtime",
         ERROR_TEMPLATE: "chat template parse error",
         ERROR_QUANTIZATION: "quantization configuration error",
+        ERROR_LMCACHE: (
+            "LMCache KV connector could not be loaded "
+            "(install the optional dependency with `uv sync --extra vllm`)"
+        ),
         ERROR_UNKNOWN: "vLLM startup/runtime failure",
     }.get(category, "vLLM startup/runtime failure")
 

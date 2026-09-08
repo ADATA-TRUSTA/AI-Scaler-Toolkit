@@ -75,21 +75,63 @@ def _cuda_mb() -> dict:
         if torch.cuda.is_available():
             out["cuda_alloc"] = round(torch.cuda.memory_allocated() / (1024.0**2), 1)
             out["cuda_reserved"] = round(torch.cuda.memory_reserved() / (1024.0**2), 1)
+            # torch tracks the high-water mark itself, which catches transient
+            # spikes between samples that polling would miss entirely -- the
+            # all-gather peaks that decide whether a ZeRO-3 run fits. The
+            # pipeline already called reset_peak_memory_stats() and then never
+            # read these back, so the peak was being reset and discarded.
+            out["cuda_alloc_peak"] = round(torch.cuda.max_memory_allocated() / (1024.0**2), 1)
+            out["cuda_reserved_peak"] = round(torch.cuda.max_memory_reserved() / (1024.0**2), 1)
     except Exception:
         pass
     return out
 
 
-def probe_snapshot() -> dict:
+def _disk_mb(path: str | None) -> dict:
+    """
+    SSD footprint: bytes this process has written, plus the offload dir's size.
+
+    `write_bytes` from /proc/self/io is cumulative for the process, so a caller
+    wanting "written during this run" should difference it against a baseline.
+    The directory size is what actually matters for capacity planning of NVMe
+    offload, and it is the number nothing was reporting.
+    """
+    out: dict = {}
+    try:
+        with open("/proc/self/io") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                if key in ("read_bytes", "write_bytes"):
+                    out[f"io_{key}"] = round(int(rest.strip()) / (1024.0**2), 1)
+    except Exception:
+        pass
+    if path:
+        try:
+            from pathlib import Path
+
+            root = Path(path)
+            if root.is_dir():
+                total = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+                out["offload_dir"] = round(total / (1024.0**2), 1)
+        except Exception:
+            pass
+    return out
+
+
+def probe_snapshot(offload_path: str | None = None) -> dict:
     """
     Return a lightweight structured memory snapshot (MB) for event logging.
 
     Pure /proc + torch.cuda — no heavy deps. The worker enriches this with the
     node-level GPU/DRAM/SSD numbers from system_monitor (see build_resource_snapshot).
+
+    ``offload_path`` adds the on-disk size of the DeepSpeed NVMe offload
+    directory, which is the SSD number that matters for capacity planning.
     """
     status = _read_proc_status_mb()
     mem = _read_meminfo_mb()
     cuda = _cuda_mb()
+    disk = _disk_mb(offload_path)
     return {
         "vmrss_mb": status.get("VmRSS"),
         "vmhwm_mb": status.get("VmHWM"),
@@ -99,7 +141,92 @@ def probe_snapshot() -> dict:
         "dirty_mb": mem.get("Dirty"),
         "cuda_alloc_mb": cuda.get("cuda_alloc"),
         "cuda_reserved_mb": cuda.get("cuda_reserved"),
+        "cuda_alloc_peak_mb": cuda.get("cuda_alloc_peak"),
+        "cuda_reserved_peak_mb": cuda.get("cuda_reserved_peak"),
+        "io_read_mb": disk.get("io_read_bytes"),
+        "io_write_mb": disk.get("io_write_bytes"),
+        "offload_dir_mb": disk.get("offload_dir"),
     }
+
+
+class MemoryAggregator:
+    """
+    Accumulate snapshots into per-metric average and peak.
+
+    Sampling produced a stream of point-in-time dicts and nothing ever reduced
+    them, so "how much memory did this run actually use" could not be answered
+    from the recorded data at all. Averages come from the samples; peaks prefer
+    a kernel- or torch-tracked high-water mark where one exists (``VmHWM`` for
+    DRAM, ``max_memory_allocated`` for GPU) because those catch spikes between
+    samples that polling cannot see.
+    """
+
+    # metric -> the authoritative high-water-mark field, when one exists
+    _TRUE_PEAKS = {
+        "vmrss_mb": "vmhwm_mb",
+        "cuda_alloc_mb": "cuda_alloc_peak_mb",
+        "cuda_reserved_mb": "cuda_reserved_peak_mb",
+    }
+    # Cumulative counters: a mean over them is meaningless, only the delta is.
+    _CUMULATIVE = {"io_read_mb", "io_write_mb"}
+
+    def __init__(self) -> None:
+        self._sums: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._maxes: dict[str, float] = {}
+        self._first: dict[str, float] = {}
+        self.samples = 0
+
+    def add(self, snapshot: dict) -> None:
+        """Fold one ``probe_snapshot()`` into the running totals."""
+        self.samples += 1
+        for key, value in snapshot.items():
+            if not isinstance(value, int | float):
+                continue
+            self._sums[key] = self._sums.get(key, 0.0) + value
+            self._counts[key] = self._counts.get(key, 0) + 1
+            self._maxes[key] = max(self._maxes.get(key, value), value)
+            self._first.setdefault(key, value)
+
+    def summary(self) -> dict:
+        """``{metric: {"avg": x, "peak": y}}`` plus deltas for cumulative counters."""
+        out: dict = {"samples": self.samples}
+        if not self.samples:
+            return out
+        for key, total in self._sums.items():
+            if key.endswith("_peak_mb") or key == "vmhwm_mb":
+                continue  # reported as the peak of their base metric instead
+            if key in self._CUMULATIVE:
+                out[key] = {"total": round(self._maxes[key] - self._first[key], 1)}
+                continue
+            peak_key = self._TRUE_PEAKS.get(key)
+            peak = self._maxes.get(peak_key) if peak_key else None
+            out[key] = {
+                "avg": round(total / self._counts[key], 1),
+                "peak": round(peak if peak is not None else self._maxes[key], 1),
+            }
+        return out
+
+    def format_line(self) -> str:
+        """One-line human summary, for a test report or a log tail."""
+        s = self.summary()
+        if not s.get("samples"):
+            return "[MEM] no samples"
+        parts = [f"[MEM] samples={s['samples']}"]
+        for label, key in (
+            ("GPU", "cuda_alloc_mb"),
+            ("GPUres", "cuda_reserved_mb"),
+            ("DRAM", "vmrss_mb"),
+        ):
+            if key in s:
+                parts.append(f"{label} avg={s[key]['avg']:.0f}MB peak={s[key]['peak']:.0f}MB")
+        if "offload_dir_mb" in s:
+            parts.append(
+                f"SSD avg={s['offload_dir_mb']['avg']:.0f}MB peak={s['offload_dir_mb']['peak']:.0f}MB"
+            )
+        if "io_write_mb" in s:
+            parts.append(f"SSDwritten={s['io_write_mb']['total']:.0f}MB")
+        return "  ".join(parts)
 
 
 def log_mem(tag: str) -> None:
@@ -131,6 +258,8 @@ def log_mem(tag: str) -> None:
 def start_memory_sampler(
     interval: float = 10.0,
     on_sample: Callable[[dict], None] | None = None,
+    offload_path: str | None = None,
+    aggregator: MemoryAggregator | None = None,
 ) -> tuple[threading.Thread, threading.Event]:
     """
     Start a daemon thread that samples memory every `interval` seconds.
@@ -139,6 +268,10 @@ def start_memory_sampler(
     ``on_sample`` is given, calls ``on_sample(probe_snapshot())`` so the caller
     can route a structured snapshot into the per-job event log.
 
+    Pass an ``aggregator`` to accumulate every sample into running
+    average/peak figures; ``offload_path`` adds the NVMe offload directory's
+    size to each snapshot.
+
     Returns (thread, stop_event). Call stop_event.set() then thread.join(timeout)
     to stop. Caller is responsible for only starting this on rank 0 / main process.
     """
@@ -146,11 +279,22 @@ def start_memory_sampler(
 
     def _tick() -> None:
         log_mem("sampler")
-        if on_sample is not None:
+        snapshot = None
+        if on_sample is not None or aggregator is not None:
             try:
-                on_sample(probe_snapshot())
+                snapshot = probe_snapshot(offload_path)
             except Exception:
-                pass  # sampling must never disturb training
+                return  # sampling must never disturb training
+        if aggregator is not None and snapshot is not None:
+            try:
+                aggregator.add(snapshot)
+            except Exception:
+                pass
+        if on_sample is not None and snapshot is not None:
+            try:
+                on_sample(snapshot)
+            except Exception:
+                pass
 
     def _run() -> None:
         # Emit one immediately so we always have a baseline even for short runs.

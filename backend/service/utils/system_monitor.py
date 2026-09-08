@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any, cast
 
 from ..config_models import (
@@ -205,14 +206,36 @@ class SystemMonitor:
         return expanded
 
     def _get_process_tree_pid_candidates(self) -> set[int]:
-        """Return current process-tree PIDs with host-visible namespace aliases."""
+        """
+        Return current process-tree PIDs with host-visible namespace aliases.
+
+        Under a distributed launcher this has to reach sideways as well as down.
+        ``deepspeed --num_gpus N`` starts every rank as a child of the launcher,
+        so from rank 0 -- the only rank that samples -- rank 1 is a *sibling*,
+        not a descendant. Walking children alone attributed nothing to the second
+        card and reported GPU 1 as using 0 MB throughout a run that was working
+        it just as hard as GPU 0.
+
+        Gated on WORLD_SIZE so a single-GPU job keeps the narrow tree: widening
+        it unconditionally would let an unrelated sibling process count against
+        this job's usage.
+        """
         pids = set()
         try:
             import psutil
 
             pids.add(os.getpid())
-            for child in psutil.Process().children(recursive=True):
+            proc = psutil.Process()
+            for child in proc.children(recursive=True):
                 pids.add(child.pid)
+
+            if os.environ.get("WORLD_SIZE", "1") != "1":
+                parent = proc.parent()
+                if parent is not None:
+                    # The launcher's descendants: this rank, its siblings, and
+                    # anything they spawned.
+                    for relative in parent.children(recursive=True):
+                        pids.add(relative.pid)
         except Exception:
             pids.add(os.getpid())
         return self._expand_process_identity_set(pids)
@@ -635,6 +658,196 @@ class SystemMonitor:
             return []
 
         return adapters
+
+    # An adapter with essentially no dedicated video memory is drawing its
+    # "VRAM" from system RAM. Discrete cards -- including a discrete Intel Arc --
+    # report their real framebuffer here, so this must key on DedicatedVideoMemory
+    # rather than on the vendor name.
+    _INTEGRATED_DEDICATED_MAX_BYTES = 1 << 30  # 1 GiB
+
+    # A device whose reported memory is this large a share of system RAM is not
+    # holding a framebuffer, it is borrowing DRAM. Only used when neither of the
+    # precise checks is available (WSL exposes /dev/dxg but no DRM VRAM nodes).
+    # Kept well above any plausible real card: 48 GB in a 128 GB box is 37%.
+    _INTEGRATED_RAM_SHARE = 0.45
+
+    def _adapter_is_integrated(self, name: str, total_bytes: int | None = None) -> bool:
+        """
+        True when this adapter's memory is system RAM rather than its own VRAM.
+
+        Three layers, most precise first, because getting this wrong in either
+        direction is costly: calling a discrete Arc "integrated" would hide a real
+        load target, and calling an iGPU discrete is the bug this exists to stop.
+        """
+        if os.name == "nt":
+            return self._windows_adapter_is_integrated(name)
+        linux_verdict = self._linux_device_is_integrated(name, total_bytes)
+        if linux_verdict is not None:
+            return linux_verdict
+        return self._memory_share_suggests_integrated(total_bytes)
+
+    # PCI vendor IDs, as DXGI reports them.
+    _PCI_VENDORS = {0x10DE: "nvidia", 0x8086: "intel", 0x1002: "amd"}
+
+    def _describe_dxgi_adapter(self, adapter: dict[str, Any]) -> tuple[str, bool]:
+        """
+        Vendor and integration verdict for one DXGI adapter record.
+
+        Separate from the enumeration loop so it can be tested without a specific
+        torch build: which loop emits the Intel adapter depends on whether
+        torch.xpu is present, and only one of the two runs on any given install.
+        """
+        vendor = self._PCI_VENDORS.get(int(adapter.get("vendor_id", 0) or 0), "unknown")
+        dedicated = int(adapter.get("dedicated_video_bytes", 0) or 0)
+        shared = int(adapter.get("shared_system_bytes", 0) or 0)
+        return vendor, dedicated <= self._INTEGRATED_DEDICATED_MAX_BYTES < shared
+
+    def _windows_adapter_is_integrated(self, name: str) -> bool:
+        """True when the named DXGI adapter has no meaningful dedicated VRAM."""
+        if os.name != "nt" or not name:
+            return False
+        needle = str(name).strip().lower()
+        for adapter in self._get_windows_dxgi_adapters():
+            if str(adapter.get("name", "")).strip().lower() != needle:
+                continue
+            dedicated = int(adapter.get("dedicated_video_bytes", 0) or 0)
+            shared = int(adapter.get("shared_system_bytes", 0) or 0)
+            return dedicated <= self._INTEGRATED_DEDICATED_MAX_BYTES < shared
+        return False
+
+    # Where the kernel publishes a card's own memory size. A discrete card has one
+    # of these; an integrated one has none, because it has no local memory to size.
+    _LINUX_VRAM_NODES = (
+        "mem_info_vram_total",  # amdgpu
+        "lmem_total_bytes",  # i915, discrete (DG2 / Arc)
+        "tile0/physical_vram_size_bytes",  # xe
+    )
+    # The names above are a fast path, not the authority. Drivers rename these nodes
+    # between releases and each new one arrives with its own spelling, so a card whose
+    # framebuffer is published under an unlisted name would otherwise read as "no local
+    # memory" -- indistinguishable from an iGPU. Match on shape as well: a byte count
+    # whose node name carries one of these stems, at the device root or one level down
+    # a tile. "gtt" and "system" are deliberately absent -- those size the system-RAM
+    # aperture, so counting one would call an iGPU discrete, the very error this exists
+    # to prevent.
+    _LINUX_VRAM_STEMS = ("vram", "lmem", "local_mem")
+    # Overridable so the branch can be tested against a synthetic tree; WSL has no
+    # DRM cards at all, so real sysfs cannot exercise it on this machine.
+    _DRM_ROOT = Path("/sys/class/drm")
+
+    # How far a reported size may sit from a card's published framebuffer and still
+    # be that card. The driver reserves a slice of VRAM before torch ever sees it,
+    # so the two never match exactly; 15% covers that without being wide enough to
+    # swallow the next size class up.
+    _VRAM_MATCH_TOLERANCE = 0.15
+
+    def _linux_card_vram_bytes(self, device: Path) -> int:
+        """Size of one card's own video memory, or 0 when it has none to report."""
+        for node in self._LINUX_VRAM_NODES:
+            try:
+                size = int((device / node).read_text().strip() or 0)
+            except (OSError, ValueError):
+                continue
+            if size > 0:
+                return size
+
+        # Unlisted spelling: take any byte count the node shape allows. Two tiers,
+        # because a driver publishes several sizes and only one of them is the
+        # framebuffer. A name carrying "total" beats a usage sibling like amdgpu's
+        # mem_info_vram_used, and within a tier the largest figure wins.
+        #
+        # Largest, not first-by-name: several nodes can carry "total", and the small
+        # ones are windows onto the framebuffer rather than rivals to it -- amdgpu's
+        # mem_info_vis_vram_total sizes the CPU-visible aperture, 256 MiB on a card
+        # without resizable BAR. Ordering by name handed that one the answer, since
+        # "vis_vram" precedes "vram", and the mixed-vendor branch below then matched
+        # a 16 GiB card against 256 MiB and called it integrated. Local memory is
+        # never smaller than a window onto it, so the largest figure is the real one.
+        # Across tiles the largest is one tile, which is the same figure the listed
+        # tile0 node yields, so the two lookups keep agreeing.
+        totals: list[int] = []
+        others: list[int] = []
+        for stem in self._LINUX_VRAM_STEMS:
+            for pattern in (f"*{stem}*", f"tile*/*{stem}*"):
+                try:
+                    matches = list(device.glob(pattern))
+                except OSError:
+                    continue
+                for path in matches:
+                    try:
+                        size = int(path.read_text().strip() or 0)
+                    except (OSError, ValueError, UnicodeDecodeError):
+                        continue  # directory, non-numeric node, or unreadable
+                    if size > 0:
+                        (totals if "total" in path.name else others).append(size)
+        return max(totals or others or [0])
+
+    def _linux_device_is_integrated(self, name: str, total_bytes: int | None = None) -> bool | None:
+        """
+        Ask DRM sysfs. None when it cannot answer -- no sysfs (e.g. WSL), or no card
+        of the vendor published a size this can read.
+
+        Cards are matched by vendor, because torch.xpu's device string does not
+        correspond to a card number. That is enough while a vendor's cards agree:
+        either all of them publish local memory or none of them do.
+
+        When they disagree -- a discrete Arc next to an Intel iGPU, both 0x8086 --
+        the vendor no longer identifies the adapter, and answering from the first
+        card that happened to have VRAM marked the iGPU discrete too. The reported
+        size decides instead: a discrete card reports the framebuffer sysfs also
+        publishes, while an iGPU reports a slice of system RAM that matches no
+        card. Unknowable without a size, so an absent one abstains rather than
+        guesses.
+        """
+        drm = self._DRM_ROOT
+        if not drm.is_dir():
+            return None
+        vendor_id = {"intel": "0x8086", "amd": "0x1002", "nvidia": "0x10de"}.get(
+            next((v for v in ("intel", "amd", "nvidia") if v in str(name).lower()), "")
+        )
+        # One entry per matching card, 0 for a card with no local memory.
+        vram_sizes: list[int] = []
+        for card in sorted(drm.glob("card[0-9]*")):
+            device = card / "device"
+            try:
+                card_vendor = (device / "vendor").read_text().strip().lower()
+            except OSError:
+                continue
+            if vendor_id and card_vendor != vendor_id:
+                continue
+            vram_sizes.append(self._linux_card_vram_bytes(device))
+
+        if not vram_sizes:
+            return None  # nothing of this vendor here; let the caller fall through
+        discrete = [size for size in vram_sizes if size > 0]
+        if not discrete:
+            # No card of this vendor published a size. An iGPU looks exactly like
+            # this -- but so does a discrete card whose driver names the node
+            # something not listed above, or publishes it where this cannot read it,
+            # and sysfs alone cannot tell those apart. Answering True decided it was
+            # integrated and skipped the RAM-share fallback outright, hiding a real
+            # load target; abstain and let that fallback answer from the size.
+            return None
+        if len(discrete) == len(vram_sizes):
+            return False  # every card of this vendor has its own VRAM
+
+        if not total_bytes or total_bytes <= 0:
+            return None  # mixed vendor, nothing to match on -- abstain
+        return not any(
+            abs(total_bytes - size) <= size * self._VRAM_MATCH_TOLERANCE for size in discrete
+        )
+
+    def _memory_share_suggests_integrated(self, total_bytes: int | None) -> bool:
+        """Last resort: memory that large a share of RAM is borrowed, not dedicated."""
+        if not total_bytes or total_bytes <= 0:
+            return False
+        try:
+            import psutil
+
+            ram_total = psutil.virtual_memory().total
+        except Exception:
+            return False
+        return bool(ram_total) and (total_bytes / ram_total) >= self._INTEGRATED_RAM_SHARE
 
     def _get_windows_dxgi_igpu_total_memory(self) -> int | None:
         """Get the Intel iGPU Task Manager max available memory via DXGI (Shared + Dedicated)."""
@@ -1152,6 +1365,8 @@ class SystemMonitor:
                         percent=percent,
                         gpu_util=gpu_util,
                         temperature=temp,
+                        vendor="nvidia",
+                        is_integrated=False,
                     )
                 )
                 seen_gpu_names.add(str(name).strip().lower())
@@ -1236,6 +1451,8 @@ class SystemMonitor:
                                 percent=percent,
                                 gpu_util=gpu_util,
                                 temperature=temp_val,
+                                vendor="nvidia",
+                                is_integrated=False,
                             )
                         )
                         seen_gpu_names.add(str(name).strip().lower())
@@ -1375,7 +1592,10 @@ class SystemMonitor:
 
                     gpus.append(
                         GPUInfo(
-                            index=i,
+                            # Not the xpu loop index: NVML has already emitted its
+                            # own 0..n-1, and reusing them here produced two
+                            # entries both claiming index 0.
+                            index=len(gpus),
                             name=name,
                             total_gb=_bytes_to_gb(total_bytes) if total_bytes else 0.0,
                             used_gb=_bytes_to_gb(used_bytes)
@@ -1387,6 +1607,8 @@ class SystemMonitor:
                             percent=percent if mode == "usage" else None,
                             gpu_util=intel_gpu_util if mode == "usage" else None,
                             temperature=None,
+                            vendor="intel" if "intel" in str(name).lower() else "unknown",
+                            is_integrated=self._adapter_is_integrated(name, total_bytes),
                         )
                     )
                     seen_gpu_names.add(str(name).strip().lower())
@@ -1441,6 +1663,7 @@ class SystemMonitor:
                         if isinstance(util_val, (int, float)):
                             gpu_util = round(float(util_val), 2)
 
+                    _vendor, _integrated = self._describe_dxgi_adapter(adapter)
                     gpus.append(
                         GPUInfo(
                             index=next_index,
@@ -1455,6 +1678,8 @@ class SystemMonitor:
                             percent=percent if mode == "usage" else None,
                             gpu_util=gpu_util if mode == "usage" else None,
                             temperature=None,
+                            vendor=_vendor,
+                            is_integrated=_integrated,
                         )
                     )
                     seen_gpu_names.add(adapter_key)

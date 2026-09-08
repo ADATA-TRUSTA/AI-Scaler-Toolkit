@@ -227,8 +227,28 @@ def load_training_dataset(dataset_path: str) -> "Dataset":
             # If validation passed but loading still failed, re-raise the original error
             raise
 
+    # Anything that is not a .json/.jsonl file is treated as a Hub dataset id.
+    # A local path that exists is therefore a path in a format this loader does
+    # not read -- most often a directory that was meant to be somewhere else in
+    # the config. Say that, rather than letting `datasets` report a parse failure
+    # against a repo id it built out of a filesystem path.
+    if Path(dataset_path).exists():
+        kind = "directory" if Path(dataset_path).is_dir() else "file"
+        raise ValueError(
+            f"dataset_path points at a local {kind} this loader cannot read: {dataset_path}. "
+            "Training data must be a .json or .jsonl file (fields: 'text', or "
+            "'prompt'/'completion', or a messages list). Check that dataset_path is not "
+            "pointing at an output or offload directory."
+        )
+
     # HuggingFace dataset
-    loaded = hf_load_dataset(dataset_path)
+    try:
+        loaded = hf_load_dataset(dataset_path)
+    except Exception as e:
+        raise ValueError(
+            f"dataset_path '{dataset_path}' is neither a local .json/.jsonl file nor a "
+            f"loadable HuggingFace dataset id ({type(e).__name__}: {e})."
+        ) from e
     # load_dataset may return a Dataset directly (when split= is given upstream)
     # or a DatasetDict keyed by split name. Don't assume a "train" split exists.
     if hasattr(loaded, "keys"):

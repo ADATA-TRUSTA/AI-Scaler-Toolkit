@@ -10,10 +10,12 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
+import httpx2
 import torch
 from PIL import Image
 from transformers import BatchEncoding, PreTrainedTokenizerBase
+
+from ..async_server_client import reorder_multimodal_content
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +361,7 @@ def _load_images(image_sources: list[str]) -> list[Image.Image]:
                 continue
 
             if src.startswith("http://") or src.startswith("https://"):
-                response = httpx.get(src, timeout=10, follow_redirects=True)
+                response = httpx2.get(src, timeout=10, follow_redirects=True)
                 response.raise_for_status()
                 image = Image.open(BytesIO(response.content)).convert("RGB")
                 loaded.append(image)
@@ -487,6 +489,12 @@ def tokenize_prompt(
                 pil_images,
                 embed_images=False,
             )
+            # Media before text, matching the training data and Gemma's convention.
+            # These builders preserve the client's part order, so a [text, image_url]
+            # payload would otherwise be served inverted relative to how every
+            # training example was rendered. The async engine path already does this.
+            messages_embedded = reorder_multimodal_content(messages_embedded)
+            messages_placeholder = reorder_multimodal_content(messages_placeholder)
         else:
             text_content = str(prompt) if prompt else ""
             base_content = [{"type": "text", "text": text_content}] if text_content else []
