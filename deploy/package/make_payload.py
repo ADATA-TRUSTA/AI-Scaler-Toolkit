@@ -118,7 +118,7 @@ def clear_payload(payload: Path) -> None:
             + (f"[payload] {culprit} is running from it.\n" if culprit else "")
             + "[payload] Close the application and stop its backend service, then try "
               "again. Nothing has been deleted."
-        )
+        ) from None
     layout.force_rmtree(parked)
 
 

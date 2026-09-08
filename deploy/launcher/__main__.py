@@ -143,11 +143,19 @@ class SettingsApi:
             "accelerator": stored["accelerator"],
             "last_setup": stored["last_setup"],
             "package_count": stored["package_count"],
-            # Shown read-only. The launcher owns the service port and nothing else --
-            # these two belong to an inference configuration, and the load-model
-            # request carries its own, so anything written here would be overwritten.
+            # The address, not just the number. "Backend service: 8571" reads as one
+            # of several services with several ports; the interface the reader is
+            # looking at is served on this one, and showing the URL says so without
+            # anyone having to read a paragraph.
+            "service_url": config.service_url(stored["service_port"]),
+            # Shown read-only. The launcher owns the application port and nothing else
+            # -- this belongs to an inference configuration, and the load-model request
+            # carries its own, so anything written here would be overwritten.
             "llama_port": config.LLAMA_SERVER_PORT,
-            "vllm_port": config.VLLM_PORT,
+            # Omitted where vLLM cannot run at all: on Windows the backend refuses the
+            # engine up front, so a port for it is a number for something that will
+            # never start.
+            "vllm_port": None if sys.platform == "win32" else config.VLLM_PORT,
             "platform": sys.platform,
         }
 
@@ -879,8 +887,6 @@ class Launcher:
 
     def _confirm_quit_during_install(self, component_id: str) -> bool:
         """Ask before abandoning an install. Defaults to quitting if we cannot ask."""
-        import webview
-
         name = components.BY_ID[component_id].name if component_id in components.BY_ID \
             else component_id
         target = self.settings_window or self.window

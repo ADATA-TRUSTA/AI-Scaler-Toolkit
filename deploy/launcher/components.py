@@ -572,7 +572,10 @@ class Job:
     def installer_lines(self) -> list[str]:
         """Only what the installer itself produced -- see Progress."""
         with self._lock:
-            return [line for line, ours in zip(self.lines, self._ours) if not ours]
+            # strict: the two lists are appended together under this lock, so a length
+            # difference means that stopped being true and should be loud.
+            return [line for line, ours in zip(self.lines, self._ours, strict=True)
+                    if not ours]
 
     def snapshot(self) -> dict:
         with self._lock:

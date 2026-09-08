@@ -182,10 +182,10 @@
       <h2>Ports</h2>
       <div class="row">
         <div>
-          <div class="label">Backend service</div>
-          <div class="hint">The API and this application's interface are both served
-            here. Changing it restarts the service and repoints the interface at the
-            same time.</div>
+          <div class="label">Application port</div>
+          <div class="hint" id="port-hint">The API and this application's interface are
+            both served here. Changing it restarts the service and repoints the
+            interface at the same time.</div>
         </div>
         <div class="control">
           <div class="control-group">
@@ -301,10 +301,15 @@
       // Read-only on purpose: these belong to an inference configuration, and the
       // load-model request carries its own, so anything set here would be overwritten
       // the next time a model is loaded.
-      facts("inference-ports", [
-        ["llama server", String(s.llama_port)],
-        ["vLLM server", String(s.vllm_port) + (s.platform === "win32" ? " (Linux only)" : "")],
-      ]);
+      el("port-hint").textContent =
+        "The API and this application's interface are both served at " + s.service_url +
+        ". Changing it restarts the service and repoints the interface at the same time.";
+
+      // vLLM is left out where it cannot run: the backend refuses the engine on
+      // Windows, so listing a port for it is a number for something that never starts.
+      var ports = [["llama server", String(s.llama_port)]];
+      if (s.vllm_port) { ports.push(["vLLM server", String(s.vllm_port)]); }
+      facts("inference-ports", ports);
       el("inference-note").textContent =
         "Shown for reference. These are part of the inference configuration, not " +
         "settings — a model being loaded brings its own.";
