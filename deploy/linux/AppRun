@@ -2,19 +2,43 @@
 #
 # AppImage entry point.
 #
-# WebKitGTK is deliberately not bundled. It is large, and a bundled copy conflicts with
-# the system one often enough that shipping it causes more breakage than depending on
-# it does -- so this checks for it and says what to install instead of failing with a
-# Python traceback about a missing GObject library.
+# Two jobs: say something a person can read when a dependency is missing, and start
+# the launcher. Everything else the launcher does for itself.
+#
+# WebKitGTK is deliberately not bundled. It is large, and a bundled copy conflicts
+# with the system one often enough that shipping it causes more breakage than
+# depending on it does -- so this checks for it and says what to install instead of
+# failing with a Python traceback about a missing GObject library.
 
 set -euo pipefail
 
 HERE="$(dirname "$(readlink -f "${0}")")"
 APP_ID="ai-scaler-toolkit"
+APP_TITLE="AI Scaler Toolkit"
 APP_ROOT="$HERE/usr/share/$APP_ID"
+LAUNCHER="$APP_ROOT/AIScalerToolkit"
 
 export PATH="$HERE/usr/bin:$PATH"
-export PYTHONPATH="$APP_ROOT:${PYTHONPATH:-}"
+
+# Nothing here is started from a terminal. The .desktop entry is Terminal=false, and
+# so is every other way a desktop launches an application -- an icon, a menu entry,
+# the autostart directory. Writing a diagnosis to stderr in that situation puts it
+# nowhere at all: the user double-clicks, nothing appears, and there is no error to
+# find. So say it in whatever a desktop has, and keep stderr as the last resort for
+# the case where this really was run from a shell.
+report_problem() {
+  local body="$1"
+  if command -v zenity >/dev/null 2>&1; then
+    zenity --error --no-wrap --title="$APP_TITLE" --text="$body" >/dev/null 2>&1 && return 0
+  fi
+  if command -v kdialog >/dev/null 2>&1; then
+    kdialog --title "$APP_TITLE" --error "$body" >/dev/null 2>&1 && return 0
+  fi
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send --urgency=critical "$APP_TITLE" "$body" >/dev/null 2>&1 && return 0
+  fi
+  printf '%s\n' "$body" >&2
+}
 
 have_webkitgtk() {
   local dir
@@ -28,8 +52,7 @@ have_webkitgtk() {
 if ! have_webkitgtk; then
   # The exact package name differs per distribution, so name the common ones rather
   # than guessing one and being wrong.
-  cat >&2 <<'MSG'
-AI Scaler Toolkit needs WebKitGTK to draw its window, and it is not installed.
+  report_problem "$APP_TITLE needs WebKitGTK to draw its window, and it is not installed.
 
   Debian / Ubuntu   sudo apt install libwebkit2gtk-4.1-0
   Fedora            sudo dnf install webkit2gtk4.1
@@ -37,23 +60,36 @@ AI Scaler Toolkit needs WebKitGTK to draw its window, and it is not installed.
   openSUSE          sudo zypper install libwebkit2gtk-4_1-0
 
 It is not bundled on purpose: a bundled copy conflicts with the system one more
-often than the dependency itself causes trouble.
-MSG
+often than the dependency itself causes trouble."
   exit 1
 fi
 
-# uv bootstraps its own Python, so the AppImage does not carry an interpreter and does
-# not depend on the host having a suitable one.
+# uv builds the backend environment on first run, and setup_env.sh expects to find it
+# rather than installing it. Said now, before the window opens, because the alternative
+# is a setup that starts and then stops on its first command.
 if ! command -v uv >/dev/null 2>&1; then
-  cat >&2 <<'MSG'
-AI Scaler Toolkit needs uv to create its environment on first run.
+  report_problem "$APP_TITLE needs uv to create its environment on first run.
 
   curl -LsSf https://astral.sh/uv/install.sh | sh
 
-It installs into your home directory and needs no administrator rights.
-MSG
+It installs into your home directory and needs no administrator rights."
+  exit 1
+fi
+
+# The launcher is frozen, the same as it is on Windows, so it carries pywebview,
+# pystray and the rest with it. The alternative -- shipping sources and running them
+# with the host's Python -- means either building the launcher's own environment
+# before the first window can open, or running with no dependencies at all.
+if [[ ! -x "$LAUNCHER" ]]; then
+  report_problem "This build of $APP_TITLE is incomplete: it carries no launcher
+executable at
+
+  usr/share/$APP_ID/AIScalerToolkit
+
+which means build_appimage.sh packaged a payload that was built without
+--launcher-dir. Please report this build as broken."
   exit 1
 fi
 
 cd "$APP_ROOT"
-exec uv run --no-project python -m launcher "$@"
+exec "$LAUNCHER" "$@"

@@ -11,6 +11,7 @@ what lets the whole installer stay per-user.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,17 @@ LOGIN_FLAG = "--autostart"
 
 
 def _launch_command() -> str:
+    # An AppImage is mounted for the length of one run and unmounted afterwards, so
+    # everything inside it -- sys.executable included -- has a path that is gone by the
+    # next login. Recording one produces the quietest possible failure: an autostart
+    # entry that names something which no longer exists, forever.
+    #
+    # The AppImage runtime exports APPIMAGE, the path of the .AppImage file itself.
+    # That is the thing that is still there tomorrow, and running it is exactly what
+    # the user does by hand.
+    appimage = os.environ.get("APPIMAGE")
+    if appimage and Path(appimage).is_file():
+        return f'"{appimage}" {LOGIN_FLAG}'
     if getattr(sys, "frozen", False):
         return f'"{Path(sys.executable).resolve()}" {LOGIN_FLAG}'
     return f'"{sys.executable}" -m launcher {LOGIN_FLAG}'

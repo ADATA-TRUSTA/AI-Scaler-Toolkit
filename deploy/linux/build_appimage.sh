@@ -30,9 +30,13 @@ BUILD_DIR="$REPO_ROOT/build/appimage"
 APPDIR="$BUILD_DIR/AppDir"
 OUT_DIR="$REPO_ROOT/dist-unsigned"
 TOOL_DIR="$BUILD_DIR/tools"
+LAUNCHER_BUILD="$BUILD_DIR/launcher"
 APPIMAGETOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage}"
 
-log() { printf '[appimage] %s\n' "$*"; }
+# To stderr, not stdout. fetch_appimagetool below returns the tool's path by printing
+# it, and a progress line printed alongside lands in the same variable -- the build
+# then tried to run "[appimage] downloading appimagetool" as a program.
+log() { printf '[appimage] %s\n' "$*" >&2; }
 die() { printf '[appimage] error: %s\n' "$*" >&2; exit 1; }
 
 check_glibc() {
@@ -65,11 +69,27 @@ fetch_appimagetool() {
   printf '%s' "$tool"
 }
 
+build_launcher() {
+  # Frozen, exactly as on Windows. Without this the payload carries launcher sources
+  # and no executable, AppRun has nothing to exec, and assert_payload says so and
+  # stops the build -- which is what it used to do here, every time, because this
+  # step did not exist.
+  log "freezing the launcher"
+  uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/build_launcher.py" \
+    --out "$LAUNCHER_BUILD"
+  [[ -x "$LAUNCHER_BUILD/AIScalerToolkit/AIScalerToolkit" ]] \
+    || die "build_launcher.py produced no AIScalerToolkit executable"
+}
+
 build_payload() {
   log "building the Linux payload (TRUSTA build, vllm enabled)"
-  uv run --no-project python "$REPO_ROOT/deploy/package/make_payload.py" \
-    --platform linux --out "$BUILD_DIR/payload" --port "$SERVICE_PORT"
-  uv run --no-project python "$REPO_ROOT/deploy/package/assert_payload.py" \
+  # --project, not --no-project. Both scripts import make_icon, which draws the
+  # application icon with Pillow; a bare interpreter has no Pillow, so the build
+  # stopped on ModuleNotFoundError before it reached anything interesting.
+  uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/make_payload.py" \
+    --platform linux --out "$BUILD_DIR/payload" --port "$SERVICE_PORT" \
+    --launcher-dir "$LAUNCHER_BUILD/AIScalerToolkit"
+  uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/assert_payload.py" \
     --platform linux --payload "$BUILD_DIR/payload" --port "$SERVICE_PORT"
 }
 
@@ -83,15 +103,17 @@ build_appdir() {
   install -m 0644 "$SCRIPT_DIR/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"
   install -m 0644 "$SCRIPT_DIR/$APP_ID.desktop" "$APPDIR/usr/share/applications/$APP_ID.desktop"
 
-  # The icon travels with the frontend package, so the AppImage shows the brand that
-  # actually shipped rather than one chosen at build time.
-  local icon
-  icon="$(find "$BUILD_DIR/payload/frontend/dist" -maxdepth 1 -iname '*.png' -print -quit || true)"
+  # app-mark.png, which make_payload draws from the brand artwork into the payload
+  # root. This used to look inside frontend/dist, where there is no PNG at all -- so
+  # every AppImage built here wore appimagetool's generic icon and said so in a log
+  # line nobody reads.
+  local icon="$BUILD_DIR/payload/app-mark.png"
+  [[ -f "$icon" ]] || icon=""
   if [[ -n "$icon" ]]; then
     install -m 0644 "$icon" "$APPDIR/$APP_ID.png"
     install -m 0644 "$icon" "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP_ID.png"
   else
-    log "no PNG icon in the frontend package; the AppImage will use a generic icon"
+    log "no app-mark.png in the payload; the AppImage will use a generic icon"
   fi
 }
 
@@ -101,6 +123,7 @@ main() {
   check_glibc
 
   mkdir -p "$BUILD_DIR" "$OUT_DIR"
+  build_launcher
   build_payload
   build_appdir
 
