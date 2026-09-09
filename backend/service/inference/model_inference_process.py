@@ -292,6 +292,17 @@ class ModelInferenceProcess:
         self.layer_lines: list | None = None  # Sample layer placements
         # GPU memory usage (reported by the worker process)
         self.memory_usage: dict[str, float] | None = None
+        # Server-engine metadata the worker reports once the model is ready.
+        # llama-server is the only engine that publishes capabilities today.
+        self.llama_capabilities: list[str] | None = None
+        self.llama_model_meta: dict[str, int] | None = None
+        # Window the running engine says one request gets. Engine-neutral: both the
+        # llama-server and vLLM engines report it, from their own running server.
+        self.served_context_length: int | None = None
+        self.prefill_strategy: str | None = None
+        # Wall-clock time the model finished loading. Kept so callers have a
+        # stable timestamp for the model instead of "now" on every request.
+        self.loaded_at: float | None = None
         # Per-request delivery queues. A single dispatcher thread is the only
         # reader of the shared multiprocessing ``data_queue``; it fans each
         # response out to the owning request's queue. Every consumer then
@@ -961,6 +972,13 @@ class ModelInferenceProcess:
                     self.layer_lines = response.get("layer_lines")
                     # Update GPU memory usage (reported by the worker process)
                     self.memory_usage = response.get("memory_usage")
+                    # Server-engine metadata. Absent for engines that do not
+                    # report it, so keep None rather than an empty list.
+                    self.llama_capabilities = response.get("llama_capabilities")
+                    self.llama_model_meta = response.get("llama_model_meta")
+                    self.served_context_length = response.get("served_context_length")
+                    self.prefill_strategy = response.get("prefill_strategy")
+                    self.loaded_at = time.time()
                 elif status == "error":
                     # Capture the detailed error message
                     self.loading_error = response.get("error")
@@ -981,6 +999,12 @@ class ModelInferenceProcess:
                     self.layer_lines = None
                     # Clear GPU memory statistics
                     self.memory_usage = None
+                    # Clear server-engine metadata
+                    self.llama_capabilities = None
+                    self.llama_model_meta = None
+                    self.served_context_length = None
+                    self.prefill_strategy = None
+                    self.loaded_at = None
 
             except Empty:
                 break
@@ -1086,12 +1110,21 @@ class ModelInferenceProcess:
             },
             # GPU memory usage (reported by the worker process)
             "memory_usage": self.memory_usage,
+            # Server-engine metadata reported by the worker at ready time
+            "llama_capabilities": self.llama_capabilities,
+            "llama_model_meta": self.llama_model_meta,
+            "served_context_length": self.served_context_length,
+            "prefill_strategy": self.prefill_strategy,
+            "loaded_at": self.loaded_at,
             # llama.cpp-specific info
             "n_gpu_layers": (self.current_config.n_gpu_layers if self.current_config else None),
             "n_ctx": self.current_config.n_ctx if self.current_config else None,
             "n_batch": self.current_config.n_batch if self.current_config else None,
             "llama_server_extra_args": (
                 self.current_config.llama_server_extra_args if self.current_config else None
+            ),
+            "vllm_server_extra_args": (
+                self.current_config.vllm_server_extra_args if self.current_config else None
             ),
         }
 

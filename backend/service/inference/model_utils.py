@@ -190,7 +190,52 @@ def _is_qwen35_moe_model(model_name: str) -> bool:
 
 
 def _get_model_class_for_loading(model_name: str) -> type:
-    """Return the appropriate model class based on the model name."""
+    """
+    Return the class to load this checkpoint with.
+
+    Architecture first, name second. The name checks below are substring matches
+    on a repo id or a directory name, and they stop firing exactly when they are
+    still needed: a fine-tune saved to `simon-face-v1` matches nothing, and any
+    multimodal family not in the hardcoded list falls through to
+    `AutoModelForCausalLM`. For `idefics3`/`smolvlm` that is not a degradation
+    but a hard failure -- those model types have no causal-LM mapping at all, so
+    `from_pretrained` raises `Unrecognized configuration class` and a
+    registry-listed, trainable model cannot be served.
+
+    So the checkpoint's own `config.json` is consulted first, via the same
+    resolver the training side uses. Keeping one source of truth for "what class
+    does this checkpoint load as" is what stops training and inference drifting
+    apart -- an adapter trained against one class does not bind to the other,
+    because the module paths differ.
+
+    The name-based branches are kept as a fallback for references that do not
+    resolve to a readable config (an uncached repo id, a GGUF directory).
+    """
+    from ..utils.model_class_resolver import IMAGE_TEXT_TO_TEXT_AVAILABLE, resolve_model_class
+
+    try:
+        resolved, multimodal = resolve_model_class(model_name)
+        # The training resolver prefers the causal-LM class for a multimodal
+        # checkpoint, because TEXT training wants the language tower only (the
+        # image path opts back in via enable_image_training). Serving cannot
+        # make that choice: a request may carry an image at any time, and the
+        # causal-LM class of e.g. Qwen3.5 has no vision tower at all. So a
+        # multimodal checkpoint is always served with the multimodal class.
+        if multimodal and IMAGE_TEXT_TO_TEXT_AVAILABLE:
+            from transformers import AutoModelForImageTextToText
+
+            resolved = AutoModelForImageTextToText
+        logger.info(
+            f"[Worker] Resolved {model_name} from its config "
+            f"(multimodal={multimodal}) -> {getattr(resolved, '__name__', resolved)}"
+        )
+        return resolved
+    except Exception as e:
+        logger.info(
+            f"[Worker] Could not resolve {model_name} from a config ({e}); "
+            "falling back to name-based detection"
+        )
+
     if _is_gemma4_model(model_name):
         if GEMMA4_AVAILABLE:
             logger.info("[Worker] Detected Gemma 4 model, using Gemma4ForConditionalGeneration")

@@ -334,4 +334,15 @@ def run_sft_training(
         )
         logger.info("[SFTRunner] Verified image tokens reach the model")
 
+    # Runs for every dataset shape, not just vision: truncation cuts the
+    # completion off the end regardless of modality, and the resulting loss of
+    # exactly 0.0 looks like perfect convergence rather than a broken run.
+    from .core.model_loader import verify_labels_are_supervised
+
+    verify_labels_are_supervised(
+        trainer.data_collator,
+        dataset,
+        getattr(training_config, "max_seq_length", None),
+    )
+
     return trainer

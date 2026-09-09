@@ -160,16 +160,16 @@ REDIS_PORT=6379
 REDIS_DB=0
 ```
 
-If you already compiled llama.cpp, you can also add this to `.env`:
+`setup_env` records the llama binary it verified in `.env`, so this is normally already set. To point at a build of your own, add it to `.env`:
 
 ```dotenv
-LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/llama-server
+LLAMA_SERVER_BINARY=./backend/service/utils/llama-bin/llama-server
 ```
 
 Windows example:
 
 ```dotenv
-LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/Release/llama-server.exe
+LLAMA_SERVER_BINARY=./backend/service/utils/llama-bin/llama-server.exe
 ```
 
 > Paths can use either `/` or `\`; Python `pathlib` supports both.
@@ -181,8 +181,8 @@ LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/Release/llama-se
 | `HF_HOME` | Hugging Face models and cache | `<project>/.cache/huggingface` |
 | `TIKTOKEN_RS_CACHE_DIR` | TikToken / GPT-OSS cache | Project root |
 | `LOG_DIR` | Log output directory | `<project>/logs` |
-| `LLAMA_SERVER_BINARY` | Path to the `llama-server` executable | Auto-detected from build output |
-| `VLLM_SERVER_PROJECT_DIR` | vLLM isolated environment directory | `backend/service/inference/engines/vllm_server` |
+| `LLAMA_SERVER_BINARY` | Path to the `llama-server` executable | `backend/service/utils/llama-bin/`, falling back to PATH |
+| `VLLM_SERVER_PROJECT_DIR` | Project directory whose `.venv` holds vLLM | The backend project root (vLLM installs into this project via the `vllm` extra; it is no longer an isolated sub-project) |
 
 ### `dmidecode` Permission Setup (Linux, Optional)
 

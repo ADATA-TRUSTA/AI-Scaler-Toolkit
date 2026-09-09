@@ -160,16 +160,16 @@ REDIS_PORT=6379
 REDIS_DB=0
 ```
 
-若已經編譯好 llama.cpp，也可在 `.env` 補上：
+`setup_env` 會把它驗證過的 llama 執行檔路徑寫進 `.env`，通常不需要手動設定。若要指向自己編譯的版本，可在 `.env` 補上：
 
 ```dotenv
-LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/llama-server
+LLAMA_SERVER_BINARY=./backend/service/utils/llama-bin/llama-server
 ```
 
 Windows 範例：
 
 ```dotenv
-LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/Release/llama-server.exe
+LLAMA_SERVER_BINARY=./backend/service/utils/llama-bin/llama-server.exe
 ```
 
 > 路徑可以用正斜線 `/` 或反斜線 `\`，Python 的 `pathlib` 兩者皆支援。
@@ -181,8 +181,8 @@ LLAMA_SERVER_BINARY=./backend/service/utils/llama.cpp/build/bin/Release/llama-se
 | `HF_HOME` | Hugging Face 模型與快取 | `<project>/.cache/huggingface` |
 | `TIKTOKEN_RS_CACHE_DIR` | TikToken / GPT-OSS 快取 | 專案根目錄 |
 | `LOG_DIR` | 日誌輸出目錄 | `<project>/logs` |
-| `LLAMA_SERVER_BINARY` | llama-server 可執行檔路徑 | 自動尋找 build 輸出 |
-| `VLLM_SERVER_PROJECT_DIR` | vLLM 隔離環境目錄 | `backend/service/inference/engines/vllm_server` |
+| `LLAMA_SERVER_BINARY` | llama-server 可執行檔路徑 | `backend/service/utils/llama-bin/`，找不到才退回 PATH |
+| `VLLM_SERVER_PROJECT_DIR` | 其 `.venv` 裝有 vLLM 的專案目錄 | backend 專案根目錄（vLLM 已改由 `vllm` extra 裝進本專案環境，不再是獨立子專案） |
 
 ### dmidecode 權限設定（Linux 選配）
 

@@ -42,7 +42,17 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase, TrainingArguments
 
 # Import settings BEFORE torch/transformers (sets HF_HOME environment variable)
-from ..settings import REDIS_DB, REDIS_HOST, REDIS_PORT, configure_logging
+from ..settings import (
+    DEEPSPEED_NVME_DIR,
+    DEEPSPEED_NVME_PATH_SENTINEL,
+    DEEPSPEED_NVME_PINNED_BUDGET_BYTES,
+    PROJECT_ROOT,
+    REDIS_CONNECT_TIMEOUT,
+    REDIS_DB,
+    REDIS_HOST,
+    REDIS_PORT,
+    configure_logging,
+)
 from ..utils.conversion_manager import conversion_manager
 from ..utils.path_safety import is_protected_system_path
 from ..utils.system_monitor import system_monitor
@@ -60,16 +70,13 @@ from transformers import Trainer
 
 from .core import (
     JobLogWriter,
-    ModelLoader,
+    MemoryAggregator,
     Phase,
-    StrategyFactory,
     build_resource_snapshot,
-    load_training_dataset,
+    build_training_components,
     log_mem,
     read_events,
     save_training_results,
-    select_processing_class,
-    split_train_eval,
     start_memory_sampler,
 )
 
@@ -77,13 +84,34 @@ logger = configure_logging(__name__)
 
 
 def _create_redis_client() -> Redis | None:
-    """Create Redis client from REDIS_URL first, then host/port/db fallback."""
+    """
+    Create a Redis client when one has been configured, else None.
+
+    None is a supported state everywhere this client is used: metrics and resource
+    history are kept elsewhere as well, and every write here is guarded by a check for
+    it. So a machine with no Redis should get None immediately rather than a client
+    that will spend a TCP timeout discovering the same thing.
+
+    That timeout is not free. This runs while TrainingManager is being constructed,
+    which is on the path between starting the service and it answering, so every
+    launch on a machine without Redis paid for it before the server could bind.
+    """
     if not redis:
         return None
 
     redis_url = os.getenv("REDIS_URL", "").strip()
     if redis_url:
-        return redis.Redis.from_url(redis_url, decode_responses=True)
+        return redis.Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=REDIS_CONNECT_TIMEOUT,
+            socket_timeout=REDIS_CONNECT_TIMEOUT,
+        )
+
+    # Only when a host was actually asked for. The default is localhost, which is an
+    # assumption rather than a configuration -- and on a desktop install a wrong one.
+    if not os.getenv("REDIS_HOST"):
+        return None
 
     redis_username = os.getenv("REDIS_USERNAME")
     redis_password = os.getenv("REDIS_PASSWORD")
@@ -94,7 +122,152 @@ def _create_redis_client() -> Redis | None:
         username=redis_username,
         password=redis_password,
         decode_responses=True,
+        socket_connect_timeout=REDIS_CONNECT_TIMEOUT,
+        socket_timeout=REDIS_CONNECT_TIMEOUT,
     )
+
+
+def _log_zero3_partition_state(trainer: Trainer) -> None:
+    """
+    Report whether ZeRO-3 is actually partitioning at training time.
+
+    ``is_deepspeed_zero3_enabled()`` only says a DeepSpeed config was attached;
+    it does not prove the engine wrapped the model or that parameters are still
+    partitioned once training starts. A run whose parameters are all resident
+    (``ds_status`` AVAILABLE, ``ds_tensor`` holding the full tensor) is paying
+    the offload's DRAM cost while keeping the model on the GPU anyway, which
+    looks exactly like an OOM the ZeRO-3 knobs cannot budge. Diagnostic only --
+    never raises.
+    """
+    try:
+        model = getattr(trainer, "model_wrapped", None) or getattr(trainer, "model", None)
+        if model is None:
+            return
+        logger.info(
+            f"[ZERO3PROBE] trainer.model={type(getattr(trainer, 'model', None)).__name__} "
+            f"model_wrapped={type(model).__name__}"
+        )
+
+        managed = partitioned = resident = 0
+        resident_elems = 0
+        for param in model.parameters():
+            ds_status = getattr(param, "ds_status", None)
+            if ds_status is None:
+                continue
+            managed += 1
+            # A partitioned param keeps only this rank's shard in ds_tensor and
+            # presents shape [0]; a gathered one is fully materialised.
+            if param.numel() == 0:
+                partitioned += 1
+            else:
+                resident += 1
+                resident_elems += param.numel()
+        logger.info(
+            f"[ZERO3PROBE] deepspeed-managed params={managed} partitioned={partitioned} "
+            f"resident={resident} resident_elems={resident_elems / 1e9:.2f}B "
+            f"(~{resident_elems * 2 / 1024**3:.2f} GiB at bf16)"
+        )
+        if managed == 0:
+            logger.warning(
+                "[ZERO3PROBE] No parameter carries ds_status: the DeepSpeed ZeRO-3 engine did "
+                "not wrap this model, so the whole model stays on the GPU regardless of the "
+                "offload settings"
+            )
+    except Exception as e:  # pragma: no cover - diagnostic must never break training
+        logger.info(f"[ZERO3PROBE] could not inspect partition state: {e}")
+
+
+# DeepSpeed swaps several parameters concurrently; with fewer buffers than this
+# `swap_in` asserts "Not enough buffers 0 for swapping 1".
+_MIN_NVME_PARAM_BUFFERS = 4
+
+
+def _largest_parameter_numel(model_name_or_path: str) -> int | None:
+    """
+    Element count of the biggest single tensor in a checkpoint, or None.
+
+    Reads only safetensors headers -- no tensor data -- so it is cheap even on a
+    70 GB checkpoint.
+    """
+    import math
+
+    from ..training.core.zero3_utils import _checkpoint_buffer_sources
+
+    try:
+        sources = _checkpoint_buffer_sources(model_name_or_path)
+        if not sources:
+            return None
+        from safetensors import safe_open
+
+        largest = 0
+        for path in set(sources.values()):
+            if path.suffix != ".safetensors":
+                return None  # header-only read is a safetensors feature
+            with safe_open(str(path), framework="pt") as f:
+                for key in f.keys():  # noqa: SIM118 - safe_open has no .keys() view
+                    largest = max(largest, math.prod(f.get_slice(key).get_shape()))
+        return largest or None
+    except Exception as e:
+        logger.debug(f"[TrainingWorker] Could not size the largest parameter: {e}")
+        return None
+
+
+def _fit_nvme_buffers(zero_opt: dict, model_name_or_path: str, pinned_budget_bytes: int) -> bool:
+    """
+    Grow NVMe swap buffers to fit the largest parameter, shrinking their count.
+
+    DeepSpeed swaps a partitioned parameter through a fixed-size buffer and
+    asserts if one does not fit::
+
+        AssertionError: More elements 2818572288 than buffer size 1000000000
+
+    which says nothing about which knob to turn. The shipped profiles carried
+    1e9/2e9, while gemma-4-E4B's per-layer embedding table alone is 2.82e9
+    elements -- so NVMe parameter offload could not load it at all.
+
+    The buffers are always page-locked regardless of ``pin_memory``, so raising
+    the size without lowering the count would reserve tens of GB of pinned DRAM.
+    Total pinned bytes are held under ``pinned_budget_bytes`` instead.
+    """
+    largest = _largest_parameter_numel(model_name_or_path)
+    if not largest:
+        return False
+
+    # Only offload_param takes buffer_size; DeepSpeedZeroOffloadOptimizerConfig
+    # forbids the key outright (pydantic extra_forbidden), so setting it there
+    # fails config validation before training starts.
+    sec = zero_opt.get("offload_param")
+    if not isinstance(sec, dict) or sec.get("device") != "nvme":
+        return False
+    current = int(sec.get("buffer_size") or 0)
+    if current >= largest:
+        return False
+
+    # fp32 staging: 4 bytes per element per buffer.
+    per_buffer = largest * 4
+    affordable = pinned_budget_bytes // per_buffer
+    # DeepSpeed swaps several parameters concurrently and asserts
+    # "Not enough buffers 0 for swapping 1" when none is free, so the floor is
+    # a hard requirement while the budget is only a guideline. The floor wins,
+    # loudly -- an over-budget run that works beats a tidy one that cannot start.
+    count = max(_MIN_NVME_PARAM_BUFFERS, min(int(sec.get("buffer_count") or 4), affordable))
+    sec["buffer_size"] = int(largest)
+    sec["buffer_count"] = int(count)
+    pinned_gib = count * per_buffer / 1024**3
+    logger.info(
+        f"[TrainingWorker] offload_param: buffer_size {current:,} -> {largest:,} "
+        f"(largest parameter in the checkpoint), buffer_count -> {count}, "
+        f"pinned DRAM ~{pinned_gib:.1f} GiB"
+    )
+    if count > affordable:
+        logger.warning(
+            f"[TrainingWorker] NVMe parameter offload needs ~{pinned_gib:.1f} GiB of pinned "
+            f"DRAM for this checkpoint, over the {pinned_budget_bytes / 1024**3:.0f} GiB budget, "
+            f"because its largest tensor alone is {largest:,} elements. Raise "
+            "DEEPSPEED_NVME_PINNED_BUDGET_GB, or offload parameters to CPU instead "
+            "(zero3_offload_disk_cpu keeps params in DRAM and swaps the optimizer)."
+        )
+    return True
 
 
 def _resolve_deepspeed_config(training_config: TrainingConfig) -> str | None:
@@ -131,7 +304,10 @@ def _resolve_deepspeed_config(training_config: TrainingConfig) -> str | None:
                 "profile names must not contain path separators or '..'"
             )
 
-        base = Path("service/configs/deepspeed")
+        # Anchored to the project root, not the cwd: started from anywhere else
+        # this lookup missed, warned, and returned None -- silently disabling
+        # ZeRO-3 for a run that explicitly asked for offload.
+        base = PROJECT_ROOT / "service" / "configs" / "deepspeed"
         cfg_path = base / f"{profile}.json"
         # Resolve and verify the path stays within the expected directory
         resolved = cfg_path.resolve()
@@ -141,58 +317,63 @@ def _resolve_deepspeed_config(training_config: TrainingConfig) -> str | None:
                 f"[TrainingWorker] DeepSpeed profile path '{resolved}' escapes the allowed directory"
             )
         if not resolved.is_file():
-            logger.warning(
-                f"[TrainingWorker] DeepSpeed profile '{profile}' not found at {cfg_path}"
+            # Returning None here used to mean "train without DeepSpeed" -- the
+            # caller asked for offload and silently got the whole model on the
+            # GPU, then lost the adapter when the saver took the ZeRO-3 branch.
+            available = sorted(p.stem for p in base.glob("*.json"))
+            raise ValueError(
+                f"DeepSpeed profile '{profile}' not found at {cfg_path}. "
+                f"Available profiles: {', '.join(available) or '(none)'}"
             )
-            return None
 
         logger.info(f"[TrainingWorker] Using DeepSpeed profile '{profile}': {cfg_path}")
         config_path = str(cfg_path)
 
-    # 3) Override nvme path if offload_folder is provided
+    # 3) Resolve every nvme_path: the job's offload_folder wins, else the
+    #    DEEPSPEED_NVME_DIR setting. Profiles ship the "AUTO" sentinel rather
+    #    than a real path -- they used to hardcode one machine's mount points,
+    #    which went stale and made every nvme profile crash at zero.Init.
     offload_folder = getattr(training_config, "offload_folder", None)
-    if offload_folder:
-        try:
-            with open(config_path) as f:
-                ds_config = json.load(f)
+    nvme_root = Path(offload_folder or DEEPSPEED_NVME_DIR)
+    # `offload_folder` defaults to the RELATIVE './deepspeed_offload', so
+    # resolving against the cwd would put gigabytes of offload wherever the
+    # worker happened to be started -- and DeepSpeed clears that directory.
+    # Anchor anything relative to the project root instead.
+    if not nvme_root.is_absolute():
+        nvme_root = PROJECT_ROOT / nvme_root
+    nvme_target = str(nvme_root.resolve())
 
-            modified = False
-            abs_offload_folder = str(Path(offload_folder).resolve())
+    with open(config_path) as f:
+        ds_config = json.load(f)
 
-            if "zero_optimization" in ds_config:
-                zero_opt = ds_config["zero_optimization"]
+    modified = False
+    zero_opt = ds_config.get("zero_optimization", {})
+    for section in ("offload_optimizer", "offload_param"):
+        sec = zero_opt.get(section)
+        if isinstance(sec, dict) and sec.get("device") == "nvme":
+            current = sec.get("nvme_path")
+            # Substitute the sentinel, a missing value, or a caller-supplied
+            # offload_folder. A profile carrying a real path the operator wrote
+            # themselves is respected unless offload_folder overrides it.
+            if current in (None, "", DEEPSPEED_NVME_PATH_SENTINEL) or offload_folder:
+                sec["nvme_path"] = nvme_target
+                modified = True
 
-                # Update optimizer offload
-                if (
-                    "offload_optimizer" in zero_opt
-                    and zero_opt["offload_optimizer"].get("device") == "nvme"
-                ):
-                    zero_opt["offload_optimizer"]["nvme_path"] = abs_offload_folder
-                    modified = True
+    # Swap buffers must fit the biggest single parameter, or DeepSpeed asserts
+    # deep inside the swapper with a message that names neither the model nor
+    # the setting to change.
+    if _fit_nvme_buffers(zero_opt, training_config.model_name, DEEPSPEED_NVME_PINNED_BUDGET_BYTES):
+        modified = True
 
-                # Update parameter offload
-                if (
-                    "offload_param" in zero_opt
-                    and zero_opt["offload_param"].get("device") == "nvme"
-                ):
-                    zero_opt["offload_param"]["nvme_path"] = abs_offload_folder
-                    modified = True
-
-            if modified:
-                # Create temp config file
-                fd, temp_path = tempfile.mkstemp(
-                    suffix=".json", prefix="ds_config_override_", text=True
-                )
-                with os.fdopen(fd, "w") as f:
-                    json.dump(ds_config, f, indent=2)
-
-                logger.info(
-                    f"[TrainingWorker] Overridden DeepSpeed config saved to {temp_path} with nvme_path={abs_offload_folder}"
-                )
-                config_path = temp_path
-
-        except Exception as e:
-            logger.warning(f"[TrainingWorker] Failed to override DeepSpeed config: {e}")
+    if modified:
+        fd, temp_path = tempfile.mkstemp(suffix=".json", prefix="ds_config_override_", text=True)
+        with os.fdopen(fd, "w") as f:
+            json.dump(ds_config, f, indent=2)
+        logger.info(
+            f"[TrainingWorker] DeepSpeed nvme_path resolved to {nvme_target}; "
+            f"override written to {temp_path}"
+        )
+        config_path = temp_path
 
     # Check and clear nvme offload paths
     try:
@@ -253,15 +434,27 @@ def _resolve_deepspeed_config(training_config: TrainingConfig) -> str | None:
                         f"[TrainingWorker] Failed to clear nvme directory {nvme_path}: {clean_err}"
                     )
             elif not nvme_dir.exists():
-                # Directory missing: create it
+                # Directory missing: create it. A failure here used to be a
+                # warning, and DeepSpeed then repeated the same mkdir unguarded
+                # inside partitioned_param_swapper -- so the run died with a
+                # bare OSError from library internals instead of saying which
+                # directory it could not create, or that offload_folder /
+                # DEEPSPEED_NVME_DIR is how you point it somewhere writable.
                 try:
                     nvme_dir.mkdir(parents=True, exist_ok=True)
                     logger.info(f"[TrainingWorker] Created nvme offload directory: {nvme_path}")
-                except Exception as create_err:
-                    logger.warning(
-                        f"[TrainingWorker] Failed to create nvme directory {nvme_path}: {create_err}"
-                    )
+                except OSError as create_err:
+                    raise ValueError(
+                        f"Cannot create the NVMe offload directory '{nvme_dir}' ({create_err}). "
+                        "Set 'offload_folder' on the training job, or the DEEPSPEED_NVME_DIR "
+                        "environment variable, to a writable location on a fast disk."
+                    ) from create_err
 
+    except ValueError:
+        # An unusable offload directory is deliberate and actionable -- it must
+        # not be swallowed by the catch-all below, which is there for
+        # incidental failures like a permission hiccup while clearing.
+        raise
     except Exception as e:
         logger.warning(f"[TrainingWorker] Failed to process nvme paths from config: {e}")
 
@@ -387,8 +580,10 @@ def _convert_training_output_to_q4_k_m(
     (the vision encoder + projector). llama.cpp represents a vision-language
     model as two files -- the quantized language model and the mmproj -- so
     emitting only the language GGUF would leave the fine-tune unable to see
-    images. The mmproj comes from the base model because LoRA only adapts the
-    language tower, leaving the vision half unchanged.
+    images. Under the default ``multimodal_scope`` the mmproj comes from the
+    base model, whose vision half the run left unchanged; a run that trained the
+    bridge gets it from the merged weights instead, since that is the only place
+    the trained projector exists.
     """
     output_dir = str(training_config.output_dir)
     logger.info(
@@ -416,6 +611,63 @@ def _convert_training_output_to_q4_k_m(
 _DS_STATUS_PREFIX = "__STATUS__:"
 # Terminal states that are also written to Redis as crash-safe backup.
 _DS_TERMINAL_STATES = frozenset({"saved", "error"})
+
+
+def extract_status_payloads(line: str) -> tuple[list[dict], str]:
+    """
+    Pull every ``__STATUS__:`` payload out of a line, wherever it sits in it.
+
+    Matching with ``startswith`` loses them. tqdm draws its progress bar on
+    stderr with a carriage return and no newline, and the subprocess is read
+    with stderr merged into stdout, so one ``\\n``-terminated read can hold a
+    half-drawn bar and then the status marker::
+
+        3%|▎ | 1/40 [00:12<08:01]__STATUS__:{"status": "running", ...}
+
+    The status is intact; it just is not at position zero. That is why multi-GPU
+    runs stopped reporting loss and accuracy while single-GPU runs, which have
+    no launcher interleaving their output, kept working.
+
+    Returns the decoded payloads in the order they appear, plus whatever text
+    surrounded them, so the caller can still log the progress bar.
+
+    A payload is always complete within one read: it is written with ``print``,
+    so it ends at the newline the reader splits on. Length is found by decoding
+    rather than by scanning for a brace, which a value containing ``}`` would
+    defeat.
+    """
+    decoder = json.JSONDecoder()
+    payloads: list[dict] = []
+    leftovers: list[str] = []
+    pos = 0
+
+    while True:
+        marker = line.find(_DS_STATUS_PREFIX, pos)
+        if marker == -1:
+            leftovers.append(line[pos:])
+            break
+
+        leftovers.append(line[pos:marker])
+        start = marker + len(_DS_STATUS_PREFIX)
+        while start < len(line) and line[start].isspace():
+            start += 1
+
+        try:
+            obj, end = decoder.raw_decode(line, start)
+        except ValueError:
+            # The marker is there but what follows is not JSON. Keep it as text
+            # and carry on: a later marker on the same line may still be good.
+            leftovers.append(line[marker:start])
+            pos = start
+            continue
+
+        if isinstance(obj, dict):
+            payloads.append(obj)
+        else:
+            leftovers.append(line[marker:end])
+        pos = end
+
+    return payloads, "".join(leftovers).strip()
 
 
 def _terminate_deepspeed_tree(proc: subprocess.Popen | None, timeout: float = 5.0) -> None:
@@ -557,11 +809,19 @@ def _run_deepspeed_subprocess(
             text=True,
             bufsize=1,
             env=env,
+            # Own process group, so the whole launcher+ranks tree can be killed
+            # in one signal. Without it, terminating the worker leaves the
+            # deepspeed launcher and every rank alive and reparented, each still
+            # holding its GPU's VRAM -- exactly the leak _terminate_deepspeed_tree
+            # exists to prevent, but which never ran because the worker's default
+            # SIGTERM handler kills the interpreter without unwinding `finally`.
+            start_new_session=True,
         )
 
         # Mutable containers shared with the stdout thread.
         _received_terminal: list[bool] = [False]
         _error_detail: list[dict | None] = [None]
+        _saved_payload: list[dict | None] = [None]
 
         def _drain_stdout() -> None:
             """Parse stdout lines; route status to status_q, log everything else."""
@@ -570,9 +830,13 @@ def _run_deepspeed_subprocess(
                 stripped = line.rstrip()
                 if not stripped:
                     continue
-                if stripped.startswith(_DS_STATUS_PREFIX):
+                payloads, surrounding = extract_status_payloads(stripped)
+                if surrounding:
+                    # Keep the last carriage-return segment: a tqdm bar accumulates
+                    # its whole history in one read, and only the newest is useful.
+                    logger.info(f"[DeepSpeed] {surrounding.rsplit(chr(13), 1)[-1]}")
+                for payload in payloads:
                     try:
-                        payload = _json.loads(stripped[len(_DS_STATUS_PREFIX) :])
                         etype = payload.get("type")
                         if etype in ("stage", "resource", "metric", "info"):
                             # Structured log event from the subprocess (rank 0).
@@ -580,7 +844,11 @@ def _run_deepspeed_subprocess(
                             if writer is not None:
                                 try:
                                     if etype == "stage":
-                                        writer.stage(payload.get("phase"), payload.get("msg"))
+                                        # A stage event without a phase is malformed;
+                                        # `stage` keys its label table on it.
+                                        _phase = payload.get("phase")
+                                        if isinstance(_phase, str):
+                                            writer.stage(_phase, payload.get("msg"))
                                     elif etype == "resource":
                                         writer.resource(
                                             payload.get("data") or {}, payload.get("phase")
@@ -607,16 +875,36 @@ def _run_deepspeed_subprocess(
                         if s == "error":
                             # Store error detail; raise from main thread to avoid
                             # double-writing "error" to the manager.
-                            _error_detail[0] = payload
+                            #
+                            # Every rank reports errors now, and one rank failing
+                            # usually knocks the others over (collective timeout,
+                            # broken pipe). Keep the FIRST one: it is the cause,
+                            # the rest are consequences.
+                            if _error_detail[0] is None:
+                                _error_detail[0] = payload
+                            else:
+                                logger.info(
+                                    f"[DeepSpeed] Additional error from rank "
+                                    f"{payload.get('rank', '?')} (keeping the first): "
+                                    f"{str(payload.get('error'))[:120]}"
+                                )
+                            _received_terminal[0] = True
+                        elif s == "saved":
+                            # Not forwarded: "saved" means the weights are on disk,
+                            # but GGUF conversion still has to run in this process.
+                            # Passing it on ended the job in the UI while conversion
+                            # was mid-flight. The parent sends the terminal status
+                            # once conversion has actually resolved.
+                            _saved_payload[0] = payload
                             _received_terminal[0] = True
                         else:
                             status_q.put(payload)
                             if s in _DS_TERMINAL_STATES:
                                 _received_terminal[0] = True
                     except Exception:
-                        logger.warning(f"[DeepSpeed] Malformed status line: {stripped[:200]}")
-                else:
-                    logger.info(f"[DeepSpeed] {stripped}")
+                        logger.warning(
+                            f"[DeepSpeed] Malformed status payload: {str(payload)[:200]}"
+                        )
 
         stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
         stdout_thread.start()
@@ -638,7 +926,9 @@ def _run_deepspeed_subprocess(
                         if msg.get("status") == "error":
                             _error_detail[0] = msg
                         else:
-                            status_q.put(msg)
+                            # Same reasoning as the stdout path: "saved" is not the
+                            # end of the job, so it is held rather than forwarded.
+                            _saved_payload[0] = msg
                         _received_terminal[0] = True
                         logger.info(
                             f"[TrainingWorker] Recovered terminal state from Redis: {msg.get('status')}"
@@ -651,9 +941,14 @@ def _run_deepspeed_subprocess(
         detail = _error_detail[0]
 
         if rc != 0 or detail:
+            # `detail` now arrives from whichever rank actually failed, not just
+            # rank 0, so an OOM on rank 3 keeps its traceback and is_oom flag
+            # instead of collapsing into "exited with return code N".
+            rank = detail.get("rank") if detail else None
+            where = f" (rank {rank})" if rank is not None else ""
             raise _DeepSpeedTrainingError(
-                error=detail.get("error", f"deepspeed exited with return code {rc}")
-                if detail
+                error=f"{detail['error']}{where}"
+                if detail and detail.get("error")
                 else f"deepspeed exited with return code {rc}",
                 subprocess_traceback=detail.get("traceback", "") if detail else "",
                 is_oom=detail.get("is_oom", False) if detail else False,
@@ -697,6 +992,25 @@ def _training_worker_process(
         - On OOM/CUDA errors is_oom=true; the worker may exit right away to release VRAM.
         - progress messages do not change current_status; they only carry the latest metrics.
     """
+    # Turn SIGTERM into a normal exception so `finally` blocks run.
+    #
+    # stop_training()/cleanup() terminate this process with SIGTERM, whose
+    # default handler kills the interpreter outright. Every cleanup path is in a
+    # `finally` -- including `_terminate_deepspeed_tree(proc)`, which is the only
+    # thing that stops the multi-GPU launcher and its ranks. Killed by the
+    # default handler, that never ran: cancelling a multi-GPU job left N ranks
+    # alive and reparented, each still holding its GPU's VRAM.
+    import signal
+
+    def _sigterm_unwinds(signum: int, _frame: object) -> None:
+        logger.info(f"[TrainingWorker] Received signal {signum}; unwinding cleanup handlers")
+        raise KeyboardInterrupt(f"terminated by signal {signum}")
+
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_unwinds)
+    except (ValueError, OSError) as e:  # not on the main thread of this process
+        logger.warning(f"[TrainingWorker] Could not install SIGTERM handler: {e}")
+
     # Suppress "The current process just got forked..." warning from tokenizers
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -708,7 +1022,7 @@ def _training_worker_process(
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     # Skip DeepSpeed's CUDA version mismatch check.
-    # torch 2.11.0+cu130 bundles CUDA 13.0 internally, but the system-level nvcc may report
+    # torch 2.13.0+cu130 bundles CUDA 13.0 internally, but the system-level nvcc may report
     # a different version (e.g. 12.0). DeepSpeed's JIT builder compares the two and refuses
     # to compile ops like CPUAdam when they differ. CPUAdam is a CPU-only op and does not
     # actually need nvcc, so skipping this check is safe.
@@ -754,22 +1068,29 @@ def _training_worker_process(
                 processing_class = None
                 writer = None
                 _mem_thread = None
+                _mem_agg = None
                 _mem_stop = None
                 try:
                     worker_session_id = cast(str, cmd.get("session_id"))
                     cfg_dict = cmd.get("config", {})
                     training_config = TrainingConfig(**cfg_dict)
 
-                    # Init Redis in worker for passive logging (no API required)
+                    # Init Redis in worker for passive logging (no API required).
+                    # None means none was configured, which is ordinary here: every
+                    # write through this client is already guarded, and the job's own
+                    # log is the source of truth. Only a configured Redis that will
+                    # not answer is worth a warning.
                     if redis and worker_session_id:
-                        try:
-                            redis_client = _create_redis_client()
-                            # redis truthy -> client set
-                            assert redis_client is not None  # noqa: S101
-                            redis_client.ping()
-                        except Exception as e:
-                            logger.warning(f"[TrainingWorker] Failed to connect to Redis: {e}")
-                            redis_client = None
+                        redis_client = _create_redis_client()
+                        if redis_client is not None:
+                            try:
+                                redis_client.ping()
+                            except Exception as e:
+                                logger.warning(
+                                    "[TrainingWorker] Redis is configured but did not answer: %s",
+                                    e,
+                                )
+                                redis_client = None
 
                     # Dedicated per-job structured log (events.jsonl + training.log + meta.json):
                     # the single source of truth for SSE and persistence, replacing the previous
@@ -884,9 +1205,37 @@ def _training_worker_process(
                         ) -> None:
                             _emit_stage(_conv_phase.get(step, Phase.CONVERTING_GGUF), step)
 
-                        conversion_result = _convert_training_output_to_q4_k_m(
-                            training_config, status_callback=_cb_multi
-                        )
+                        try:
+                            conversion_result = _convert_training_output_to_q4_k_m(
+                                training_config, status_callback=_cb_multi
+                            )
+                        except Exception as conv_err:
+                            # The trained weights are already on disk -- only the GGUF
+                            # export failed. Say so, and say what to run, because the
+                            # alternative a user reaches for is training it all again.
+                            logger.exception(
+                                f"[TrainingWorker] GGUF conversion failed after a successful "
+                                f"multi-GPU run: {conv_err}"
+                            )
+                            _conv_error = (
+                                f"Training finished and the weights were saved to "
+                                f"{training_config.output_dir}, but GGUF conversion failed: "
+                                f"{conv_err}. Do not retrain -- convert the saved output with "
+                                f"POST /config/models/convert."
+                            )
+                            import traceback
+
+                            writer.error(_conv_error, traceback=traceback.format_exc())
+                            # finalize() is what writes the terminal status and
+                            # finished_at into meta.json; writer.error() only
+                            # updates the live Redis key, and close() in the
+                            # `finally` just closes handles. Without this the
+                            # durable record keeps saying the job is running long
+                            # after Redis has expired -- which is what every other
+                            # terminal path here avoids by pairing the two calls.
+                            writer.finalize(Phase.ERROR)
+                            status_q.put({"status": "error", "error": _conv_error})
+                            return
                         _emit_stage(Phase.COMPLETED)
                         _completed_result = {
                             "gguf_path": conversion_result.get("quantized_output_path"),
@@ -918,71 +1267,40 @@ def _training_worker_process(
                             pass
 
                     _sample_interval = float(os.getenv("TRAINING_MEM_SAMPLE_INTERVAL", "5.0"))
+                    # The aggregator reduces the sample stream to avg/peak per
+                    # resource. Without it the events file held hundreds of
+                    # point-in-time numbers and no answer to "how much did this
+                    # run use", which is the only form anyone actually reads.
+                    _mem_agg = MemoryAggregator()
                     _mem_thread, _mem_stop = start_memory_sampler(
-                        interval=_sample_interval, on_sample=_on_mem_sample
+                        interval=_sample_interval,
+                        on_sample=_on_mem_sample,
+                        offload_path=getattr(training_config, "offload_folder", None),
+                        aggregator=_mem_agg,
                     )
 
-                    # 1. Prepare Strategy (needs config only)
-                    strategy = StrategyFactory.get_strategy(training_config, ds_config)
-
-                    # 1.1 Initialize TrainingArguments early (Crucial for DeepSpeed/DeviceMap)
-                    training_args = strategy.get_training_args()
-
-                    # 2. Load Tokenizer (plus processor, for multimodal checkpoints)
-                    _emit_stage(Phase.LOADING_TOKENIZER)
-                    model_loader = ModelLoader(training_config, hf_token)
-                    tokenizer = model_loader.load_tokenizer()
-                    processor = model_loader.load_processor()
-
-                    # 3. Load Dataset
-                    _emit_stage(Phase.LOADING_DATASET)
-                    dataset = load_training_dataset(training_config.dataset_path)
-
-                    # 3.05 Hold out a test split before anything else touches the
-                    # data, so evaluation sees examples training never trains on.
-                    eval_dataset = None
-                    eval_ratio = getattr(training_config, "eval_split_ratio", None)
-                    if eval_ratio:
-                        dataset, eval_dataset = split_train_eval(
-                            dataset, eval_ratio, getattr(training_config, "eval_split_seed", 42)
-                        )
-                        if eval_dataset is not None:
-                            writer.info(
-                                "held-out test split created",
-                                {"train_size": len(dataset), "eval_size": len(eval_dataset)},
-                            )
-
-                    # 3.1 Decide what the trainer processes examples with: the
-                    # processor for image datasets, the tokenizer otherwise.
-                    processing_class = select_processing_class(
-                        dataset, tokenizer, processor, training_config
+                    # 1-5. The shared setup sequence, identical to the one the
+                    # multi-GPU subprocess runs. Kept in one place because the
+                    # two copies drifted once already: image training and the
+                    # eval split silently never reached the multi-GPU path.
+                    components = build_training_components(
+                        training_config,
+                        hf_token,
+                        ds_config,
+                        on_stage=_emit_stage,
+                        on_note=writer.info,
                     )
-                    # Image datasets need the full multimodal model (vision tower),
-                    # which for some architectures differs from the text-training
-                    # load class -- switch the loader over before load_model().
-                    if processing_class is processor:
-                        model_loader.enable_image_training()
-
-                    # 4. Preprocess Dataset (Tokenization if needed)
-                    # This happens BEFORE model loading to save memory.
-                    # Uses the tokenizer, not the processor: only the Causal LM path
-                    # preprocesses, and images are collated later by TRL. The eval
-                    # split goes through the same preprocessing to stay compatible.
-                    dataset = strategy.preprocess_dataset(dataset, tokenizer)
-                    if eval_dataset is not None:
-                        eval_dataset = strategy.preprocess_dataset(eval_dataset, tokenizer)
-
-                    # 5. Load Model
-                    _emit_stage(Phase.LOADING_MODEL)
-                    model = model_loader.load_model()
-                    try:
-                        from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
-
-                        logger.info(
-                            f"[MEMPROBE] is_deepspeed_zero3_enabled={is_deepspeed_zero3_enabled()}"
-                        )
-                    except Exception as _e:
-                        logger.info(f"[MEMPROBE] could not query is_deepspeed_zero3_enabled: {_e}")
+                    strategy = components.strategy
+                    training_args = components.training_args
+                    model = components.model
+                    processing_class = components.processing_class
+                    dataset = components.dataset
+                    eval_dataset = components.eval_dataset
+                    # Rebind these too: _cleanup_training_resources releases
+                    # whatever these locals hold at the end of the job, and
+                    # leaving them at their initial None leaks the references.
+                    tokenizer = components.tokenizer
+                    processor = components.processor
                     log_mem("after_model_load")
 
                     # 6. Prepare Trainer
@@ -991,6 +1309,7 @@ def _training_worker_process(
                         model, processing_class, dataset, training_args, eval_dataset=eval_dataset
                     )
                     log_mem("after_trainer_prepare")
+                    _log_zero3_partition_state(trainer)
 
                     # --- training with progress callbacks ---------------------------------
 
@@ -1140,6 +1459,34 @@ def _training_worker_process(
                             # Evaluation failure must not lose a trained model.
                             logger.warning(f"[TrainingWorker] Final evaluation failed: {_eval_err}")
                             writer.info("final evaluation skipped", {"reason": str(_eval_err)})
+
+                    # 6.5 Generation check. Before the save, while the trained
+                    # model is still in memory. eval_loss uses the same collator
+                    # and the same completion_only_loss as training, so it
+                    # cannot detect a model that converged on a degenerate rule;
+                    # only asking it a question can. Never fails the run -- the
+                    # adapter is still worth saving, the verdict is a report.
+                    _check_path = getattr(training_config, "generation_check_path", None)
+                    if _check_path:
+                        try:
+                            from .core.generation_check import load_probes, run_generation_check
+
+                            _probes = load_probes(_check_path)
+                            _verdict = run_generation_check(
+                                trainer.model, processing_class, _probes
+                            )
+                            writer.info("generation check", _verdict)
+                            if _verdict["failed"]:
+                                logger.warning(
+                                    f"[TrainingWorker] Generation check: "
+                                    f"{_verdict['passed']}/{_verdict['total']} probes passed -- "
+                                    "the loss curve alone would not have shown this"
+                                )
+                        except Exception as _check_err:
+                            logger.warning(
+                                f"[TrainingWorker] Generation check failed: {_check_err}"
+                            )
+                            writer.info("generation check skipped", {"reason": str(_check_err)})
 
                     # 7. Save Results
                     _emit_stage(Phase.SAVING)
@@ -1298,6 +1645,16 @@ def _training_worker_process(
                                 _mem_thread.join(timeout=5.0)
                         except Exception:
                             pass
+                    # Record avg/peak GPU/DRAM/SSD for the run. Emitted on every
+                    # exit path, including OOM -- a failed run's peak is the
+                    # single most useful number it can leave behind.
+                    if _mem_agg is not None and _mem_agg.samples:
+                        try:
+                            logger.info(f"[TrainingWorker] {_mem_agg.format_line()}")
+                            if writer is not None:
+                                writer.info("memory usage summary", _mem_agg.summary())
+                        except Exception:
+                            pass
                     if writer is not None:
                         try:
                             writer.close()
@@ -1422,16 +1779,23 @@ class TrainingProcessManager:
         # In-memory history fallback
         self.history: dict[str, dict[str, Any]] = {}
 
-        # Redis connection
+        # Redis connection, when one is configured. Not configured and cannot connect
+        # are different things and used to log the same way: with no Redis configured
+        # the client is None, the assert below turned that into an exception, and the
+        # handler reported "Failed to connect to Redis:" with nothing after the colon.
+        # A warning about a failure that did not happen is worse than silence -- it is
+        # the first thing someone reads when they go looking for a real problem.
         self.redis_client = None
         if redis:
-            try:
-                self.redis_client = _create_redis_client()
-                assert self.redis_client is not None  # redis truthy -> client set  # noqa: S101
-                self.redis_client.ping()
-            except Exception as e:
-                logger.warning(f"Failed to connect to Redis: {e}")
-                self.redis_client = None
+            client = _create_redis_client()
+            if client is None:
+                logger.info("Training history: in-memory (no Redis configured)")
+            else:
+                try:
+                    client.ping()
+                    self.redis_client = client
+                except Exception as e:
+                    logger.warning("Redis is configured but did not answer: %s", e)
 
         # Format helpers
         self._key_metrics = lambda sid: f"training:history:{sid}:metrics"

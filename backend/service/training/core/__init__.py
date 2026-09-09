@@ -8,9 +8,10 @@ from .job_logger import (
     read_events,
     read_meta,
 )
-from .mem_probe import log_mem, probe_snapshot, start_memory_sampler
+from .mem_probe import MemoryAggregator, log_mem, probe_snapshot, start_memory_sampler
 from .model_loader import ModelLoader, dataset_has_images, select_processing_class
 from .model_saver import save_training_results
+from .pipeline import TrainingComponents, build_training_components
 from .strategies import CausalLMStrategy, SFTStrategy, StrategyFactory, TrainingStrategy
 from .training_events import PHASE_LABELS, TERMINAL_PHASES, EventType, Phase, phase_to_status
 
@@ -18,6 +19,8 @@ __all__ = [
     "ModelLoader",
     "dataset_has_images",
     "select_processing_class",
+    "build_training_components",
+    "TrainingComponents",
     "load_training_dataset",
     "split_train_eval",
     "StrategyFactory",
@@ -28,6 +31,7 @@ __all__ = [
     "log_mem",
     "start_memory_sampler",
     "probe_snapshot",
+    "MemoryAggregator",
     "Phase",
     "EventType",
     "PHASE_LABELS",

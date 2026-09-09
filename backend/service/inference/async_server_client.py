@@ -17,8 +17,10 @@ in-process and still uses the worker + queue + dispatcher demux path.
 """
 
 import asyncio
+import json
 import re
 import time
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -27,6 +29,7 @@ from openai import APIError, AsyncOpenAI
 from ..config_models import InferenceConfig, InferenceEngine
 from ..settings import (
     LLAMA_SERVER_API_KEY,
+    MAX_OUTPUT_TOKENS_CAP,
     VLLM_CLIENT_HOST,
     VLLM_OPENAI_API_KEY,
     VLLM_PORT,
@@ -103,6 +106,39 @@ def client_for_config(config: InferenceConfig, *, model: str | None = None) -> "
     )
 
 
+# OpenAI's "developer" role carries the same meaning as "system" -- it exists
+# because reasoning models on the real API reject a literal "system" message, not
+# because the instructions are semantically different. Clients built against that
+# convention (pi-agent's coding-agent harness included) send "developer" as the
+# very first message. Local chat templates were never taught that role: Qwen's
+# (confirmed against QuantTrio/Qwen3.5-4B-AWQ under vLLM 0.27.1, but this is a
+# generic Jinja pattern, not Qwen-specific) walks an explicit
+# system/user/assistant/tool chain and raises "Unexpected message role." on
+# anything else, which the OpenAI-compatible server surfaces as a 400 the caller
+# cannot work around. Remapping here means every server engine gets the fix once,
+# rather than each chat template needing to special-case a role it will never see
+# from a real model-authored conversation.
+_ROLE_ALIASES = {"developer": "system"}
+
+
+def normalize_message_roles(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remap client-side role names a local chat template would reject (see above)."""
+    out = messages
+    for idx, msg in enumerate(messages):
+        # A missing or non-string role has no alias to look up, and dict.get would reject
+        # None as a key on a str-keyed mapping.
+        role = msg.get("role")
+        if not isinstance(role, str):
+            continue
+        alias = _ROLE_ALIASES.get(role)
+        if alias is None:
+            continue
+        if out is messages:
+            out = list(messages)
+        out[idx] = {**msg, "role": alias}
+    return out
+
+
 _MEDIA_PART_TYPES = {
     "image_url",
     "image",
@@ -157,6 +193,56 @@ def reorder_multimodal_content(
                 out = list(messages)
             out[idx] = {**msg, "content": media_parts + text_parts + other_parts}
     return out
+
+
+def _merge_images(messages: list[dict[str, Any]], images: Any = None) -> list[dict[str, Any]]:  # noqa: ANN401 - caller-supplied image list of unknown shape
+    """
+    Attach ``images`` to the last user message as OpenAI multi-part content.
+
+    agenerate/agenerate_stream take an ``images`` argument and pass it down in params,
+    but nothing downstream ever read it, so every caller that sent an image got a
+    text-only answer with no indication the image had been dropped. A vision model
+    describing a picture it was never shown is worse than an error.
+
+    Images belong on the last *user* turn — the one being answered. Appending a
+    separate message would break the alternation llama.cpp's chat templates expect, and
+    attaching to the tail regardless of role could hang them off an assistant turn.
+
+    Entries may be data: URIs or plain URLs; both are passed through unchanged, since
+    that is exactly what the OpenAI image_url part carries. A message whose content is
+    already multi-part keeps its parts and gains the images. Ordering relative to text
+    is left to reorder_multimodal_content, which the caller runs next.
+    """
+    if not images:
+        return messages
+
+    urls = [str(u) for u in images if u]
+    if not urls:
+        return messages
+
+    index = next(
+        (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), None
+    )
+    if index is None:
+        # No user turn to attach to. Dropping the images silently is what this fix
+        # exists to stop, so carry them in one of their own.
+        messages = [*messages, {"role": "user", "content": []}]
+        index = len(messages) - 1
+
+    target = dict(messages[index])
+    content = target.get("content")
+    parts: list[Any] = []
+    if isinstance(content, list):
+        parts = list(content)
+    elif content:
+        parts = [{"type": "text", "text": str(content)}]
+
+    parts.extend({"type": "image_url", "image_url": {"url": url}} for url in urls)
+    target["content"] = parts
+
+    merged = list(messages)
+    merged[index] = target
+    return merged
 
 
 def _is_qwen_model(model_name: Any) -> bool:  # noqa: ANN401 - accepts model id of any incoming type
@@ -285,24 +371,40 @@ def build_chat_payload(
     Map internal generation params to an OpenAI chat-completions payload.
 
     Mirrors the dev engine payload builders so the async path is behaviourally
-    identical to the old queue path: same normalization, multimodal reorder,
-    Qwen thinking tag, and engine-specific repetition-penalty naming
+    identical to the old queue path: role normalization, image merge, multimodal
+    reorder, Qwen thinking tag, and engine-specific repetition-penalty naming
     (llama.cpp wants ``repeat_penalty``; vLLM wants ``repetition_penalty``).
     """
     params = params or {}
     enable_thinking = params.get("enable_thinking")
 
+    messages = normalize_message_roles(messages)
+    messages = _merge_images(messages, params.get("images"))
     messages = reorder_multimodal_content(messages)
     messages = _apply_thinking_tag(messages, enable_thinking, model, model_path)
 
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "max_tokens": max(1, int(params.get("max_new_tokens", 512))),
         "temperature": max(0.0, min(float(params.get("temperature", 0.7)), 2.0)),
         "top_p": max(0.0, min(float(params.get("top_p", 0.9)), 1.0)),
         "stream": stream,
     }
+    # No cap asked for means "until EOS or the window is full" -- the OpenAI
+    # default, and what llama.cpp does with no n_predict. Substituting a number
+    # truncated every caller that did not name one: at 512 tokens a reasoning
+    # model can spend the whole budget thinking and return nothing at all.
+    #
+    # MAX_OUTPUT_TOKENS_CAP is the operator's blanket ceiling and is clamped on
+    # top, including for a caller that named nothing -- that is a limit someone
+    # deliberately configured, not a figure invented on their behalf. Unset (the
+    # default) leaves the served context window as the only bound.
+    cap = params.get("max_new_tokens")
+    cap = cap if isinstance(cap, int) and cap > 0 else None
+    if MAX_OUTPUT_TOKENS_CAP is not None:
+        cap = MAX_OUTPUT_TOKENS_CAP if cap is None else min(cap, MAX_OUTPUT_TOKENS_CAP)
+    if cap is not None:
+        payload["max_tokens"] = cap
 
     tools = params.get("tools")
     if tools:
@@ -320,6 +422,16 @@ def build_chat_payload(
         extra_body["repeat_penalty"] = (
             float(repetition_penalty) if repetition_penalty is not None else 1.1
         )
+        # Reuse the KV cache for the shared prefix of a multi-turn conversation.
+        # Without it llama-server reprocesses the whole history on every turn, which
+        # grows with the conversation and shows up as seconds of added TTFT — the
+        # queue path forced it on and the async path silently did not.
+        #
+        # dev also pinned id_slot so a conversation kept landing on the same slot.
+        # That needs the engine's slot bookkeeping, which this client has no access
+        # to; without it llama-server still matches the longest cached prefix across
+        # slots, so this recovers most of the benefit and none of the risk.
+        extra_body["cache_prompt"] = True
     elif repetition_penalty is not None:
         extra_body["repetition_penalty"] = float(repetition_penalty)
 
@@ -395,8 +507,324 @@ def _serialize_tool_calls(tool_calls: Any) -> list[dict[str, Any]] | None:  # no
     return out or None
 
 
+# Some models do not reliably follow the exact tag their own chat template
+# documents for a tool call. Observed from Qwen2.5-Coder under vLLM 0.27.1 with
+# --enable-auto-tool-choice --tool-call-parser hermes (both AWQ and fp8, so this
+# is not a quantization artifact): the template says <tool_call>...</tool_call>,
+# but generation instead produced <tools>{...}</tools> (confusing it with the
+# *listing* tag from the same system prompt), a fenced ```xml <response>{...}
+# </response>``` block, or -- seen live against a real pi-agent request -- a
+# plain prose explanation ("You can use the bash function...") followed by a
+# bare ```json {...} ``` fence with no wrapper tag at all. hermes (and every
+# other bundled vLLM tool parser) then finds nothing and leaves the whole thing
+# in `content` as plain text, which a client that only understands tool_calls
+# displays as prose instead of acting on it. These patterns recognise a JSON
+# object with "name"/"arguments" in any of those shapes and recover it into a
+# normal tool_calls entry; the last one is deliberately the most permissive, so
+# it is tried last and only wins when nothing more specific matched.
+_FALLBACK_TOOL_CALL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"<tools>\s*(\{.*?\})\s*</tools>", re.DOTALL),
+    re.compile(r"<response>\s*(\{.*?\})\s*</response>", re.DOTALL),
+    re.compile(r"```[a-zA-Z]*\s*\n?(\{.*?\})\s*\n?```", re.DOTALL),
+)
+# Opening markers for the same shapes, used by the streaming path to decide
+# whether to keep withholding content chunks while the wrapper is still being
+# written. The fence is included because ```xml normally precedes <response>,
+# and now also stands on its own for the bare ```json fence.
+_FALLBACK_OPEN_MARKERS = ("<tools>", "<response>", "```")
+_FALLBACK_MAX_MARKER_LEN = max(len(marker) for marker in _FALLBACK_OPEN_MARKERS)
+# Give up waiting for a close tag past this many buffered characters -- a real
+# tool-call JSON payload is short, so this is generous without risking an
+# unbounded stall on a genuine long-form answer that happens to start the same way.
+_FALLBACK_BUFFER_LIMIT = 2000
+
+
+def _fallback_tool_names(payload: dict[str, Any]) -> frozenset[str]:
+    """Function names the request actually declared, for validating a recovered match."""
+    names: set[str] = set()
+    for tool in payload.get("tools") or ():
+        fn = tool.get("function") if isinstance(tool, dict) else None
+        name = fn.get("name") if isinstance(fn, dict) else None
+        if isinstance(name, str) and name:
+            names.add(name)
+    return frozenset(names)
+
+
+def _fallback_match_tool_call(
+    content: str, tool_names: frozenset[str] | None = None
+) -> tuple[re.Match[str], dict[str, Any]] | None:
+    """
+    Find the first fallback-wrapped tool call in `content`, anywhere in it.
+
+    A model that wraps a tool call in prose (see the module comment above) puts
+    it after an explanation rather than at the start, so this searches the
+    whole string rather than anchoring to the front. ``tool_names``, when
+    given, rejects a match whose "name" is not one of the request's actual
+    declared tools -- without it the last (bare-fence) pattern would also catch
+    an unrelated JSON example the model was legitimately asked to produce.
+    """
+    if not content:
+        return None
+    for pattern in _FALLBACK_TOOL_CALL_PATTERNS:
+        for match in pattern.finditer(content):
+            try:
+                parsed = json.loads(match.group(1))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            name = parsed.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            if tool_names and name not in tool_names:
+                continue
+            return match, parsed
+    return None
+
+
+def _fallback_tool_call_dict(parsed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build a normal tool_calls entry from a recovered {"name", "arguments"} object."""
+    arguments = parsed.get("arguments")
+    if isinstance(arguments, dict):
+        arguments_json = json.dumps(arguments)
+    elif isinstance(arguments, str):
+        try:
+            json.loads(arguments)  # already a JSON-encoded arguments string
+            arguments_json = arguments
+        except (ValueError, TypeError):
+            arguments_json = "{}"
+    else:
+        arguments_json = "{}"
+    return [
+        {
+            "id": f"call_{uuid.uuid4().hex[:24]}",
+            "type": "function",
+            "function": {"name": parsed["name"], "arguments": arguments_json},
+        }
+    ]
+
+
+def _fallback_parse_tool_call(
+    content: str, tool_names: frozenset[str] | None = None
+) -> list[dict[str, Any]] | None:
+    """Recover a tool call the configured server-side parser did not recognise."""
+    found = _fallback_match_tool_call(content, tool_names)
+    return _fallback_tool_call_dict(found[1]) if found else None
+
+
+def _looks_like_fallback_prefix(buffer: str) -> bool:
+    """True while `buffer` could still grow into one of the fallback wrapper shapes."""
+    probe = re.sub(r"^```[a-zA-Z]*\n?", "", buffer).lstrip()
+    if not probe:
+        return True
+    if probe.startswith("{"):
+        # The bare ```json {...}``` shape: the object starts right after the
+        # fence, with no inner <tools>/<response> tag to match against below.
+        return True
+    return any(
+        marker.startswith(probe) or probe.startswith(marker) for marker in _FALLBACK_OPEN_MARKERS
+    )
+
+
+def _find_fallback_marker_start(buffer: str) -> int | None:
+    """Earliest index where a fallback wrapper marker fully appears in `buffer`, if any."""
+    positions = [buffer.index(marker) for marker in _FALLBACK_OPEN_MARKERS if marker in buffer]
+    return min(positions) if positions else None
+
+
+def _fallback_marker_tail_hold(buffer: str) -> int:
+    """
+    How many trailing characters of `buffer` might still grow into a marker.
+
+    A chunk boundary can split a marker across two deltas (a lone "`" now, "``
+    json" next), so while scanning plain content for where a wrapper might
+    start, the last few characters are held back rather than forwarded until
+    it is clear whether they are about to become one. Only called once
+    `_find_fallback_marker_start` has confirmed no marker is fully present yet.
+    """
+    limit = min(len(buffer), _FALLBACK_MAX_MARKER_LEN - 1)
+    for length in range(limit, 0, -1):
+        tail = buffer[-length:]
+        if any(marker.startswith(tail) for marker in _FALLBACK_OPEN_MARKERS):
+            return length
+    return 0
+
+
+_OOM_MARKERS = (
+    "out of memory",
+    "outofmemory",
+    "failed to allocate",
+    "cannot allocate",
+    "insufficient memory",
+    "not enough memory",
+    "cuda error: out of memory",
+    "ggml_backend_alloc",
+)
+
+# "OOM" as a word of its own. It used to sit in the tuple above and be matched as a
+# bare substring, which also fired on "room", "zoom", and any model id, path or
+# hostname carrying those three letters. A misfire is not cosmetic here: it sets
+# recoverable=False, so the caller tells the user to shrink the context instead of
+# retrying what was really a dropped connection.
+_OOM_WORD = re.compile(r"\boom\b")
+
+_DISCONNECT_MARKERS = (
+    "server disconnected without sending a response",
+    "remoteprotocolerror",
+    "connection reset",
+    "broken pipe",
+    "connection aborted",
+    "incomplete chunked read",
+)
+
+
+def classify_server_error(exc: Exception) -> dict[str, Any]:
+    """
+    Structured payload for a server-side generation failure.
+
+    The async path raised ``RuntimeError(str(e))`` and nothing else, so an OOM and a
+    dropped socket reached the UI as the same opaque string. Callers could not tell a
+    user to shrink the context rather than retry, and /inference/error_details had
+    nothing to serve.
+
+    LlamaServerEngine.build_runtime_error_payload already does this properly, but it
+    reads the managed process's exit code and stderr and probes the port — state this
+    client has no handle on. So this classifies on the exception text alone and reports
+    what it can actually establish: ``process_alive`` and ``fatal`` are left out rather
+    than guessed, since claiming a live server that has in fact died would be worse
+    than saying nothing. When the engine's richer payload is available it should win.
+
+    The shape matches build_runtime_error_payload's so /inference/error_details can
+    serve either without branching.
+    """
+    raw = str(exc).strip() or exc.__class__.__name__
+    low = raw.lower()
+
+    is_oom = bool(_OOM_WORD.search(low)) or any(marker in low for marker in _OOM_MARKERS)
+    disconnected = any(marker in low for marker in _DISCONNECT_MARKERS)
+
+    if is_oom:
+        error_type = "LlamaServerOOM"
+    elif disconnected:
+        # Cannot distinguish "the process died" from "the connection dropped" without
+        # the process handle; the engine's version splits these into ProcessExited and
+        # Disconnected. Disconnected is the one that does not overclaim.
+        error_type = "LlamaServerDisconnected"
+    else:
+        error_type = exc.__class__.__name__ or "LlamaServerRuntimeError"
+
+    return {
+        "error": raw,
+        "error_type": error_type,
+        "is_oom": is_oom,
+        "recoverable": not is_oom,
+    }
+
+
+def _server_timings(obj: Any) -> tuple[float, float] | None:  # noqa: ANN401 - OpenAI SDK response object
+    """
+    (prompt_seconds, decode_seconds) as reported by llama-server, or None.
+
+    llama.cpp attaches a ``timings`` object to its OpenAI-compatible responses with
+    the two phases already separated and measured server-side — no network or client
+    scheduling in the numbers. The OpenAI SDK keeps unknown fields, so it survives.
+
+    Preferred over anything measured here whenever it is present; vLLM does not send
+    it, and then the caller falls back to its own clock.
+    """
+    timings = getattr(obj, "timings", None)
+    if timings is None and hasattr(obj, "model_extra"):
+        timings = (obj.model_extra or {}).get("timings")
+    if timings is None:
+        return None
+
+    def _ms(name: str) -> float | None:
+        value = timings.get(name) if isinstance(timings, dict) else getattr(timings, name, None)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    prompt_ms, predicted_ms = _ms("prompt_ms"), _ms("predicted_ms")
+    if prompt_ms is None or predicted_ms is None:
+        return None
+    return prompt_ms / 1000.0, predicted_ms / 1000.0
+
+
+def _as_runtime_error(exc: Exception) -> RuntimeError:
+    """Wrap a transport/server error, carrying the classification alongside the text."""
+    error = RuntimeError(str(exc))
+    error.error_payload = classify_server_error(exc)  # type: ignore[attr-defined]
+    return error
+
+
+# llama.cpp counts prompt + max_tokens against n_ctx and refuses the whole
+# request, naming both figures.
+_CTX_OVERFLOW_RE = re.compile(
+    r"request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)"
+)
+# Slack between the count in the refusal and the retry: the chat template can
+# add a token or two, and a retry that overflows again is worse than one that
+# leaves a little output on the table.
+_CTX_REFIT_MARGIN = 64
+# Below this there is nothing useful to generate, so the prompt itself is what
+# does not fit. Let that error through -- the caller has to shorten its history,
+# and silently returning a two-token answer would hide the real problem.
+_CTX_REFIT_MIN = 256
+
+
+def _refit_max_tokens(payload: dict[str, Any], exc: Exception) -> int | None:
+    """
+    An output cap that fits, or None if this is not an overflow we can fix.
+
+    A client that sizes max_tokens from the advertised context window overflows
+    by the length of its own prompt, every time, however short that prompt is --
+    and reads the refusal as "my history is too long", which compressing cannot
+    fix. The numbers in the refusal are the only exact prompt length available
+    here; the alternative is tokenising every request ourselves to re-derive
+    what the engine just told us.
+    """
+    match = _CTX_OVERFLOW_RE.search(str(exc))
+    if not match:
+        return None
+    requested, window = int(match.group(1)), int(match.group(2))
+    asked = payload.get("max_tokens")
+    if not isinstance(asked, int) or asked <= 0 or asked > requested:
+        return None
+    room = window - (requested - asked) - _CTX_REFIT_MARGIN
+    return room if room >= _CTX_REFIT_MIN else None
+
+
 class AsyncServerClient:
     """Thin async wrapper around an OpenAI-compatible managed server."""
+
+    async def _create_completion(
+        self,
+        payload: dict[str, Any],
+        timeout_s: float,
+        label: str,
+        **extra: Any,  # noqa: ANN401 - passthrough to the OpenAI client
+    ) -> Any:  # noqa: ANN401 - the client returns a stream or a completion
+        """create(), retried once with an output cap that fits the context."""
+        for attempt in (1, 2):
+            try:
+                return await self.client.chat.completions.create(
+                    timeout=timeout_s, **extra, **payload
+                )
+            except (APIError, OSError, ValueError, TypeError, RuntimeError) as e:
+                fitted = _refit_max_tokens(payload, e) if attempt == 1 else None
+                if fitted is None:
+                    logger.exception("[AsyncServerClient] %s error: %s", label, e)
+                    raise _as_runtime_error(e) from e
+                logger.warning(
+                    "[AsyncServerClient] max_tokens=%s left no room for the prompt; "
+                    "retrying %s with %s",
+                    payload.get("max_tokens"),
+                    label,
+                    fitted,
+                )
+                payload = {**payload, "max_tokens": fitted}
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def __init__(
         self,
@@ -467,6 +895,8 @@ class AsyncServerClient:
         in_thinking_block = False
 
         start = time.perf_counter()
+        # When the first token reached us — the boundary between prefill and decode.
+        first_token_at: float | None = None
         prompt_tokens: int | None = None
         gen_tokens = 0
         total_tokens: int | None = None
@@ -474,15 +904,31 @@ class AsyncServerClient:
         tool_call_acc: dict[int, dict[str, Any]] = {}
         server_finish_reason: str | None = None
 
-        try:
-            stream = await self.client.chat.completions.create(
-                timeout=timeout_s,
-                stream_options={"include_usage": True},
-                **payload,
-            )
-        except (APIError, OSError, ValueError, TypeError, RuntimeError) as e:
-            logger.exception("[AsyncServerClient] generate_stream error: %s", e)
-            raise RuntimeError(str(e)) from e
+        # See _fallback_parse_tool_call: some models wrap a tool call in a shape
+        # none of vLLM's parsers recognise, sometimes after a prose lead-in
+        # ("You can use the bash function...") rather than at the very start of
+        # the response. So this scans continuously for where a wrapper marker
+        # begins, forwarding everything before it live, then withholds only the
+        # suspected wrapper itself until it is resolved one way or the other.
+        # Only armed when the request actually offered tools -- a plain chat
+        # completion is never buffered or delayed by this.
+        #   scanning -- no wrapper marker seen (yet); forwarding content live,
+        #               holding back only the last few characters in case they
+        #               are the start of one split across a chunk boundary
+        #   watching -- a marker started; buffering it instead of yielding it
+        #   resolved -- a tool call was recovered; drop any further content
+        #   off      -- request declared no tools; plain passthrough throughout
+        fallback_state = "scanning" if payload.get("tools") else "off"
+        fallback_scan = ""
+        fallback_buffer = ""
+        fallback_tool_names = _fallback_tool_names(payload) if payload.get("tools") else frozenset()
+
+        stream = await self._create_completion(
+            payload,
+            timeout_s,
+            "generate_stream",
+            stream_options={"include_usage": True},
+        )
 
         try:
             async for event in stream:
@@ -528,7 +974,59 @@ class AsyncServerClient:
                         if in_thinking_block:
                             out_parts.append("\n</think>\n")
                             in_thinking_block = False
-                        out_parts.append(content_chunk)
+                        if fallback_state == "off":
+                            out_parts.append(content_chunk)
+                        elif fallback_state == "scanning":
+                            fallback_scan += content_chunk
+                            marker_idx = _find_fallback_marker_start(fallback_scan)
+                            if marker_idx is None:
+                                hold = _fallback_marker_tail_hold(fallback_scan)
+                                safe_len = len(fallback_scan) - hold
+                                if safe_len:
+                                    out_parts.append(fallback_scan[:safe_len])
+                                    fallback_scan = fallback_scan[safe_len:]
+                                # else: the whole tail might still become a marker
+                            else:
+                                # A wrapper marker just started -- forward whatever
+                                # came before it live, then start withholding from
+                                # the marker itself instead of the whole response.
+                                if marker_idx:
+                                    out_parts.append(fallback_scan[:marker_idx])
+                                fallback_buffer = fallback_scan[marker_idx:]
+                                fallback_scan = ""
+                                if (
+                                    _fallback_parse_tool_call(fallback_buffer, fallback_tool_names)
+                                    is not None
+                                ):
+                                    fallback_state = "resolved"
+                                else:
+                                    fallback_state = "watching"
+                        elif fallback_state == "watching":
+                            fallback_buffer += content_chunk
+                            still_plausible = len(
+                                fallback_buffer
+                            ) <= _FALLBACK_BUFFER_LIMIT and _looks_like_fallback_prefix(
+                                fallback_buffer
+                            )
+                            if (
+                                _fallback_parse_tool_call(fallback_buffer, fallback_tool_names)
+                                is not None
+                            ):
+                                # Fully closed and parses: this is the tool call. Do
+                                # not emit any of it as content, and stop watching --
+                                # anything the model generates after this is not
+                                # shown either, matching a real tool-call turn.
+                                fallback_state = "resolved"
+                            elif not still_plausible:
+                                # Ruled out -- either it stopped matching, or matched
+                                # for too long without a close tag. Release what was
+                                # withheld and resume scanning: this one marker was a
+                                # false alarm, but a later one may still be genuine.
+                                fallback_state = "scanning"
+                                out_parts.append(fallback_buffer)
+                                fallback_buffer = ""
+                            # else: still ambiguous -- keep withholding
+                        # resolved: drop the chunk, nothing more is shown
 
                 usage = getattr(event, "usage", None)
                 if usage is not None:
@@ -540,6 +1038,10 @@ class AsyncServerClient:
                         total_tokens = int(usage.total_tokens)
 
                 chunk_text = "".join(out_parts)
+                if chunk_text and first_token_at is None:
+                    # Reasoning counts: for a thinking model the prefill ends when it
+                    # starts emitting, whether or not that text is the final answer.
+                    first_token_at = time.perf_counter()
                 if chunk_text:
                     # Stream text (and reasoning) live; tool_calls are reassembled
                     # and delivered on the done event (fragments are useless here).
@@ -550,9 +1052,46 @@ class AsyncServerClient:
                 in_thinking_block = False
                 yield {"chunk": "\n</think>", "done": False}
 
-            elapsed = max(1e-6, time.perf_counter() - start)
-            gen_tps = float(gen_tokens) / elapsed if gen_tokens else 0.0
-            prompt_tps = float(prompt_tokens) / elapsed if prompt_tokens else 0.0
+            fallback_tool_calls: list[dict[str, Any]] | None = None
+            if fallback_state == "scanning" and fallback_scan:
+                # Stream ended with only a held-back partial marker tail
+                # outstanding (e.g. a trailing "`"); it never grew into one, so
+                # it was just ordinary text and was never actually withheld.
+                yield {"chunk": fallback_scan, "done": False}
+            elif fallback_state == "watching" and fallback_buffer:
+                # The stream ended while still ambiguous (e.g. a short response
+                # that finished before hitting the buffer cap). Resolve it now,
+                # one way or the other, rather than losing the withheld text.
+                fallback_tool_calls = _fallback_parse_tool_call(
+                    fallback_buffer, fallback_tool_names
+                )
+                if fallback_tool_calls is None:
+                    yield {"chunk": fallback_buffer, "done": False}
+            elif fallback_state == "resolved":
+                fallback_tool_calls = _fallback_parse_tool_call(
+                    fallback_buffer, fallback_tool_names
+                )
+            if fallback_tool_calls is not None:
+                logger.warning(
+                    "[AsyncServerClient] recovered tool_calls via fallback parsing "
+                    "mid-stream (server-side parser produced none); model=%s",
+                    model,
+                )
+
+            # Split the two phases at the first token. Dividing both counts by the
+            # total elapsed time made each metric a function of the other's duration:
+            # a long prompt dragged gen_tps down, and a long generation dragged
+            # prompt_tps down, so neither number measured what its name claims and
+            # the two moved together instead of independently.
+            #
+            # prompt_tps is prompt_tokens / time-to-first-token: the prefill is what
+            # the wait before the first token consists of. gen_tps is
+            # gen_tokens / (total - TTFT): decode only.
+            now = time.perf_counter()
+            prefill_s = max(1e-6, (first_token_at if first_token_at is not None else now) - start)
+            decode_s = max(1e-6, now - (first_token_at if first_token_at is not None else start))
+            gen_tps = float(gen_tokens) / decode_s if gen_tokens else 0.0
+            prompt_tps = float(prompt_tokens) / prefill_s if prompt_tokens else 0.0
             done_payload: dict[str, Any] = {
                 "chunk": "",
                 "done": True,
@@ -574,6 +1113,14 @@ class AsyncServerClient:
                 done_payload["tool_calls"] = assembled_tool_calls
                 if not done_payload.get("finish_reason"):
                     done_payload["finish_reason"] = "tool_calls"
+            elif fallback_tool_calls is not None:
+                # Unlike the native reassembly above, this only ever fires on a
+                # fully closed, successfully parsed call (see
+                # _fallback_parse_tool_call), so there is no truncation case to
+                # defer to -- the server's own "stop" is what a model that thinks
+                # it just answered normally reports, and must not override this.
+                done_payload["tool_calls"] = fallback_tool_calls
+                done_payload["finish_reason"] = "tool_calls"
             if stopped:
                 done_payload["stopped"] = True
             logger.info(
@@ -582,15 +1129,15 @@ class AsyncServerClient:
                 done_payload.get("finish_reason"),
                 server_finish_reason,
                 gen_tokens,
-                len(assembled_tool_calls) if assembled_tool_calls else 0,
+                len(done_payload.get("tool_calls") or []),
                 stopped,
             )
             yield done_payload
         except (APIError, OSError, ValueError, TypeError, RuntimeError) as e:
             logger.exception("[AsyncServerClient] generate_stream error: %s", e)
-            raise RuntimeError(str(e)) from e
+            raise _as_runtime_error(e) from e
         finally:
-            # Ensure the underlying httpx stream is released on any exit path:
+            # Ensure the underlying httpx2 stream is released on any exit path:
             # normal completion, stop_event break, an error, or the consumer
             # abandoning iteration (GeneratorExit on client disconnect).
             try:
@@ -614,11 +1161,7 @@ class AsyncServerClient:
         timeout_s = float(params.get("total_timeout", 300))
 
         start = time.perf_counter()
-        try:
-            completion = await self.client.chat.completions.create(timeout=timeout_s, **payload)
-        except (APIError, OSError, ValueError, TypeError, RuntimeError) as e:
-            logger.exception("[AsyncServerClient] generate error: %s", e)
-            raise RuntimeError(str(e)) from e
+        completion = await self._create_completion(payload, timeout_s, "generate")
 
         choice = completion.choices[0] if completion.choices else None
         message = getattr(choice, "message", None) if choice else None
@@ -634,6 +1177,22 @@ class AsyncServerClient:
         tool_calls = _serialize_tool_calls(
             getattr(message, "tool_calls", None) if message else None
         )
+        if tool_calls is None and payload.get("tools"):
+            found = _fallback_match_tool_call(content, _fallback_tool_names(payload))
+            if found is not None:
+                match, parsed = found
+                logger.warning(
+                    "[AsyncServerClient] recovered tool_calls via fallback parsing "
+                    "(server-side parser produced none); model=%s",
+                    model,
+                )
+                tool_calls = _fallback_tool_call_dict(parsed)
+                # Keep whatever the model said before the wrapper (e.g. "You can use
+                # the bash function...") instead of discarding it -- the streaming
+                # path already forwarded that prefix live and cannot take it back,
+                # so this stays consistent with what a streaming caller sees.
+                content = content[: match.start()].rstrip()
+                finish_reason = "tool_calls"
 
         elapsed = max(1e-6, time.perf_counter() - start)
         usage = getattr(completion, "usage", None)
@@ -643,12 +1202,22 @@ class AsyncServerClient:
             int(getattr(usage, "total_tokens", 0) or 0) if usage else prompt_tokens + gen_tokens
         )
 
+        # A non-stream response arrives in one piece, so there is no first token to
+        # split the phases at. llama-server reports them itself; when it does, use
+        # that. vLLM does not, and then both rates fall back to total elapsed — the
+        # old behaviour, which is wrong in the same way as before but is the only
+        # thing a single timestamp can support. The streaming path, which is what the
+        # UI uses, does not have this limitation.
+        timings = _server_timings(completion)
+        prefill_s = max(1e-6, timings[0]) if timings else elapsed
+        decode_s = max(1e-6, timings[1]) if timings else elapsed
+
         result: dict[str, Any] = {
             "result": content or "",
             "gen_tokens": gen_tokens,
-            "gen_tps": float(gen_tokens) / elapsed if gen_tokens else 0.0,
+            "gen_tps": float(gen_tokens) / decode_s if gen_tokens else 0.0,
             "prompt_tokens": prompt_tokens,
-            "prompt_tps": float(prompt_tokens) / elapsed if prompt_tokens else 0.0,
+            "prompt_tps": float(prompt_tokens) / prefill_s if prompt_tokens else 0.0,
             "total_tokens": total_tokens,
         }
         if finish_reason is not None:

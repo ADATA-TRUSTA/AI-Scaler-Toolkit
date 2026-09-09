@@ -1,7 +1,7 @@
 """Configuration models for inference and training."""
 
 from enum import StrEnum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import (
     AliasChoices,
@@ -39,6 +39,25 @@ class TrainingMethod(StrEnum):
     QLORA = "qlora"
 
 
+class MultimodalScope(StrEnum):
+    """
+    How much of a multimodal model a training run is allowed to change.
+
+    TEXT_ONLY keeps the encoder *and* the bridge frozen, so image parsing stays
+    exactly as pretrained and only the interpretation of those features is
+    tuned. TEXT_AND_BRIDGE also trains the projector that maps encoder output
+    into the text embedding space -- what you need when the image domain is far
+    from the encoder's pretraining (industrial imaging, document scans, face
+    identity) and the language tower alone cannot recover the difference.
+
+    Unfreezing the encoder itself is deliberately not offered: it needs far more
+    data than an on-prem SFT set, and destroys the pretrained features.
+    """
+
+    TEXT_ONLY = "text_only"
+    TEXT_AND_BRIDGE = "text_and_bridge"
+
+
 class InferenceSharedFields(BaseModel):
     """Fields shared by inference config and status."""
 
@@ -69,10 +88,12 @@ class InferenceSharedFields(BaseModel):
         default=None, description="Total memory the model needs, e.g. '15GB'"
     )
     max_memory: dict[int | str, str] | None = Field(
-        default=None, description="Max memory per device, e.g. {0: '20GB', 'cpu': '50GB'}"
+        default=None,
+        description="Max memory per device, e.g. {0: '20GB', 'cpu': '50GB'}",
     )
     offload_folder: str | None = Field(
-        default=None, description="Offload folder path, used to offload model weights to disk"
+        default=None,
+        description="Offload folder path, used to offload model weights to disk",
     )
 
     # Snapshot fields shared by GGUF / llama-server
@@ -93,7 +114,7 @@ class InferenceSharedFields(BaseModel):
     )
     vllm_max_model_len: int | None = Field(
         default=None,
-        description="[vLLM] --max-model-len; falls back to n_ctx when omitted",
+        description="[vLLM] --max-model-len; when omitted, vLLM decides automatically",
     )
     vllm_dtype: str | None = Field(default=None, description="[vLLM] --dtype")
     vllm_quantization: str | None = Field(
@@ -158,46 +179,84 @@ class InferenceSharedFields(BaseModel):
             "'off' serves chat only, any other value is passed to vLLM as-is"
         ),
     )
-
-
-class InferenceConfig(InferenceSharedFields):
-    """
-    Inference config - uses the Hugging Face Transformers format directly.
-
-    Examples:
-    {
-        "model_name": "Qwen/Qwen3-4B",
-        "quantization": "none",
-        "device_map": "auto",
-        "model_total_memory": "15GB",
-        "max_memory": {"0": "5GB", "cpu": "5GB"},
-        "offload_folder": "./offload"
-    }
-    or
-    {
-        "model_name": "Qwen/Qwen3-8B",
-        "quantization": "none",
-        "model_total_memory": "20GB",
-        "device_map": "cpu"
-    }
-    """
-
-    # pydantic idiom: narrow the optional parent field (str | None) to required str.
-    model_name: str = Field(..., description="Model name or path")  # pyright: ignore[reportGeneralTypeIssues]
-    quantization: QuantizationType = Field(
-        default=QuantizationType.NONE,
-        description="Quantization type: none, int8, int4, nf4, fp4",
+    vllm_reasoning_parser: str | None = Field(
+        default=None,
+        description=(
+            "[vLLM] Reasoning parser: separates reasoning_content from the final "
+            "content/tool_calls for thinking models. 'off' (default) serves without "
+            "reasoning separation; any other value (e.g. deepseek_r1/qwen3/"
+            "openai_gptoss/glm45) is passed to vLLM as-is. No 'auto' mode: a reasoning "
+            "parser keys off a model-specific thinking delimiter that cannot be "
+            "round-tripped like a tool call, so it must be set explicitly"
+        ),
     )
-    torch_dtype: str = Field(default="auto", description="Torch dtype")
-    trust_remote_code: bool = Field(default=True, description="Trust remote code")
-    use_cache: bool = Field(default=True, description="Use KV cache")
+    vllm_server_extra_args: list[str] | None = Field(
+        default=None,
+        description="[vLLM] Extra `vllm serve` launch arguments, appended verbatim, "
+        'e.g. ["--trust-remote-code", "--tool-call-parser", "hermes"]',
+    )
+
+    # Shared vLLM + LMCache fields
+    vllm_lmcache_enabled: bool | None = Field(
+        default=None,
+        description="[vLLM/LMCache] Whether the LMCacheConnectorV1 KV connector is enabled",
+    )
+    vllm_lmcache_max_local_cpu_size: float | None = Field(
+        default=None,
+        description="[vLLM/LMCache] CPU KV cache tier size (GB)",
+    )
+    vllm_lmcache_local_disk: str | None = Field(
+        default=None,
+        description="[vLLM/LMCache] Local disk KV cache directory",
+    )
+    vllm_lmcache_max_local_disk_size: float | None = Field(
+        default=None,
+        description="[vLLM/LMCache] Local disk KV cache tier size (GB)",
+    )
+    vllm_lmcache_chunk_size: int | None = Field(
+        default=None,
+        description="[vLLM/LMCache] KV cache chunk size in tokens",
+    )
+
+
+class LlamaServerConfigFields(BaseModel):
+    """
+    Everything the llama-server engine reads, and nothing another engine does.
+
+    Grouped per engine so the set of settings one engine owns is enumerable rather
+    than something a reader has to infer from a name prefix. That matters most for
+    ``llama_server_extra_args``, which can carry a flag a field here already owns:
+    :meth:`cli_key_owners` turns "does a typed field own this flag" into a lookup on
+    the class instead of a table kept in step by hand.
+    """
 
     # Config shared by GGUF / llama-server
     n_gpu_layers: int = Field(
-        default=-1, description="[llama_server] GPU layer count; -1 means all"
+        default=-1,
+        description="[llama_server] GPU layer count; -1 means all",
+        json_schema_extra={"cli_key": "n_gpu_layers"},
     )
-    n_ctx: int = Field(default=4096, description="[llama_server] Context length")
-    n_batch: int = Field(default=512, description="[llama_server] Batch size")
+    n_ctx: int = Field(
+        default=4096,
+        description="[llama_server] Context length",
+        json_schema_extra={"cli_key": "n_ctx"},
+    )
+    n_batch: int = Field(
+        default=512,
+        description="[llama_server] Batch size",
+        json_schema_extra={"cli_key": "n_batch"},
+    )
+    # Present on the estimator request models, so the /check and /recommend
+    # responses name it -- and it used to be silently dropped here, which let a
+    # caller paste a recommended MoE offload into load_model, get HTTP 200, and
+    # end up with a full offload that filled the card. Accepted for real now.
+    n_cpu_moe: int = Field(
+        default=0,
+        ge=0,
+        description="[llama_server] Keep the MoE expert weights of the first N "
+        "layers on the CPU (-ncmoe). 0 disables it.",
+        json_schema_extra={"cli_key": "n_cpu_moe"},
+    )
 
     # llama-server specific config (OpenAI-compatible API)
     llama_server_url: str | None = Field(
@@ -205,7 +264,8 @@ class InferenceConfig(InferenceSharedFields):
         description="[llama_server] Server base URL, e.g. http://127.0.0.1:8080",
     )
     llama_server_api_key: str | None = Field(
-        default=None, description="[llama_server] API key (when the server requires auth)"
+        default=None,
+        description="[llama_server] API key (when the server requires auth)",
     )
     llama_server_model: str | None = Field(
         default=None,
@@ -245,6 +305,7 @@ class InferenceConfig(InferenceSharedFields):
         default=1,
         description="[llama_server] Parallel generation slots (llama-server -np)",
         ge=1,
+        json_schema_extra={"cli_key": "n_parallel"},
     )
     llama_server_health_timeout: int = Field(
         default=300,
@@ -259,6 +320,41 @@ class InferenceConfig(InferenceSharedFields):
         ),
     )
 
+    llama_server_extra_arg_overrides: list[str] | None = Field(
+        default=None,
+        description=(
+            "[llama_server] Read-only: fields whose value came from "
+            "llama_server_extra_args rather than from the request. Recomputed on "
+            "every validation, so a value sent in is replaced"
+        ),
+    )
+
+    @classmethod
+    def cli_key_owners(cls) -> dict[str, str]:
+        """
+        Map each ``parse_llama_server_args`` key to the field that owns it.
+
+        The alias table (``-ngl`` / ``--gpu-layers`` / ``--n-gpu-layers``, ``--flag=value``)
+        stays in the estimator's parser, the sole place it is maintained; this side only
+        declares which parsed key a typed field is the structured form of. ``model_path``
+        is deliberately absent -- ``-m`` is resolved into a real file before the command is
+        built, so writing it back would fight that resolution rather than record it.
+
+        Returns:
+            ``{parsed key: field name}`` for every field carrying a ``cli_key``.
+        """
+        owners: dict[str, str] = {}
+        for name, field in cls.model_fields.items():
+            extra = field.json_schema_extra
+            key = extra.get("cli_key") if isinstance(extra, dict) else None
+            if isinstance(key, str):
+                owners[key] = name
+        return owners
+
+
+class VllmConfigFields(BaseModel):
+    """Everything the vLLM engine reads. See :class:`LlamaServerConfigFields` on grouping."""
+
     # vLLM OpenAI-compatible server specific config
     vllm_gpu_memory_utilization: float = Field(
         default=0.8,
@@ -268,7 +364,7 @@ class InferenceConfig(InferenceSharedFields):
     )
     vllm_max_model_len: int | None = Field(
         default=None,
-        description="[vLLM] --max-model-len; falls back to n_ctx when omitted",
+        description="[vLLM] --max-model-len; when omitted, vLLM decides automatically",
         ge=1,
     )
     vllm_dtype: str = Field(default="auto", description="[vLLM] --dtype")
@@ -365,6 +461,17 @@ class InferenceConfig(InferenceSharedFields):
             "off and the reason is logged"
         ),
     )
+    vllm_reasoning_parser: str = Field(
+        default="off",
+        description=(
+            "[vLLM] Reasoning parser for thinking models. 'off' (default) emits no "
+            "--reasoning-parser flag; any other value (deepseek_r1/qwen3/openai_gptoss/"
+            "glm45...) is passed to vLLM as-is to split reasoning_content from the final "
+            "content/tool_calls. There is deliberately no 'auto' mode (unlike "
+            "vllm_tool_call_parser), because a reasoning parser cannot be reliably "
+            "auto-detected"
+        ),
+    )
 
     @field_validator("vllm_chat_template", mode="before")
     @classmethod
@@ -389,6 +496,220 @@ class InferenceConfig(InferenceSharedFields):
         if isinstance(v, (dict, list)):
             return v
         raise ValueError("vllm_hf_overrides must be a dict, list, JSON string, or None")
+
+
+class VllmLmCacheConfigFields(BaseModel):
+    """The LMCache KV-offload tier, a vLLM add-on kept apart from plain vLLM settings."""
+
+    # vLLM + LMCache KV cache offloading. LMCache plugs in as a KV connector
+    # (LMCacheConnectorV1) and keeps prefix KV blocks in a CPU / local-disk tier, so a
+    # repeated prompt prefix is loaded back instead of recomputed.
+    # Sizing and trade-offs vs vllm_kv_offloading_size: docs/lmcache_benchmark.md
+    vllm_lmcache_enabled: bool = Field(
+        default=False,
+        description=(
+            "[vLLM/LMCache] Enable the LMCacheConnectorV1 KV connector, which offloads "
+            "prefix KV cache to CPU (and optionally local disk) for cross-request reuse. "
+            "Requires the lmcache package in the environment vLLM runs from; the load "
+            "is rejected up front when it is missing. Requires engine='vllm', and is "
+            "mutually exclusive with vllm_kv_offloading_size, vLLM's own KV offloading"
+        ),
+    )
+    vllm_lmcache_max_local_cpu_size: float = Field(
+        default=5.0,
+        gt=0.0,
+        description=(
+            "[vLLM/LMCache] CPU KV cache tier size in GB (LMCACHE_MAX_LOCAL_CPU_SIZE). "
+            "This is pinned host memory, so keep it well under free RAM"
+        ),
+    )
+    vllm_lmcache_local_disk: str | None = Field(
+        default=None,
+        description=(
+            "[vLLM/LMCache] Directory for the local disk KV cache tier "
+            "(LMCACHE_LOCAL_DISK), the spillover tier for when the working set outgrows "
+            "CPU. A capacity fix, not a speed fix, and it does not survive a restart -- "
+            "LMCache keeps its index in memory, so files left by a previous run are "
+            "neither read back nor counted against the budget; prune it yourself. Put "
+            "it on an SSD. A relative path is resolved against the service's working "
+            "directory, which differs between launchers, so prefer an absolute one. "
+            "Omit to keep the CPU tier only; when set, vllm_lmcache_max_local_disk_size "
+            "must be greater than 0"
+        ),
+    )
+    vllm_lmcache_max_local_disk_size: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "[vLLM/LMCache] Local disk KV cache tier size in GB "
+            "(LMCACHE_MAX_LOCAL_DISK_SIZE); only meaningful with vllm_lmcache_local_disk"
+        ),
+    )
+    vllm_lmcache_chunk_size: int = Field(
+        default=256,
+        ge=1,
+        description=(
+            "[vLLM/LMCache] KV cache chunk size in tokens (LMCACHE_CHUNK_SIZE); the "
+            "granularity at which prefixes are stored and matched"
+        ),
+    )
+
+    @field_validator("vllm_lmcache_local_disk", mode="before")
+    @classmethod
+    def _normalize_vllm_lmcache_local_disk(cls, v: Any) -> Any:  # noqa: ANN401 - pydantic pre-validator accepts arbitrary raw input
+        """Normalize an empty local disk path to None."""
+        if isinstance(v, str):
+            stripped = v.strip()
+            return stripped or None
+        return v
+
+
+class InferenceConfig(
+    LlamaServerConfigFields,
+    VllmConfigFields,
+    VllmLmCacheConfigFields,
+    InferenceSharedFields,
+):
+    """
+    Inference config - uses the Hugging Face Transformers format directly.
+
+    Examples:
+    {
+        "model_name": "Qwen/Qwen3-4B",
+        "quantization": "none",
+        "device_map": "auto",
+        "model_total_memory": "15GB",
+        "max_memory": {"0": "5GB", "cpu": "5GB"},
+        "offload_folder": "./offload"
+    }
+    or
+    {
+        "model_name": "Qwen/Qwen3-8B",
+        "quantization": "none",
+        "model_total_memory": "20GB",
+        "device_map": "cpu"
+    }
+    """
+
+    # Reject unknown keys instead of dropping them. pydantic's default is to
+    # ignore them in silence, which turned a wrong load into an HTTP 200: a
+    # sizing recommendation from /estimate_memory/gguf/check pasted straight into
+    # load_model lost its n_cpu_moe and loaded a full offload that filled the
+    # card, with a success response. A 422 naming the field is the difference
+    # between a typo and a mystery.
+    model_config = ConfigDict(extra="forbid")
+
+    # pydantic idiom: narrow the optional parent field (str | None) to required str.
+    model_name: str = Field(..., description="Model name or path")  # pyright: ignore[reportGeneralTypeIssues]
+    quantization: QuantizationType = Field(
+        default=QuantizationType.NONE,
+        description="Quantization type: none, int8, int4, nf4, fp4",
+    )
+    torch_dtype: str = Field(default="auto", description="Torch dtype")
+    trust_remote_code: bool = Field(default=True, description="Trust remote code")
+    use_cache: bool = Field(default=True, description="Use KV cache")
+
+    @model_validator(mode="after")
+    def _sync_llama_server_extra_args(self) -> "InferenceConfig":
+        """
+        Fold flags in ``llama_server_extra_args`` back into the fields that own them.
+
+        llama-server applies the last occurrence of a repeated flag and this engine
+        appends extra_args last, so a flag written there already wins at the process
+        level. What it did not do was reach the config: ``-c 32768`` alongside
+        ``n_ctx=128000`` ran at 32768 while /inference/status went on reporting 128000,
+        and nothing downstream -- a client sizing its history against the window, an
+        operator reading the status -- could see the difference. Writing the value back
+        makes the config that is reported the config that is in effect.
+
+        Only fields declaring a ``cli_key`` are folded. Everything else in extra_args
+        (``--mlock``, ``-ctk``, an unrecognised flag) is left alone: it has no
+        structured form here, so there is nothing to keep in sync.
+        """
+        self.llama_server_extra_arg_overrides = None
+        if self.engine != InferenceEngine.LLAMA_SERVER or not self.llama_server_extra_args:
+            return self
+
+        # Imported here rather than at module scope: the parser lives in the inference
+        # package, which sits above this module in the import order. It also owns the
+        # flag alias table (-ngl / --gpu-layers / --n-gpu-layers, --flag=value), so this
+        # side declares only which parsed key a field is the structured form of.
+        from .inference.gguf_estimator import parse_llama_server_args
+
+        try:
+            parsed = parse_llama_server_args(self.llama_server_extra_args)
+        except Exception:  # pragma: no cover - a malformed arg must not block the load
+            return self
+
+        parsed_settings = parsed.get("settings") or {}
+        overrides: list[str] = []
+        for cli_key, field_name in LlamaServerConfigFields.cli_key_owners().items():
+            if cli_key not in parsed_settings:
+                continue
+            value = parsed_settings[cli_key]
+            # The parser reports an unparseable value as None and warns; keep ours.
+            if value is None or value == getattr(self, field_name):
+                continue
+            object.__setattr__(self, field_name, value)
+            overrides.append(field_name)
+
+        self.llama_server_extra_arg_overrides = overrides or None
+        return self
+
+    @model_validator(mode="after")
+    def _validate_vllm_lmcache(self) -> "InferenceConfig":
+        """
+        Reject LMCache configs that would silently do nothing or fight another feature.
+
+        1. LMCache only exists on the vLLM engine; asking any other engine for it
+           gets an HTTP 200 and a status echoing ``vllm_lmcache_enabled: true`` for a
+           feature that was never wired up.
+        2. LMCache and ``vllm_kv_offloading_size`` both take ownership of KV
+           offloading; enabling both means two layers racing for the same blocks.
+        3. A disk path with a 0 GB budget looks configured but caches nothing, and a
+           budget with no path is the same mistake pointing the other way -- the size
+           is only ever read inside the branch the path opens.
+        """
+        # Checked whether or not the connector is on: a half-filled disk tier is the
+        # same mistake either way, and catching it while it is still disabled is
+        # cheaper than catching it on the load that finally enables it.
+        if self.vllm_lmcache_max_local_disk_size > 0 and not self.vllm_lmcache_local_disk:
+            raise ValueError(
+                "vllm_lmcache_max_local_disk_size is set but vllm_lmcache_local_disk "
+                "is empty: the size is only read once a path exists, so this caches "
+                "nothing. Set a path, or drop the size"
+            )
+
+        if not self.vllm_lmcache_enabled:
+            return self
+
+        if self.engine != InferenceEngine.VLLM:
+            raise ValueError(
+                f"vllm_lmcache_enabled requires engine='vllm', got '{self.engine}'. "
+                "LMCache plugs into vLLM as a KV connector and has no effect on any "
+                "other engine"
+            )
+
+        if self.vllm_kv_offloading_size:
+            raise ValueError(
+                "vllm_lmcache_enabled and vllm_kv_offloading_size are mutually exclusive: "
+                "both manage KV offloading. Pick by whether the working set fits the RAM "
+                "you can pin -- if it does, vllm_kv_offloading_size is faster; if it does "
+                "not, only LMCache can spill to its disk tier and keep reusing"
+            )
+
+        if self.vllm_lmcache_local_disk and self.vllm_lmcache_max_local_disk_size <= 0:
+            raise ValueError(
+                "vllm_lmcache_local_disk is set but vllm_lmcache_max_local_disk_size is 0: "
+                "the disk tier would cache nothing. Set a size in GB, or drop the path"
+            )
+
+        # A mode="after" validator must hand the model back. Falling off the end
+        # returns None, which pydantic then treats as the validated model. Only
+        # the LMCache-enabled-and-valid path reaches here -- the disabled path
+        # returns early above -- so the defect is invisible until someone turns
+        # LMCache on with settings that pass every check.
+        return self
 
 
 class ChatRequest(BaseModel):
@@ -433,7 +754,8 @@ class ChatRequest(BaseModel):
 
     # Hybrid session management
     session_id: str | None = Field(
-        default=None, description="Session ID; when set, history can be kept on the backend"
+        default=None,
+        description="Session ID; when set, history can be kept on the backend",
     )
     reset_history: bool = Field(
         default=False,
@@ -471,7 +793,8 @@ class OpenAIChatMessage(BaseModel):
         description="Message content; a string, or an OpenAI multimodal content parts list",
     )
     name: str | None = Field(
-        default=None, description="Optional name field, common on tool/function messages"
+        default=None,
+        description="Optional name field, common on tool/function messages",
     )
     tool_calls: list[dict[str, Any]] | None = Field(
         default=None, description="Tool call list in an assistant message"
@@ -496,10 +819,13 @@ class OpenAIChatCompletionRequest(BaseModel):
     total_timeout: int | None = Field(
         default=300, ge=10, description="Total generation timeout in seconds"
     )
-    max_tokens: int = Field(
-        default=512,
+    max_tokens: int | None = Field(
+        default=None,
         ge=1,
-        description="Max tokens to generate",
+        description=(
+            "Max tokens to generate; omitted means until EOS or the context is "
+            "full, as in the OpenAI API"
+        ),
         validation_alias=AliasChoices("max_tokens", "max_completion_tokens"),
     )
     presence_penalty: float | None = Field(
@@ -524,7 +850,12 @@ class OpenAIChatCompletionRequest(BaseModel):
     repetition_penalty: float = Field(default=1.1, ge=1.0)
     session_id: str | None = Field(default=None)
     reset_history: bool = Field(default=False)
-    enable_thinking: bool | None = Field(default=True)
+    # None = "caller said nothing", which is what _resolve_enable_thinking already
+    # infers from model_fields_set -- the old default=True was never read by it and
+    # only advertised a default the server does not apply. Thinking stays opt-in:
+    # a fine-tune never saw a <|think|> prefix, so defaulting it on silently
+    # changes the prompt out from under every adapter.
+    enable_thinking: bool | None = Field(default=None)
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -605,8 +936,23 @@ class TrainingConfig(BaseModel):
     )
     output_dir: str = Field(..., description="Output folder path for the fine-tuned model files")
     offload_folder: str | None = Field(
-        default="./deepspeed_offload",
-        description="Offload folder path; overrides the DeepSpeed JSON config",
+        default=None,
+        description=(
+            "Per-job offload folder; overrides the DeepSpeed JSON config. Leave unset to use "
+            "the DEEPSPEED_NVME_DIR setting, which is where a deployment points at its fast "
+            "disk. This used to default to the relative './deepspeed_offload', which was never "
+            "None and so silently made DEEPSPEED_NVME_DIR unreachable -- every run offloaded "
+            "beside the code instead of to the configured NVMe"
+        ),
+    )
+    generation_check_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to a JSON file of held-out probes to GENERATE against after training, "
+            "e.g. [{'image': 'imgs/x.jpg', 'question': 'Who is this?', 'expected': 'Simon'}]. "
+            "Loss cannot tell you the model learned the right rule -- a run can converge "
+            "while having learned 'answer Simon for any person'. Results land in the job log"
+        ),
     )
 
     # LoRA/QLoRA specific
@@ -632,6 +978,15 @@ class TrainingConfig(BaseModel):
             "applied to. null uses the defaults (e.g. q_proj, k_proj, v_proj, o_proj)"
         ),
     )
+    multimodal_scope: MultimodalScope = Field(
+        default=MultimodalScope.TEXT_ONLY,
+        description=(
+            "[multimodal models only] How much of the model to train. 'text_only' trains the "
+            "language tower and keeps the vision/audio encoder and its projector frozen. "
+            "'text_and_bridge' also trains the projector, for image domains the encoder was "
+            "not pretrained on. Ignored for text-only checkpoints"
+        ),
+    )
 
     # Training hyperparameters
     num_train_epochs: int = Field(default=3, description="Number of training epochs")
@@ -642,20 +997,36 @@ class TrainingConfig(BaseModel):
         default=8, description="Gradients accumulated before each parameter update"
     )
     learning_rate: float = Field(
-        default=2e-4, description="Learning rate, controls the size of each parameter update"
+        default=2e-4,
+        description="Learning rate, controls the size of each parameter update",
     )
     warmup_steps: int = Field(
         default=100, description="Steps to warm up with a smaller learning rate"
     )
     logging_steps: int = Field(
-        default=10, description="Steps between training progress reports (loss, step, ...)"
+        default=10,
+        description="Steps between training progress reports (loss, step, ...)",
     )
     save_steps: int = Field(default=500, description="Steps between checkpoint saves")
     save_total_limit: int | None = Field(
-        default=2, description="Max checkpoints to keep; the oldest are deleted beyond this"
+        default=2,
+        description="Max checkpoints to keep; the oldest are deleted beyond this",
     )
     max_seq_length: int = Field(
-        default=2048, description="Max token length during training; longer inputs are truncated"
+        default=2048,
+        description="Max token length during training; longer inputs are truncated",
+    )
+    max_image_pixels: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "[image training only] Max pixels per image (width x height) fed to the vision "
+            "tower. Dynamic-resolution processors (Qwen-VL family) turn a large photo into "
+            "thousands of image tokens and OOM in backward -- a 1600x1501 photo costs 2350 "
+            "tokens, a 768x768 cap costs 552. Images are downscaled to fit, never upscaled; "
+            "the dataset files are left untouched. None keeps the checkpoint's own limit. "
+            "Ignored by fixed-resolution processors, which already resize to a set size."
+        ),
     )
 
     # Dataset field configuration - pick one of the three training modes
@@ -715,7 +1086,8 @@ class TrainingConfig(BaseModel):
         ),
     )
     save_tokenizer: bool = Field(
-        default=True, description="Whether to save the tokenizer to the output dir after training"
+        default=True,
+        description="Whether to save the tokenizer to the output dir after training",
     )
 
     # DeepSpeed settings
@@ -803,6 +1175,51 @@ class TrainingConfig(BaseModel):
         return v
 
     @model_validator(mode="after")
+    def _validate_qlora_scope(self) -> "TrainingConfig":
+        """
+        Refuse QLoRA together with a trainable cross-modal bridge.
+
+        Scope B trains the bridge in full via peft `modules_to_save`, but under
+        QLoRA the bridge is itself quantized -- `get_keys_to_not_convert` spares
+        only tied/output modules, so the projector becomes a 4-bit Linear. peft
+        then calls `requires_grad_(True)` on a uint8 tensor, which torch
+        rejects. It fails inside `get_peft_model`, before training, but the
+        message points at dtypes rather than at the combination that caused it.
+        """
+        if (
+            self.method is TrainingMethod.QLORA
+            and self.multimodal_scope is MultimodalScope.TEXT_AND_BRIDGE
+        ):
+            raise ValueError(
+                f"method='qlora' cannot be combined with "
+                f"multimodal_scope='{MultimodalScope.TEXT_AND_BRIDGE}': the bridge is "
+                "quantized to 4-bit along with the rest of the model, and a quantized "
+                "tensor cannot be made trainable. Use method='lora' to train the bridge, "
+                f"or keep QLoRA with multimodal_scope='{MultimodalScope.TEXT_ONLY}'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_deepspeed_selection(self) -> "TrainingConfig":
+        """
+        Require a config or a profile whenever DeepSpeed is enabled.
+
+        Without one, `_resolve_deepspeed_config` returns None and only warns:
+        TrainingArguments gets `deepspeed=None`, so ZeRO-3 is silently off and
+        the whole model sits on the GPU -- an OOM that looks like the profile
+        was simply too ambitious. Asking for offload and getting none is never
+        what the caller meant, so refuse it up front.
+        """
+        if self.use_deepspeed and not (self.deepspeed_config or self.deepspeed_profile):
+            raise ValueError(
+                "use_deepspeed=True requires either 'deepspeed_config' (a path to a JSON "
+                "file) or 'deepspeed_profile' (a name under service/configs/deepspeed/). "
+                "Without one, DeepSpeed would be silently disabled and the model would be "
+                "loaded entirely onto the GPU."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_dataset_fields(self) -> "TrainingConfig":
         """
         Validate dataset field configuration.
@@ -835,7 +1252,8 @@ class DeviceAllocation(BaseModel):
     )
     total_modules: int | None = Field(default=None, description="Total module count of the model")
     layer_lines: list[str] | None = Field(
-        default=None, description="Per-layer allocation, e.g. ['model.layers.0 -> cuda:0', ...]"
+        default=None,
+        description="Per-layer allocation, e.g. ['model.layers.0 -> cuda:0', ...]",
     )
 
 
@@ -849,16 +1267,52 @@ class ModelStatus(InferenceSharedFields):
     device: str | None = Field(default=None, description="Device")
     memory_usage: dict | None = Field(default=None, description="Memory usage")
     device_allocation: DeviceAllocation | None = Field(
-        default=None, description="Actual device allocation stats (only available once loaded)"
+        default=None,
+        description="Actual device allocation stats (only available once loaded)",
     )
     prefill_strategy: str | None = Field(
-        default=None, description="[llama_server] Prefill strategy, e.g. slot or cache_prompt"
+        default=None,
+        description="[llama_server] Prefill strategy, e.g. slot or cache_prompt",
     )
     llama_capabilities: list[str] | None = Field(
         default=None, description="[llama_server] Capabilities reported by /v1/models"
     )
+    llama_server_binary: str | None = Field(
+        default=None,
+        description="[llama_server] Absolute path of the binary this load runs",
+    )
+    llama_server_np: int | None = Field(
+        default=None,
+        description="[llama_server] Parallel slots (-np); -c is split across them",
+    )
+    llama_server_extra_arg_overrides: list[str] | None = Field(
+        default=None,
+        description=(
+            "[llama_server] Fields whose effective value came from "
+            "llama_server_extra_args rather than from the load request"
+        ),
+    )
+    llama_model_meta: dict[str, int] | None = Field(
+        default=None,
+        description=(
+            "[llama_server] Model metadata from /v1/models: n_ctx_train, n_params, "
+            "n_embd, n_vocab, size. These describe the model file, not this load -- "
+            "for the window actually served see served_context_length"
+        ),
+    )
+    served_context_length: int | None = Field(
+        default=None,
+        description=(
+            "Prompt window one request actually gets, as reported by the running "
+            "engine: llama-server /props (per slot, already capped) or vLLM's own "
+            "max_model_len. None when the engine does not report one"
+        ),
+    )
     slot_restore_summary: dict[str, Any] | None = Field(
         default=None, description="[llama_server] Summary of the slot restore result"
+    )
+    loaded_at: float | None = Field(
+        default=None, description="Unix timestamp of when the model finished loading"
     )
 
 
@@ -977,6 +1431,17 @@ class MemoryEstimateResponse(BaseModel):
 
     model_name: str
     model_size_billions: float
+    size_source: Literal["config", "model_name"] = Field(
+        default="model_name",
+        description=(
+            "Where the parameter count came from. 'config' means it was counted from "
+            "the checkpoint itself; 'model_name' means the config could not be read (a "
+            "gated repo with no token, or private and offline) and the parameter count, "
+            "hidden size and layer count were all inferred from the name. Every figure "
+            "below inherits that uncertainty, so show it as an approximation rather "
+            "than a measurement"
+        ),
+    )
     quantization: str
     memory_breakdown_gb: dict[str, float]
     overhead_details_gb: dict[str, float] | None = None
@@ -1027,7 +1492,8 @@ class GgufEstimateBase(BaseModel):
     flash_attn: bool = Field(default=True, description="Whether flash attention is on (-fa)")
     n_gpu: int = Field(default=1, description="Number of GPUs taking part in offload", ge=0, le=16)
     tensor_split: list[float] | None = Field(
-        default=None, description="Multi-GPU split ratio (-ts); split evenly when omitted"
+        default=None,
+        description="Multi-GPU split ratio (-ts); split evenly when omitted",
     )
 
 
@@ -1050,7 +1516,8 @@ class GgufEstimateRequest(GgufEstimateBase):
         ge=0,
     )
     cpu_moe: bool = Field(
-        default=False, description="Keep MoE expert weights of every layer on the CPU (--cpu-moe)"
+        default=False,
+        description="Keep MoE expert weights of every layer on the CPU (--cpu-moe)",
     )
     no_kv_offload: bool = Field(default=False, description="Hold the whole KV cache in host memory")
     swa_full: bool = Field(
@@ -1072,10 +1539,12 @@ class GgufSweepRequest(GgufEstimateBase):
     """Request for a GGUF feasibility sweep."""
 
     n_gpu_layers_grid: list[int] | None = Field(
-        default=None, description="-ngl values to sweep; a ladder is generated when omitted"
+        default=None,
+        description="-ngl values to sweep; a ladder is generated when omitted",
     )
     n_ctx_grid: list[int] | None = Field(
-        default=None, description="Context lengths to sweep; common values are used when omitted"
+        default=None,
+        description="Context lengths to sweep; common values are used when omitted",
     )
     kv_quant_grid: list[KvCacheType] | None = Field(
         default=None, description="KV cache types to sweep; defaults to [f16, q8_0]"
@@ -1104,7 +1573,9 @@ class GgufRecommendRequest(GgufEstimateBase):
         ge=0,
     )
     n_ctx_min: int = Field(
-        default=4096, description="Lowest context length the search may fall back to", ge=256
+        default=4096,
+        description="Lowest context length the search may fall back to",
+        ge=256,
     )
     n_ctx_max: int = Field(
         default=0,
@@ -1178,7 +1649,9 @@ class GgufPlanRequest(GgufEstimateBase):
         ge=0,
     )
     n_ctx_min: int = Field(
-        default=4096, description="Lowest context length a candidate may fall back to", ge=256
+        default=4096,
+        description="Lowest context length a candidate may fall back to",
+        ge=256,
     )
     n_ctx_max: int = Field(
         default=0,
@@ -1322,7 +1795,8 @@ class GgufPlanResponse(BaseModel):
     host_budget_mib: float | None = None
     kv_cache_types: list[str]
     verified: bool = Field(
-        default=False, description="Whether the figures were confirmed with llama-fit-params"
+        default=False,
+        description="Whether the figures were confirmed with llama-fit-params",
     )
     plans: list[dict[str, Any]] = Field(
         description=(
@@ -1396,6 +1870,13 @@ class GPUInfo(BaseModel):
     percent: float | None = None
     gpu_util: float | None = None  # GPU Compute Usage %
     temperature: float | None = None
+    vendor: str | None = None  # nvidia | intel | amd | unknown
+    # An integrated adapter's "VRAM" is carved out of system RAM: it reports tens
+    # of GB free while being useless as a model-loading target. Anything sizing a
+    # load has to exclude these rather than sum them in. Derived from DXGI's
+    # DedicatedVideoMemory, not from the vendor name -- a discrete Intel Arc must
+    # stay is_integrated=False.
+    is_integrated: bool = False
 
 
 class DiskDevice(BaseModel):
@@ -1452,10 +1933,12 @@ class ModelConversionRequest(BaseModel):
 
     model_path: str = Field(..., description="HF model path or ID")
     output_path: str | None = Field(
-        default=None, description="Output GGUF file path; defaults to the model_path directory"
+        default=None,
+        description="Output GGUF file path; defaults to the model_path directory",
     )
     outtype: str = Field(
-        default="f16", description="Output type, passed straight to the llama.cpp convert script"
+        default="f16",
+        description="Output type, passed straight to the llama.cpp convert script",
     )
 
 

@@ -1,41 +1,51 @@
 [project]
 dependencies = [
   # Web / API
-  "fastapi==0.120.1",
-  "starlette==0.48.0",
-  "uvicorn[standard]==0.38.0",
-  "python-multipart==0.0.20",
-  "pydantic==2.12.0",
-  "orjson==3.11.9", # FastAPI default_response_class=ORJSONResponse (app.py)
+  # Capped by the vllm extra below (fastapi[standard]<0.137.0); would otherwise be 0.141.1.
+  "fastapi==0.136.3",
+  "starlette==1.6.0",
+  "uvicorn[standard]==0.52.3",
+  "python-multipart==0.0.32",
+  "pydantic==2.13.4",
   # Infra / IO
-  "redis==7.0.1",
-  "httpx==0.28.1", # sole HTTP client (sync + async); replaced requests
-  "python-dotenv==1.2.1",
-  "psutil==7.1.0",
-  "nvidia-ml-py==13.580.82", # provides the `pynvml` module
-  "numpy==1.26.4",
-  "pillow==12.1.1", # ML / inference / training
+  "redis==8.1.0",
+  # This service's own HTTP client (sync + async); openai/starlette use it too.
+  # httpx itself still arrives transitively via huggingface-hub / datasets / chromadb.
+  "httpx2==2.10.0",
+  "python-dotenv==1.2.2",
+  "psutil==7.2.2",
+  "nvidia-ml-py==13.610.43", # provides the `pynvml` module
+  # Capped by the vllm extra below: vllm -> numba wants numpy<2.5, and -> mistral-common
+  # wants numpy<2.4 on python<3.13. Would otherwise be 2.5.2. The lock is universal, so
+  # every host pays this, including the ones that never install vllm.
+  #
+  # lmcache (also in the vllm extra) caps it harder still, at numpy<=2.2.6 -- that is
+  # the binding constraint, not vllm's <2.4. Dropping lmcache is what would let this
+  # go back to 2.3.5.
+  "numpy==2.2.6",
+  "pillow==12.3.0", # ML / inference / training
   # torch (+cu130 / +xpu variants) comes from the cuda/xpu extras below
-  "transformers==5.5.3",
-  "trl==0.26.1",
-  "peft==0.18.0",
-  "accelerate==1.10.1",
-  "datasets==4.8.5",
-  "bitsandbytes==0.48.1",
-  "safetensors==0.7.0",
-  "huggingface-hub==1.10.1",
-  "gguf==0.17.1",
-  "openai==1.108.1",
+  "transformers==5.15.0",
+  "trl==1.10.0",
+  "peft==0.20.0",
+  "accelerate==1.14.0",
+  "datasets==5.0.1",
+  "bitsandbytes==0.50.1",
+  "safetensors==0.8.0",
+  "huggingface-hub==1.27.0",
+  "gguf==0.19.0",
+  "openai==3.0.0",
   "openai-harmony==0.0.8",
-  "tiktoken==0.12.0", # GPT-OSS / harmony tokenizer (see TIKTOKEN_RS_CACHE_DIR in settings.py)
+  "tiktoken==0.13.0", # GPT-OSS / harmony tokenizer (see TIKTOKEN_RS_CACHE_DIR in settings.py)
   "sentencepiece==0.2.2", # GGUF conversion vocab path (convert_hf_to_gguf.py); see conversion_manager.py
   # RAG: vector retrieval (lazily imported inside rag_manager.py)
-  "chromadb",
-  "sentence-transformers", # Model backends loaded dynamically by transformers (not imported directly)
-  "deepspeed==0.19.3; sys_platform == 'linux'",
-  "causal-conv1d==1.6.1; sys_platform == 'linux'",
-  "flash-linear-attention==0.4.0",
-  "fla-core==0.4.0",
+  "chromadb==1.5.9",
+  "sentence-transformers==5.7.0", # Model backends loaded dynamically by transformers (not imported directly)
+  "deepspeed==0.19.2; sys_platform == 'linux'",
+  # causal-conv1d builds a CUDA extension and has no XPU support, so it lives in
+  # the cuda extra below rather than here.
+  "flash-linear-attention==0.5.2",
+  "fla-core==0.5.2",
 ]
 description = "Add your description here"
 name = "service"
@@ -44,25 +54,50 @@ requires-python = ">=3.12"
 version = "0.1.0"
 
 [project.optional-dependencies]
-# CUDA (NVidia): pulls the +cu130 variants from the PyTorch CUDA index
+# CUDA (NVidia): pulls the +cu130 variants from the PyTorch CUDA index.
+# torch is 2.13.0 to satisfy the vllm extra below; the xpu extra moved with it.
 cuda = [
-  "torch==2.11.0+cu130",
-  "torchvision==0.26.0+cu130",
+  "torch==2.13.0+cu130",
+  "torchvision==0.28.0+cu130",
+  # torchaudio has not followed torch's version numbering; 2.11.0 is the newest that exists.
   "torchaudio==2.11.0+cu130",
+  # CUDA-only: the package compiles a CUDA extension, so it must not be pulled in
+  # by the xpu extra (the cuda/xpu conflict declared under [tool.uv] keeps them apart).
+  "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
 ]
-# Intel XPU (Arc / iGPU): pulls the +xpu variants from the PyTorch XPU index; works on Linux and Windows
+# vLLM inference backend. Linux + CUDA only (no Windows wheels), so setup_env adds this
+# extra alongside `cuda` and never alongside `xpu`.
+#
+# This extra drives the torch, fastapi and numpy pins above, so upgrading it is a
+# whole-project change: check what the new release does to those three first.
+vllm = [
+  "vllm==0.27.1; sys_platform == 'linux'",
+  # LMCache KV connector (vllm_lmcache_enabled). Ships alongside vllm rather than in
+  # its own extra because vLLM loads it in-process: LMCacheConnectorV1 imports
+  # lmcache.integration.vllm, so the two have to live in the same environment.
+  # Its numpy<=2.2.6 cap is what holds numpy back above.
+  #
+  # 0.5.4 is the newest release; it does not declare which vLLM it targets, so the
+  # pairing is not something the resolver can check. The earlier 0.5.3 pin was chosen
+  # against vllm 0.20.1 and does not carry over to 0.27.1.
+  "lmcache==0.5.4; sys_platform == 'linux'",
+]
+# Intel XPU (Arc / iGPU): pulls the +xpu variants from the PyTorch XPU index; works on Linux and Windows.
+# torch 2.13.0+xpu bundles the oneAPI 2026.0.0 runtime, which needs Intel graphics driver
+# 32.0.101.8801 or newer — scripts/xpu_smoke.py is what catches a driver that is too old.
 xpu = [
-  "torch==2.11.0+xpu",
-  "torchvision==0.26.0+xpu",
+  "torch==2.13.0+xpu",
+  "torchvision==0.28.0+xpu",
   "torchaudio==2.11.0+xpu",
-  "triton-xpu==3.7.0",
+  "triton-xpu==3.7.2",
 ]
 
 [dependency-groups]
 dev = [
-  "ruff==0.15.22",
-  "pytest==8.2.1",
-  "pre-commit==4.6.1",
+  "ruff==0.16.3",
+  "pytest==9.1.1",
+  "pre-commit==4.6.2",
+  "pyright==1.1.411",
 ]
 
 [tool.ruff] # https://docs.astral.sh/ruff/settings/#top-level
@@ -71,9 +106,8 @@ dev = [
 exclude = [
   ".venv",
   "tests", # repo-root tests keep the "strict service rules do not apply to tests" convention
-  # vendored / isolated third-party Python; must not be scanned by this project's rules
+  # vendored third-party Python; must not be scanned by this project's rules
   "service/utils/llama.cpp",
-  "service/inference/engines/vllm_server",
 ]
 line-length = 100
 target-version = "py312"
@@ -192,7 +226,6 @@ no-build-isolation-package = ["causal-conv1d"]
 
 [tool.uv.workspace]
 exclude = [
-  "service/inference/engines/vllm_server",
   "service/utils/llama.cpp",
 ]
 
@@ -207,7 +240,12 @@ exclude = [
   "tests",
   "examples",
   "service/utils/llama.cpp",
-  "service/inference/engines/vllm_server",
+  # Vendored vLLM sources: gitignored (.gitignore excludes the whole engine dir) and
+  # nothing under it is tracked, so it is third-party code that happens to sit in the
+  # tree. The pyright hook runs with pass_filenames: false, i.e. always over the whole
+  # project, so without this entry it type-checks 4.7k files it does not own and fails
+  # the commit gate on ~30k errors that no change here can fix.
+  "service/inference/engines/vllm_server_cpu",
 ]
 typeCheckingMode = "basic"
 venv = ".venv"

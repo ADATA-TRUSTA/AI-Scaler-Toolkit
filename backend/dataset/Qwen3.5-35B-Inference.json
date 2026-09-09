@@ -1,0 +1,18 @@
+{
+  "base_model": "unsloth/Qwen3.5-35B-GGUF",
+  "model_path": "Qwen3.5-35B-A3B-Q4_K/Qwen3.5-35B-A3B-Q4_K_M.gguf",
+  "engine": "llama_cpp",
+  "max_memory": null,
+  "n_gpu_layers": -1,
+  "n_ctx": 128000,
+  "n_batch": 512,
+  "llama_server_extra_args": [
+    "--no-mmap",
+    "--cache-type-k",
+    "q8_0",
+    "--cache-type-v",
+    "q8_0",
+    "--n-cpu-moe",
+    "25"
+  ]
+}

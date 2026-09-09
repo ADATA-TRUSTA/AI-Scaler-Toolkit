@@ -21,10 +21,10 @@ from ...config_models import InferenceConfig
 from ...settings import (
     HF_HOME,
     LLAMA_SERVER_API_KEY,
-    LLAMA_SERVER_BINARY,
     LLAMA_SERVER_TIMEOUT,
     LLAMA_SERVER_URL,
     configure_logging,
+    effective_llama_binary,
 )
 from ..generate.llama_server_runner import (
     handle_server_log_line,
@@ -32,6 +32,25 @@ from ..generate.llama_server_runner import (
 from .base_engine import BaseEngine
 
 logger = configure_logging(__name__)
+
+
+# Numeric fields llama-server publishes under ``data[].meta``. This is the complete
+# list the server builds -- notably it does NOT include ``n_ctx``, so the window a
+# load actually serves has to come from ``/props`` instead (see _refresh_served_props).
+# ``n_ctx_train`` is the model's own ceiling, i.e. the GGUF's training window.
+LLAMA_META_INT_FIELDS = ("n_ctx_train", "n_params", "n_embd", "n_vocab", "size")
+
+
+def normalize_llama_model_meta(meta: dict[str, Any]) -> dict[str, int]:
+    """Keep the positive integer fields of a llama-server ``meta`` block, coerced to int."""
+    normalized: dict[str, int] = {}
+    for field in LLAMA_META_INT_FIELDS:
+        value = meta.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value > 0:
+            normalized[field] = int(value)
+    return normalized
 
 
 def resolve_local_model_path(raw_path: str | None, *, prefer_hf_home: bool = True) -> str:
@@ -113,6 +132,8 @@ class LlamaServerEngine(BaseEngine):
         self._task_to_request: dict[int, str] = {}
         self._last_runtime_error_signature: str | None = None
         self._served_model_capabilities: list[str] = []
+        self._served_model_meta: dict[str, int] = {}
+        self._served_context_length: int | None = None
         self._prefill_strategy: str = "cache_prompt"
         self._detected_mmproj_path: str | None = None
 
@@ -524,17 +545,17 @@ class LlamaServerEngine(BaseEngine):
         except json.JSONDecodeError:
             return {"raw": body}
 
-    def _refresh_served_model_capabilities(self) -> list[str]:
-        """Read the current model capabilities from llama-server `/v1/models`."""
-        capabilities: list[str] = []
+    def _matching_model_entries(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        Return every entry describing the served model in a `/v1/models` payload.
 
-        try:
-            payload = self._request_server_json("GET", "/v1/models")
-        except Exception as e:
-            logger.warning(f"[LlamaServer] failed to fetch model capabilities: {e}")
-            self._served_model_capabilities = []
-            return self._served_model_capabilities
+        llama-server answers with two parallel blocks for the SAME model: ``data[]``
+        (OpenAI shape) carries ``meta``, ``models[]`` (Ollama shape) carries
+        ``capabilities``. Neither is a superset, so stopping at the first name match
+        drops whatever the other block held.
 
+        Returns the matching entries, or every entry when the name matches none.
+        """
         candidates: list[dict[str, Any]] = []
         for key in ("data", "models"):
             values = payload.get(key)
@@ -547,33 +568,102 @@ class LlamaServerEngine(BaseEngine):
         }
         preferred_names.discard("")
 
-        chosen: dict[str, Any] | None = None
-        for item in candidates:
-            item_names = {
-                str(item.get("id") or "").strip(),
-                str(item.get("name") or "").strip(),
-                str(item.get("model") or "").strip(),
-            }
-            if preferred_names.intersection(name for name in item_names if name):
-                chosen = item
-                break
-
-        if chosen is None and candidates:
-            chosen = candidates[0]
-
-        if isinstance(chosen, dict):
-            raw_caps = chosen.get("capabilities")
-            if not isinstance(raw_caps, list):
-                raw_caps = (
-                    chosen.get("meta", {}).get("capabilities")
-                    if isinstance(chosen.get("meta"), dict)
-                    else None
+        matched = [
+            item
+            for item in candidates
+            if preferred_names.intersection(
+                name
+                for name in (
+                    str(item.get("id") or "").strip(),
+                    str(item.get("name") or "").strip(),
+                    str(item.get("model") or "").strip(),
                 )
+                if name
+            )
+        ]
+
+        # Falling back to every candidate is safe here: llama-server serves exactly
+        # one model, so the blocks can only ever describe that same model under a
+        # name we failed to match (e.g. an alias the server rewrote).
+        return matched or candidates
+
+    def _refresh_served_model_capabilities(self) -> list[str]:
+        """Read the served model's capabilities and file metadata from `/v1/models`."""
+        try:
+            payload = self._request_server_json("GET", "/v1/models")
+        except Exception as e:
+            logger.warning(f"[LlamaServer] failed to fetch model capabilities: {e}")
+            self._served_model_capabilities = []
+            self._served_model_meta = {}
+            return self._served_model_capabilities
+
+        capabilities: list[str] = []
+        meta: dict[str, Any] = {}
+
+        for entry in self._matching_model_entries(payload):
+            entry_meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else None
+            if entry_meta:
+                meta.update(entry_meta)
+
+            raw_caps = entry.get("capabilities")
+            if not isinstance(raw_caps, list) and entry_meta:
+                raw_caps = entry_meta.get("capabilities")
             if isinstance(raw_caps, list):
-                capabilities = [str(item).strip().lower() for item in raw_caps if str(item).strip()]
+                for value in raw_caps:
+                    tag = str(value).strip().lower()
+                    if tag and tag not in capabilities:
+                        capabilities.append(tag)
 
         self._served_model_capabilities = capabilities
+        self._served_model_meta = normalize_llama_model_meta(meta)
+        logger.info(
+            f"[LlamaServer] served model capabilities={capabilities} meta={self._served_model_meta}"
+        )
         return capabilities
+
+    def _refresh_served_props(self) -> None:
+        """
+        Read the window this load actually serves, and its modalities, from `/props`.
+
+        `/v1/models` cannot answer either question: its ``meta`` block carries only the
+        model's own properties (``n_ctx_train`` and friends), never the runtime window.
+        ``/props`` does, and reports the number already in the form callers need:
+        ``default_generation_settings.n_ctx`` is llama.cpp's *per-slot* context, i.e.
+        already divided by ``-np`` and already capped to ``n_ctx_train``. Deriving it
+        instead from the requested ``-c`` gets all three of those wrong -- a ``-c`` in
+        ``llama_server_extra_args`` overrides ours, ``-c 0`` means "use n_ctx_train",
+        and an oversized ``-c`` is silently capped.
+
+        Best-effort: a server too old to serve ``/props``, or one running in router
+        mode (which answers with a placeholder ``n_ctx`` of 0), simply leaves the
+        window unknown, and the caller falls back to reporting nothing.
+        """
+        self._served_context_length = None
+        try:
+            payload = self._request_server_json("GET", "/props")
+        except Exception as e:
+            logger.warning(f"[LlamaServer] failed to fetch /props: {e}")
+            return
+
+        settings = payload.get("default_generation_settings")
+        raw_n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
+        if isinstance(raw_n_ctx, int) and not isinstance(raw_n_ctx, bool) and raw_n_ctx > 0:
+            self._served_context_length = raw_n_ctx
+
+        # Modalities are the authoritative multimodal signal; capabilities only ever
+        # say "multimodal", never which kind. Additive, so mmproj detection still works.
+        modalities = payload.get("modalities")
+        if isinstance(modalities, dict):
+            for tag in ("vision", "audio"):
+                if modalities.get(tag) and tag not in self._served_model_capabilities:
+                    self._served_model_capabilities.append(tag)
+
+        logger.info(
+            "[LlamaServer] served window n_ctx=%s total_slots=%s modalities=%s",
+            self._served_context_length,
+            payload.get("total_slots"),
+            modalities if isinstance(modalities, dict) else "unreported",
+        )
 
     def _is_multimodal_model(self) -> bool:
         if any(cap == "multimodal" for cap in self._served_model_capabilities):
@@ -803,6 +893,23 @@ class LlamaServerEngine(BaseEngine):
             "memory_usage": memory_usage or None,
         }
 
+    @staticmethod
+    def _torch_lib_dir() -> str | None:
+        """
+        Locate torch's lib directory, which is where the CUDA runtime DLLs live on Windows.
+
+        Resolved from the imported torch rather than from a guessed venv layout, so it stays
+        correct under UV_PROJECT_ENVIRONMENT or any other interpreter the service runs under.
+        Returns None when torch is absent or ships no such directory - a CPU-only or Vulkan
+        llama does not need it, so that is not an error.
+        """
+        try:
+            import torch
+        except ImportError:
+            return None
+        lib = os.path.join(os.path.dirname(os.path.abspath(torch.__file__)), "lib")
+        return lib if os.path.isdir(lib) else None
+
     def _start_managed_server(self) -> None:
         if self.config is None:
             raise RuntimeError("Engine config not initialized")
@@ -816,8 +923,7 @@ class LlamaServerEngine(BaseEngine):
         if not os.path.exists(model_file):
             raise RuntimeError(f"llama model file not found: {model_file}")
 
-        configured_binary = (self.config.llama_server_binary or "").strip()
-        binary = (configured_binary or LLAMA_SERVER_BINARY).strip()
+        binary = effective_llama_binary(self.config.llama_server_binary).strip()
 
         if not os.path.isfile(binary):
             raise RuntimeError(f"llama-server binary not found: {binary}")
@@ -839,6 +945,17 @@ class LlamaServerEngine(BaseEngine):
         if ld_paths:
             prefix = ":".join(ld_paths)
             env["LD_LIBRARY_PATH"] = f"{prefix}:{old_ld}" if old_ld else prefix
+
+        # Windows: ggml-cuda.dll imports cublas64_<major>.dll, which in turn needs
+        # cublasLt64_<major>.dll. Both ship inside torch's +cuXXX wheels, which this project
+        # already installs, so pointing at torch/lib lets the CUDA backend resolve without the
+        # CUDA Toolkit and without the 372MB cudart archive from llama.cpp's releases. Verified
+        # on the real offload workload, not just the device probe. LD_LIBRARY_PATH above already
+        # covers Linux, where the build links against the system CUDA anyway.
+        if os.name == "nt":
+            torch_lib = self._torch_lib_dir()
+            if torch_lib:
+                env["PATH"] = f"{torch_lib}{os.pathsep}{env.get('PATH', '')}"
 
         host = self.config.llama_server_host
         port = self.config.llama_server_port
@@ -870,6 +987,13 @@ class LlamaServerEngine(BaseEngine):
 
         if self.config.n_gpu_layers is not None:
             cmd.extend(["-ngl", str(self.config.n_gpu_layers)])
+
+        # MoE expert offload. Emitted before extra_args so an explicit -ncmoe in
+        # llama_server_extra_args still wins, matching how llama-server treats
+        # repeated flags (last one applies).
+        n_cpu_moe = getattr(self.config, "n_cpu_moe", 0) or 0
+        if n_cpu_moe > 0:
+            cmd.extend(["-ncmoe", str(n_cpu_moe)])
 
         # Pin the offload device when configured (e.g. Vulkan1 for the Intel GPU
         # on a machine that also has an NVIDIA card, which Vulkan would otherwise
@@ -1022,7 +1146,11 @@ class LlamaServerEngine(BaseEngine):
             )
 
         self.served_model_name = self._resolve_served_model_name(timeout_sec=5.0)
-        capabilities = self._refresh_served_model_capabilities()
+        self._refresh_served_model_capabilities()
+        # Must follow the /v1/models probe: it folds the reported modalities into the
+        # capability list that probe just rebuilt.
+        self._refresh_served_props()
+        capabilities = list(self._served_model_capabilities)
         slot_restore_summary = {"restored": 0, "total": 0, "slots": []}
 
         if self._is_multimodal_model():
@@ -1047,6 +1175,8 @@ class LlamaServerEngine(BaseEngine):
                 "layer_lines": allocation.get("layer_lines"),
                 "memory_usage": allocation.get("memory_usage"),
                 "llama_capabilities": capabilities,
+                "llama_model_meta": self._served_model_meta,
+                "served_context_length": self._served_context_length,
                 "prefill_strategy": self._prefill_strategy,
                 "slot_restore_summary": slot_restore_summary,
             }
@@ -1068,6 +1198,8 @@ class LlamaServerEngine(BaseEngine):
         self.client = None
         self.served_model_name = None
         self._served_model_capabilities = []
+        self._served_model_meta = {}
+        self._served_context_length = None
         self._prefill_strategy = "cache_prompt"
         self._detected_mmproj_path = None
         self.config = None

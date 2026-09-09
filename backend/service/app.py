@@ -28,7 +28,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
-    ORJSONResponse,
     RedirectResponse,
     StreamingResponse,
 )
@@ -74,12 +73,19 @@ from .inference.gguf_estimator import (
     gguf_memory_estimator,
 )
 from .inference.memory_estimator import memory_estimator
-from .inference.model_family import is_qwen35_family
+from .inference.model_family import is_qwen35_family, read_model_arch, read_model_context_length
 from .model_manager import model_manager
 from .model_registry import model_registry
+from .platform_support import (
+    current_platform,
+    engine_support,
+    supported_engines,
+    training_support,
+)
 from .rag_manager import rag_manager
 from .session_manager import session_manager
 from .settings import (
+    DEFAULT_SYSTEM_PROMPT,
     LLAMA_SERVER_BINARY,
     LLAMA_SERVER_BINARY_SOURCE,
     LOG_LEVEL,
@@ -274,13 +280,6 @@ def _resolve_model_aware_generation_options(
         resolved["enable_thinking"],
     )
     return resolved
-
-
-_DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful AI assistant."
-    "Do not repeat yourself. Do not generate multiple versions of the same answer. "
-    "Respond in the same language as the user's question."
-)
 
 
 def _normalize_content_parts(content: Any) -> list[dict[str, Any]]:  # noqa: ANN401 - OpenAI content is dynamic parsed JSON (str/list/dict)
@@ -489,12 +488,15 @@ def _build_openai_prompt_messages(
 
     system_instruction = "\n\n".join([text for text in effective_system_texts if text]).strip()
     if not system_instruction:
-        system_instruction = _DEFAULT_SYSTEM_PROMPT
+        # Empty DEFAULT_SYSTEM_PROMPT means "inject nothing" -- see settings.py.
+        # A fine-tune trained without system turns must not be served with one.
+        system_instruction = DEFAULT_SYSTEM_PROMPT.strip()
 
     rag_context_text = _resolve_rag_context_text(request)
     if rag_context_text:
-        system_instruction += (
-            "\n\nReference information (use only if helpful):\n" + rag_context_text.strip()
+        reference = "Reference information (use only if helpful):\n" + rag_context_text.strip()
+        system_instruction = (
+            f"{system_instruction}\n\n{reference}" if system_instruction else reference
         )
 
     recent_history = (
@@ -502,7 +504,12 @@ def _build_openai_prompt_messages(
         if len(effective_history_prompt) > 6
         else effective_history_prompt
     )
-    prompt_messages: list[dict[str, Any]] = [{"role": "system", "content": system_instruction}]
+    # No system turn at all when there is nothing to say, rather than an empty one:
+    # the chat template still renders an empty system block, which is exactly the
+    # prompt drift this avoids.
+    prompt_messages: list[dict[str, Any]] = (
+        [{"role": "system", "content": system_instruction}] if system_instruction else []
+    )
     prompt_messages.extend(recent_history)
     prompt_messages.append(current_user_prompt)
     return prompt_messages, session_id, current_user_text
@@ -612,10 +619,9 @@ app = FastAPI(
     description="FastAPI service for LLM inference with streaming and fine-tuning support",
     version="1.0.0",
     lifespan=lifespan,
-    # orjson serializes responses faster and natively handles numpy / datetime;
-    # covers routes returning plain dict/model. Explicit responses below use
-    # ORJSONResponse too so the whole API goes through the same encoder.
-    default_response_class=ORJSONResponse,
+    # No default_response_class: FastAPI serializes to JSON bytes via Pydantic when a
+    # return type or response model is set, which is faster than routing everything
+    # through a custom encoder. Explicit responses below use JSONResponse.
 )
 
 # ==================== Frontend Static Files ====================
@@ -739,16 +745,300 @@ async def health_check() -> dict[str, Any]:
             else None
         ),
         "training_active": training_manager.get_status().is_training,
+        # Two features are Linux-only (see service/platform_support.py). Reported here
+        # so a client gates its UI on the platform of the backend it is talking to,
+        # rather than on its own — a Windows desktop served from a Linux host can
+        # fine-tune, and a locally installed Windows backend cannot.
+        "platform": current_platform(),
+        "training_supported": training_support().supported,
+        "supported_engines": [engine.value for engine in supported_engines()],
     }
+
+
+def _positive_int(value: Any) -> int | None:  # noqa: ANN401 - reads untyped status values
+    """Return value as a positive int, or None when it is unset/invalid."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _llama_meta(status: dict[str, Any]) -> dict[str, Any]:
+    """Return the llama-server ``meta`` block from a status dict, or an empty dict."""
+    meta = status.get("llama_model_meta")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _resolve_model_trained_context_length(status: dict[str, Any]) -> int | None:
+    """
+    Look up the context length the model itself was trained for - its own ceiling, NOT
+    the window this load serves (see ``_resolve_served_context_window``).
+
+    Ordered by how close each source sits to the file being served:
+    ``meta.n_ctx_train`` comes from the GGUF llama-server actually opened; the model's
+    own config.json is next, and is the only source for a hand-placed transformers
+    model; the registry is last, since it only knows download-time data.
+    """
+    n_ctx_train = _positive_int(_llama_meta(status).get("n_ctx_train"))
+    if n_ctx_train is not None:
+        return n_ctx_train
+
+    candidates = [c for c in (status.get("model_path"), status.get("model_name")) if c]
+    if not candidates:
+        return None
+
+    for candidate in candidates:
+        declared = _positive_int(read_model_context_length(str(candidate)))
+        if declared is not None:
+            return declared
+
+    try:
+        data = model_registry.list_models()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.debug(f"Failed to read model registry for context length: {exc}")
+        return None
+
+    for group in ("base_models", "finetuned_models", "llama_gguf_models"):
+        for item in data.get(group, []):
+            if any(
+                str(candidate) == str(item.get(field))
+                for field in ("model_path", "label", "model_name")
+                for candidate in candidates
+            ):
+                max_len = _positive_int(item.get("max_context_length"))
+                if max_len is not None:
+                    return max_len
+    return None
+
+
+def _resolve_served_context_window(status: dict[str, Any], trained: int | None) -> int | None:
+    """
+    Usable prompt window for one request, or None when nothing here defines one.
+
+    Clients size their own history against this. One that cannot read it falls back to a
+    generic default -- Hermes assumes 256K -- so it never compresses before the real
+    window is full, and every turn after that pays a full re-prefill of the whole
+    context: measured on this host at 9.9 minutes for 31.6k tokens, which reads as a
+    hang rather than as a limit.
+
+    The running engine is always right and always wins: llama-server reports its
+    per-slot window over ``/props``, vLLM its effective ``max_model_len``. Both are
+    post-resolution numbers, which is the whole point -- the requested value is not
+    the served one whenever llama.cpp caps an oversized ``-c`` to the trained window,
+    ``-c 0`` defers to that window, a ``-c`` in ``llama_server_extra_args`` overrides
+    ours, or vLLM sizes the window itself against whatever KV cache fits.
+    """
+    reported = _positive_int(status.get("served_context_length"))
+    if reported is not None:
+        return reported
+
+    engine = str(status.get("engine") or InferenceEngine.TRANSFORMERS)
+
+    if engine == InferenceEngine.LLAMA_SERVER:
+        # Fallback for a server too old for /props, or one that failed the probe.
+        # llama.cpp divides -c between its -np slots, so a single request only ever
+        # sees n_ctx/np; reporting the total would over-promise by that factor.
+        requested = _positive_int(status.get("n_ctx"))
+        if requested is None:
+            # -c 0 tells llama.cpp to adopt the trained window, then split that.
+            requested = trained
+        if requested is None:
+            return None
+        slots = _positive_int(status.get("llama_server_np")) or 1
+        # Still bounded by the model: llama.cpp caps the slot window at n_ctx_train.
+        return min(max(1, requested // slots), trained or requested)
+
+    if engine == InferenceEngine.VLLM:
+        # Config value only; absent unless --max-model-len was passed explicitly.
+        return _positive_int(status.get("vllm_max_model_len"))
+
+    # transformers has no runtime window knob, so the model's own ceiling is the window
+    return trained
+
+
+# Advertised when the loaded model has no usable name of its own
+DEFAULT_SERVED_MODEL_ID = "trusta-ast-default"
+
+
+def _served_model_identity(
+    model_name: Any,  # noqa: ANN401 - reads untyped config/status values
+    model_path: Any,  # noqa: ANN401 - reads untyped config/status values
+) -> tuple[str, set[str]]:
+    """
+    Return the canonical id of the loaded model plus every alias it answers to.
+
+    /v1/models and /v1/chat/completions must report the same string, or agents that
+    verify which model answered them break. The aliases keep older callers working:
+    they may hold the model path, which the chat endpoint used to echo back.
+    """
+    name = str(model_name).strip() if model_name else ""
+    path = str(model_path).strip() if model_path else ""
+    canonical = name or path or DEFAULT_SERVED_MODEL_ID
+    aliases = {canonical, DEFAULT_SERVED_MODEL_ID}
+    aliases.update(value for value in (name, path) if value)
+    return canonical, aliases
+
+
+def _resolve_response_model_name(requested: str | None) -> str:
+    """
+    Return the model id to report in a completion, warning on a mismatch.
+
+    ``model`` is a compatibility field: this backend serves whichever model is loaded
+    and cannot switch per request. The request is still served - warning only - but the
+    response names the model that actually answered rather than echoing the request,
+    so a multi-model agent can detect it was not routed where it asked.
+    """
+    config = model_manager.config
+    canonical, aliases = _served_model_identity(
+        config.model_name if config else None,
+        config.model_path if config else None,
+    )
+    if requested and requested not in aliases:
+        logger.warning(
+            "Requested model %r does not match the loaded model %r; serving the loaded "
+            "model and reporting it in the response",
+            requested,
+            canonical,
+        )
+    return canonical
+
+
+# vLLM publishes no capability list, so its multimodal support has to be read off the
+# per-modality prompt limits the server was started with -- the same switches that
+# decide at runtime whether an image part is accepted or rejected.
+_VLLM_MODALITY_LIMITS: tuple[tuple[str, str], ...] = (
+    ("vision", "vllm_mm_image_limit"),
+    ("audio", "vllm_mm_audio_limit"),
+    ("video", "vllm_mm_video_limit"),
+)
+
+
+def _resolve_model_capabilities(status: dict[str, Any]) -> list[str]:
+    """
+    Return the capability tags for the loaded model, llama.cpp naming.
+
+    Only llama-server reports these itself (over /v1/models and /props). Leaving the
+    other engines at bare ``chat`` would tell an agent that a vision model served by
+    vLLM cannot take images, so derive what the config already states.
+    """
+    # This backend always exposes /v1/chat/completions, whatever the engine
+    capabilities = ["chat"]
+
+    def _add(tag: str) -> None:
+        cleaned = tag.strip().lower()
+        if cleaned and cleaned not in capabilities:
+            capabilities.append(cleaned)
+
+    for cap in status.get("llama_capabilities") or []:
+        _add(str(cap))
+
+    if str(status.get("engine") or "") == InferenceEngine.VLLM:
+        for tag, limit_key in _VLLM_MODALITY_LIMITS:
+            if _positive_int(status.get(limit_key)) is not None:
+                _add(tag)
+                _add("multimodal")
+
+    return capabilities
+
+
+def _build_model_card(status: dict[str, Any]) -> dict[str, Any]:
+    """Build the OpenAI-compatible model card shared by /v1/models and /v1/models/{model}."""
+    model_path = status.get("model_path")
+    model_id, _aliases = _served_model_identity(status.get("model_name"), model_path)
+    trained_length = _resolve_model_trained_context_length(status)
+    served_window = _resolve_served_context_window(status, trained_length)
+    quantization = status.get("quantization")
+    meta = _llama_meta(status)
+
+    card: dict[str, Any] = {
+        # --- OpenAI core fields ---
+        "id": model_id,
+        "object": "model",
+        # Load time, not request time: clients use `created` as a stable
+        # identity/cache key, so it must not change on every poll.
+        "created": int(status.get("loaded_at") or time.time()),
+        "owned_by": "ADATA",
+        # --- OpenAI SDK / vLLM compatibility ---
+        # Older SDKs and proxies read these when resolving model aliases.
+        "root": model_path or model_id,
+        "parent": None,
+        "permission": [],
+        # --- Serving details ---
+        "state": "loaded",
+        "engine": str(status.get("engine") or InferenceEngine.TRANSFORMERS),
+        "capabilities": _resolve_model_capabilities(status),
+    }
+
+    # Better absent than guessed: a client that reads a wrong number cannot tell it is
+    # wrong, while one that reads nothing falls back knowingly. Anything we could not
+    # establish is therefore left out rather than sent as null.
+    #
+    # The two context numbers are deliberately separate: a model trained for 128k but
+    # served with -c 8192 must report both, or callers cannot tell whether a long prompt
+    # was refused by the model or by this deployment.
+    optional: dict[str, Any] = {
+        "max_context_length": trained_length,
+        "loaded_context_length": served_window,
+        "context_length": served_window,
+        "max_model_len": served_window,  # vLLM's name for the same number
+        "quantization": str(quantization) if quantization is not None else None,
+        "architecture": read_model_arch(model_path),
+        # Ollama / llama.cpp style model details, when the engine reports them
+        "parameter_count": _positive_int(meta.get("n_params")),
+        "size_bytes": _positive_int(meta.get("size")),
+        # Passed through verbatim under llama.cpp's own key, because that is where a
+        # client written against llama-server looks: its docs point at
+        # data[].meta.n_ctx_train. Renaming it into max_context_length above serves
+        # everyone else; keeping it here costs nothing and serves them too.
+        "meta": meta or None,
+    }
+    card.update({key: value for key, value in optional.items() if value is not None})
+    return card
+
+
+def _model_not_found(model: str) -> JSONResponse:
+    """Return the OpenAI-shaped 404 body clients expect for an unknown model."""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": {
+                "message": f"The model '{model}' does not exist or is not currently loaded.",
+                "type": "invalid_request_error",
+                "code": "model_not_found",
+            }
+        },
+    )
 
 
 @app.get("/v1/models")
 def list_models() -> dict[str, Any]:
-    """List loaded models in OpenAI-compatible format."""
-    if model_manager.is_loaded():
-        return {"object": "list", "data": [{"id": "trusta-ast-default", "object": "model"}]}
-    else:
+    """
+    List loaded models in OpenAI-compatible format.
+
+    Only the currently loaded model is listed: like vLLM and llama-server, this
+    endpoint answers "what can you serve right now", not "what is on disk".
+    Use /config/models to browse the registry.
+    """
+    if not model_manager.is_loaded():
         return {"object": "list", "data": []}
+
+    return {"object": "list", "data": [_build_model_card(model_manager.get_status())]}
+
+
+@app.get("/v1/models/{model:path}", response_model=None)
+def retrieve_model(model: str) -> dict[str, Any] | JSONResponse:
+    """
+    Retrieve a single model, OpenAI's ``GET /v1/models/{model}``.
+
+    Declared with ``:path`` because model ids routinely contain a slash
+    (``publisher/model``). Accepts any alias the loaded model answers to.
+    """
+    if not model_manager.is_loaded():
+        return _model_not_found(model)
+
+    status = model_manager.get_status()
+    _canonical, aliases = _served_model_identity(status.get("model_name"), status.get("model_path"))
+    if model not in aliases:
+        return _model_not_found(model)
+
+    return _build_model_card(status)
 
 
 # ==================== Inference Endpoints ====================
@@ -768,6 +1058,13 @@ async def load_model(
     Note: loading runs in the background and returns immediately. Use /inference/status
     to check the loading state.
     """
+    # Refuse an engine this host cannot start, before any work begins. Otherwise the
+    # request is accepted and vLLM fails later on a missing venv or a
+    # POSIX-only signal call, neither of which names the actual problem.
+    engine = engine_support(config.engine)
+    if not engine.supported:
+        raise HTTPException(status_code=501, detail=engine.reason)
+
     try:
         logger.info(f"Loading model request: {config.model_name}")
 
@@ -1022,7 +1319,12 @@ async def estimate_memory_requirements(
             f"Estimating memory for model: {request.model_name}, quantization: {request.quantization}"
         )
 
-        result = memory_estimator.estimate_memory_requirements(
+        # Off the event loop: the estimator reads the model config, which probes the
+        # Hub over HTTP (seconds when it is slow or unreachable) and builds the model on
+        # the meta device. Both are synchronous, and running them here would freeze
+        # every other request — including in-flight token streams — for the duration.
+        result = await asyncio.to_thread(
+            memory_estimator.estimate_memory_requirements,
             model_name=request.model_name,
             quantization=request.quantization.value,
             include_activations=request.include_activations,
@@ -1103,7 +1405,7 @@ async def estimate_gguf_memory(
             if exact is None:
                 result["notes"].append(
                     "Exact verification was requested but the fit-params probe is unavailable; "
-                    "run setup_env (it installs the prebuilt llama by default) or set "
+                    "run setup_env (it installs llama by default) or set "
                     "LLAMA_FIT_PARAMS_BIN to enable it."
                 )
             else:
@@ -1201,9 +1503,26 @@ async def check_gguf_config(
                     f"{', '.join(parsed_args['ignored'])}."
                 )
 
-        budgets = gguf_memory_estimator.resolve_budgets(gpu_budget_mib, host_budget_mib)
-        gpu_used = result["memory_breakdown_mib"]["gpu_total"]["total"]
-        host_used = result["memory_breakdown_mib"]["host"]["total"]
+        # A pinned --device runs on exactly one adapter, so the budget is that
+        # adapter's rather than a pool. Left unpinned, llama.cpp spreads across the
+        # devices it finds, and the sum over discrete cards is the right ceiling.
+        budgets = gguf_memory_estimator.resolve_budgets(
+            gpu_budget_mib,
+            host_budget_mib,
+            1 if config.llama_server_device else None,
+            config.llama_server_device,
+        )
+        shared_pool = bool(budgets.get("gpu_budget_is_shared_memory"))
+        if shared_pool:
+            notes.append(
+                "This GPU draws its memory from system RAM, so the two budgets below are "
+                "slices of one pool, not two: the host budget already has the GPU's share "
+                "removed, and the GPU figure carries the host-side KV cache and compute "
+                "buffers because those compete for the same bytes. Moving work between "
+                "them frees nothing."
+            )
+
+        gpu_used, host_used = gguf_memory_estimator.budget_charges(result, shared_pool=shared_pool)
         gpu_budget = budgets["gpu_budget_mib"]
         host_budget = budgets["host_budget_mib"]
 
@@ -1244,6 +1563,10 @@ async def check_gguf_config(
                 host_budget_mib=host_budget,
                 margin_mib=margin_mib,
                 verify=False,
+                # Without this the property dies here: recommend() re-resolves, both
+                # budgets arrive as plain floats, and the shared-pool rules switch
+                # themselves off for the one call that produces the suggestion.
+                shared_memory_pool=shared_pool,
                 n_batch=kwargs.get("n_batch", 2048),
                 n_ubatch=kwargs.get("n_ubatch", 512),
                 flash_attn=kwargs.get("flash_attn", True),
@@ -1269,7 +1592,7 @@ async def check_gguf_config(
             if exact is None:
                 notes.append(
                     "Exact verification was requested but the fit-params probe is unavailable; "
-                    "run setup_env (it installs the prebuilt llama by default) or set "
+                    "run setup_env (it installs llama by default) or set "
                     "LLAMA_FIT_PARAMS_BIN to enable it."
                 )
             else:
@@ -1516,7 +1839,9 @@ async def estimate_memory_by_name(
 
         decoded_model_name = unquote(model_name)
 
-        result = memory_estimator.estimate_memory_requirements(
+        # Off the event loop for the same reason as the POST variant above.
+        result = await asyncio.to_thread(
+            memory_estimator.estimate_memory_requirements,
             model_name=decoded_model_name,
             quantization=quantization,
             include_activations=True,
@@ -1817,16 +2142,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
             enable_thinking=_resolve_enable_thinking(),
         )
         passthrough_messages = _build_passthrough_messages()
-        model_name = (
-            request.model
-            or (
-                model_manager.config.model_path
-                if model_manager.config and model_manager.config.model_path
-                else None
-            )
-            or (model_manager.config.model_name if model_manager.config else None)
-            or "unknown"
-        )
+        model_name = _resolve_response_model_name(request.model)
         created = int(time.time())
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
 
@@ -1892,7 +2208,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
             )
             if usage_payload is not None:
                 output["usage"] = usage_payload
-            return ORJSONResponse(content=output)
+            return JSONResponse(content=output)
 
         async def _passthrough_stream_to_openai() -> AsyncIterator[str]:
             first_chunk = {
@@ -2094,16 +2410,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
         enable_thinking=_resolve_enable_thinking(),
     )
     prompt_messages, session_id, current_user_text = _build_openai_prompt_messages(request)
-    model_name = (
-        request.model
-        or (
-            model_manager.config.model_path
-            if model_manager.config and model_manager.config.model_path
-            else None
-        )
-        or (model_manager.config.model_name if model_manager.config else None)
-        or "unknown"
-    )
+    model_name = _resolve_response_model_name(request.model)
     created = int(time.time())
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
 
@@ -2200,7 +2507,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
         )
         if usage_payload is not None:
             output["usage"] = usage_payload
-        return ORJSONResponse(content=output)
+        return JSONResponse(content=output)
 
     async def _stream_openai_generation() -> AsyncIterator[str]:
         first_chunk = {
@@ -2339,7 +2646,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
 async def rag_list_docs() -> JSONResponse:
     """List the existing documents."""
     try:
-        return ORJSONResponse(content={"documents": rag_manager.list_documents()})
+        return JSONResponse(content={"documents": rag_manager.list_documents()})
     except Exception as e:
         logger.exception(f"Failed to list RAG docs: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -2357,7 +2664,7 @@ async def rag_add_doc(payload: dict) -> JSONResponse:
         if not content or not isinstance(content, str):
             raise HTTPException(status_code=400, detail="content is required and must be a string")
         result = rag_manager.add_document(content=content, doc_id=doc_id)
-        return ORJSONResponse(content={"status": "ok", "result": result})
+        return JSONResponse(content={"status": "ok", "result": result})
     except HTTPException:
         raise
     except Exception as e:
@@ -2370,7 +2677,7 @@ async def rag_delete_doc(doc_id: str) -> JSONResponse:
     """Delete the given document and its database content."""
     try:
         result = rag_manager.delete_document(doc_id)
-        return ORJSONResponse(content={"status": "ok", "result": result})
+        return JSONResponse(content={"status": "ok", "result": result})
     except Exception as e:
         logger.exception(f"Failed to delete RAG doc: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -2381,7 +2688,7 @@ async def rag_search(q: str, k: int = 3) -> JSONResponse:
     """Search the RAG documents and return the top k results."""
     try:
         results = rag_manager.search(q, k=k)
-        return ORJSONResponse(content={"query": q, "k": k, "results": results})
+        return JSONResponse(content={"query": q, "k": k, "results": results})
     except Exception as e:
         logger.exception(f"Failed to search RAG: {e}")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -2401,6 +2708,15 @@ async def start_training(
     Start training
     Supports LoRA/QLoRA/Full Parameter Training.
     """
+    # Refuse before the worker is spawned. training_process sets the distributed env
+    # vars at import time, so accelerate always initialises a process group; on
+    # Windows that fails inside TCPStore and torch reports it as
+    # "unmatched '}' in format string", which points nowhere. See platform_support.
+    training = training_support()
+    if not training.supported:
+        logger.warning(f"Refused training request: {training.reason}")
+        raise HTTPException(status_code=501, detail=training.reason)
+
     try:
         logger.info(f"Starting training request: {config.model_name} with method {config.method}")
 
@@ -2694,7 +3010,7 @@ async def list_available_models() -> JSONResponse:
     """List the available inference models (base models + local fine-tuned models)."""
     try:
         data = model_registry.list_models()
-        return ORJSONResponse(content=data)
+        return JSONResponse(content=data)
     except Exception as e:
         logger.exception(f"Failed to list models: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) from e

@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock
 
-import httpx
+import httpx2
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def _get_max_context_length_from_hf(model_id: str, hf_token: str | None = None) 
         # Try config.json first
         config_url = f"https://huggingface.co/{model_id}/raw/main/config.json"
         try:
-            response = httpx.get(config_url, headers=headers, timeout=10, follow_redirects=True)
+            response = httpx2.get(config_url, headers=headers, timeout=10, follow_redirects=True)
             if response.status_code == 200:
                 config = response.json()
 
@@ -73,7 +73,7 @@ def _get_max_context_length_from_hf(model_id: str, hf_token: str | None = None) 
         # Fall back to tokenizer_config.json
         tokenizer_url = f"https://huggingface.co/{model_id}/raw/main/tokenizer_config.json"
         try:
-            response = httpx.get(tokenizer_url, headers=headers, timeout=10, follow_redirects=True)
+            response = httpx2.get(tokenizer_url, headers=headers, timeout=10, follow_redirects=True)
             if response.status_code == 200:
                 tokenizer_config = response.json()
                 if "model_max_length" in tokenizer_config:

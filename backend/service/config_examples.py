@@ -102,9 +102,13 @@ TRAINING_CONFIG_EXAMPLES = {
             "out image tokens in prompt/completion mode, otherwise the loss covers a large "
             "number of image tokens and dilutes the training signal. max_seq_length must fit "
             "the expanded image tokens (a single image can reach hundreds to thousands of "
-            "tokens). The vision tower stays frozen (only the language tower's comprehension "
-            "is optimized); training also emits an mmproj GGUF for image inference in "
-            "llama.cpp."
+            "tokens). multimodal_scope decides how much of the model is trained: the default "
+            "'text_only' freezes the vision tower and its projector, optimizing only how the "
+            "language tower interprets the image features. Switch to 'text_and_bridge' when "
+            "the images are far from what the encoder was pretrained on (industrial imaging, "
+            "document scans, telling specific people apart) and the language tower alone "
+            "cannot make up the difference. Training also emits an mmproj GGUF for image "
+            "inference in llama.cpp."
         ),
         "value": {
             "model_name": "gemma-4-e4b-it-local",
@@ -125,6 +129,7 @@ TRAINING_CONFIG_EXAMPLES = {
             "lora_r": 8,
             "lora_alpha": 16,
             "lora_dropout": 0.05,
+            "multimodal_scope": "text_only",
             "use_deepspeed": True,
             "deepspeed_profile": "zero3_offload_cpu_cpu",
             "eval_split_ratio": 0.1,
@@ -233,6 +238,21 @@ INFERENCE_CONFIG_EXAMPLES = {
             "vllm_max_model_len": 4096,
             "vllm_enforce_eager": False,
             "vllm_cpu_offload_gb": 8,
+        },
+    },
+    "vLLM Engine + LMCache": {
+        "summary": "vLLM with LMCache KV offloading",
+        "description": "Offload prefix KV cache to CPU and local disk so a shared prompt prefix is reloaded instead of recomputed. The disk path is absolute on purpose: a relative one lands wherever the launcher's working directory happens to be",
+        "value": {
+            "model_name": "Qwen/Qwen3-4B",
+            "engine": "vllm",
+            "vllm_gpu_memory_utilization": 0.8,
+            "vllm_max_model_len": 8192,
+            "vllm_lmcache_enabled": True,
+            "vllm_lmcache_max_local_cpu_size": 20.0,
+            "vllm_lmcache_local_disk": "/var/lib/trusta/lmcache_kv",
+            "vllm_lmcache_max_local_disk_size": 50.0,
+            "vllm_lmcache_chunk_size": 256,
         },
     },
     "Intel XPU (Intel GPU)": {
