@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 APP_NAME = "AIScalerToolkit"
@@ -68,16 +69,126 @@ def resource_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def payload_dir() -> Path:
-    """Root of the shipped payload (backend/, frontend/).
+def shipped_payload_dir() -> Path:
+    """The payload as delivered (backend/, frontend/).
 
-    Installed builds put the payload beside the launcher; running from a source
-    checkout it is the repo root one level up.
+    Installed builds put it beside the launcher; running from a source checkout it is
+    the repo root one level up.
     """
     here = app_dir()
     if (here / "backend").is_dir():
         return here
     return here.parent
+
+
+def working_payload_dir() -> Path:
+    """Where the payload is copied to when what shipped cannot be written to."""
+    return data_dir() / "payload"
+
+
+def _is_writable(path: Path) -> bool:
+    """Tried, not asked.
+
+    os.access answers from the permission bits, and a read-only mount still has
+    permissive ones: an AppImage's squashfs is owned by whoever ran it and marked
+    drwxr-xr-x, so os.access says yes and the first real write says EROFS. Measured
+    here -- the copy below did not happen, and nothing said why.
+    """
+    probe = path / f".write-probe-{os.getpid()}"
+    try:
+        probe.touch()
+        probe.unlink()
+    except OSError:
+        return False
+    return True
+
+
+@lru_cache(maxsize=1)
+def payload_dir() -> Path:
+    """The payload the launcher actually works from.
+
+    Normally the shipped one. On Linux the shipped one is inside an AppImage, which is
+    a read-only squashfs mount -- and the payload is not read-only in practice: the
+    launcher writes backend/.env into it, and setup_env.sh builds llama.cpp into
+    backend/service/utils/llama-bin. Both would fail, the first quietly (the backend
+    falls back to .env.example and every setting is wrong) and the second loudly, in
+    the middle of a first run.
+
+    Rather than move each write somewhere else -- which fixes the two that exist today
+    and not the third someone adds later -- the payload is copied somewhere writable
+    and everything carries on as it does on Windows. See ensure_writable_payload.
+
+    Cached because it is asked for constantly and the answer cannot change within a
+    run.
+    """
+    shipped = shipped_payload_dir()
+    if _is_writable(shipped):
+        return shipped
+    return working_payload_dir()
+
+
+def _payload_stamp(shipped: Path) -> str:
+    """Identifies the delivered payload, so an upgrade replaces the working copy.
+
+    The AppImage's own size and modification time when there is one -- a new release
+    is a new file, and that is the cheapest thing that changes. Falling back to a walk
+    of the payload when it is not an AppImage, which is only development.
+    """
+    appimage = os.environ.get("APPIMAGE")
+    if appimage:
+        try:
+            st = Path(appimage).stat()
+            return f"appimage:{st.st_size}:{int(st.st_mtime)}"
+        except OSError:
+            pass
+    count = 0
+    total = 0
+    newest = 0.0
+    for path in shipped.rglob("*"):
+        if path.is_file():
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            count += 1
+            total += st.st_size
+            newest = max(newest, st.st_mtime)
+    return f"walk:{count}:{total}:{int(newest)}"
+
+
+def ensure_writable_payload() -> Path:
+    """Make sure the payload the launcher works from can be written to.
+
+    A no-op wherever the shipped payload is writable, which is every Windows install
+    and every source checkout. Inside an AppImage it is not: the mount is read-only,
+    so the payload is copied into the data directory once and used from there.
+
+    The copy is stamped with what it came from and remade when that changes, because
+    an AppImage is upgraded by replacing the file -- with no installer to notice, a
+    stale copy would go on being used and the upgrade would appear to do nothing.
+    """
+    import shutil
+
+    shipped = shipped_payload_dir()
+    if _is_writable(shipped):
+        return shipped
+
+    working = working_payload_dir()
+    stamp_file = working.parent / "payload.stamp"
+    stamp = _payload_stamp(shipped)
+    if (working.is_dir() and stamp_file.is_file()
+            and stamp_file.read_text(encoding="utf-8").strip() == stamp):
+        return working
+
+    # Replaced rather than merged. A copy over the top of an older one leaves whatever
+    # the new release removed, which is the same class of fault the Windows installer
+    # needed [InstallDelete] for.
+    if working.exists():
+        shutil.rmtree(working, ignore_errors=True)
+    working.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(shipped, working)
+    stamp_file.write_text(stamp + "\n", encoding="utf-8")
+    return working
 
 
 def backend_dir() -> Path:

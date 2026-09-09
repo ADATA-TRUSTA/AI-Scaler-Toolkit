@@ -996,6 +996,15 @@ def main(argv: list[str] | None = None) -> int:
         log.info("handed over to a copy without the mitigation; exiting")
         return 0
 
+    # Also before anything reads a path. Inside an AppImage the payload is mounted
+    # read-only, and both the backend's .env and the llama build land inside it.
+    try:
+        working = config.ensure_writable_payload()
+        log.info("payload: %s", working)
+    except OSError:
+        log.exception("could not prepare a writable payload; continuing with the "
+                      "shipped one, which may be read-only")
+
     # Logging in is not a request to install anything. Setup takes eight minutes, opens
     # a window and downloads gigabytes, and doing that because someone turned their
     # computer on is a surprise -- particularly since autostart is on by default, so
