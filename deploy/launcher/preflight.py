@@ -78,7 +78,10 @@ def check_git() -> Check:
         detail="Needed by setup during installation, not just by developers.",
         remedy="https://git-scm.com/download/win" if config.IS_WINDOWS
         else "install git with your package manager",
-        fixer="winget" if config.IS_WINDOWS else "",
+        # Linux had no fixer, so a clean desktop -- where git is genuinely not
+        # installed -- stopped at this screen with nothing to press. apt covers the
+        # distributions this is shipped for; anywhere else still gets the text above.
+        fixer="winget" if config.IS_WINDOWS else "apt",
     )
 
 
@@ -185,8 +188,12 @@ def check_vulkan() -> Check:
 
 
 def check_winget() -> Check:
-    return Check("winget", "winget", ok=_on_path("winget") if config.IS_WINDOWS else True,
-                 required=False,
+    if not config.IS_WINDOWS:
+        # It was reported as present here, with a Windows explanation beside it. The
+        # other Windows-only checks say so; this one now matches them.
+        return Check("winget", "winget", ok=True, required=False,
+                     detail="Not used on this platform.")
+    return Check("winget", "winget", ok=_on_path("winget"), required=False,
                  detail="How git is installed when it is missing, without an administrator.")
 
 

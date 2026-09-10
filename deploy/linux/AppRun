@@ -52,6 +52,45 @@ have_webkitgtk() {
   return 1
 }
 
+# The typelib pystray's AppIndicator backend loads. Stock Ubuntu Desktop has it, as a
+# dependency of the GNOME extension that draws the tray at all; a minimal Debian or a
+# desktop assembled by hand may not, and then pystray silently falls back to its Xorg
+# backend, which draws nothing a modern desktop will show.
+have_tray_typelib() {
+  local dir
+  for dir in /usr/lib/x86_64-linux-gnu/girepository-1.0 \
+             /usr/lib/aarch64-linux-gnu/girepository-1.0 \
+             /usr/lib64/girepository-1.0 /usr/lib/girepository-1.0; do
+    [[ -d "$dir" ]] || continue
+    compgen -G "$dir/AyatanaAppIndicator3-*.typelib" >/dev/null && return 0
+    compgen -G "$dir/AppIndicator3-*.typelib" >/dev/null && return 0
+  done
+  return 1
+}
+
+# Install apt packages from a desktop session, where there is no terminal to type a
+# password into. pkexec puts polkit's own dialog on screen, which is how a desktop
+# application is supposed to ask; passwordless sudo (containers, kiosks) is taken
+# first because it needs no interaction at all.
+#
+# Returns non-zero without asking on anything that is not apt-based, so callers still
+# have to handle "it is not installed and I could not install it".
+apt_install() {
+  command -v apt-get >/dev/null 2>&1 || return 1
+  local -a as_root=()
+  if ((EUID != 0)); then
+    if sudo -n true 2>/dev/null; then
+      as_root=(sudo -n)
+    elif command -v pkexec >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+      as_root=(pkexec)
+    else
+      return 1
+    fi
+  fi
+  # env, not a bare assignment: both sudo and pkexec drop the caller's environment.
+  "${as_root[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
+}
+
 # curl, wget, then python3. A clean Ubuntu Desktop has no curl -- measured, not
 # assumed. python3 is the backstop because GNOME depends on it.
 fetch_to() {
@@ -138,6 +177,10 @@ Check the network connection and try again."
 }
 
 if ! have_webkitgtk; then
+  apt_install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 || true
+fi
+
+if ! have_webkitgtk; then
   # The exact package name differs per distribution, so name the common ones rather
   # than guessing one and being wrong.
   report_problem "$APP_TITLE needs WebKitGTK to draw its window, and it is not installed.
@@ -150,6 +193,15 @@ if ! have_webkitgtk; then
 It is not bundled on purpose: a bundled copy conflicts with the system one more
 often than the dependency itself causes trouble."
   exit 1
+fi
+
+# Best effort, and deliberately quiet: the window is the product and the tray is a
+# convenience, so a machine that will not install this still gets a working program.
+# It is attempted here rather than from Python because it has to happen before the
+# process that will load the typelib starts.
+if ! have_tray_typelib; then
+  apt_install gir1.2-ayatanaappindicator3-0.1 || true
+  have_tray_typelib || echo "[AppRun] no AppIndicator typelib; starting without a tray icon" >&2
 fi
 
 if [[ ! -f "$REQUIREMENTS" ]]; then

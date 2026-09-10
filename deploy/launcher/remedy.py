@@ -9,12 +9,15 @@ user means an application that cannot start and cannot say usefully why.
 Optional third-party tools are the opposite case: not needed by setup, not this
 application's to manage, and no longer listed anywhere in it.
 
-Everything below is per-user and needs no elevation, which is what keeps the whole
-installation free of an administrator prompt.
+On Windows everything below is per-user and needs no elevation, which is what keeps
+that installation free of an administrator prompt. Linux has no per-user equivalent
+for git, so that one goes through the package manager and polkit's password dialog --
+the only prompt in the whole installation, and one a desktop user recognises.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -88,6 +91,45 @@ def install_vcredist() -> bool:
     return _run([str(installer), "/install", "/quiet", "/norestart"], "Visual C++ runtime")
 
 
+def _as_root() -> list[str] | None:
+    """How to run one command as root without a terminal, or None if we cannot.
+
+    pkexec draws polkit's own password dialog, which is the only way to ask on a
+    desktop: the application was double-clicked, so there is no terminal for sudo to
+    prompt in. Passwordless sudo comes first because it asks nothing at all.
+    """
+    if config.IS_WINDOWS:  # also keeps geteuid, which Windows has no equivalent of, unreached
+        return None
+    if os.geteuid() == 0:
+        return []
+    try:
+        if subprocess.run(["sudo", "-n", "true"], capture_output=True,
+                          timeout=10).returncode == 0:
+            return ["sudo", "-n"]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if shutil.which("pkexec") and (os.environ.get("DISPLAY")
+                                   or os.environ.get("WAYLAND_DISPLAY")):
+        return ["pkexec"]
+    return None
+
+
+def install_git_apt() -> bool:
+    if shutil.which("apt-get") is None:
+        log.warning("not an apt-based system, so git cannot be installed automatically")
+        return False
+    as_root = _as_root()
+    if as_root is None:
+        log.warning("no way to gain root without a terminal, so git cannot be installed")
+        return False
+    # env, not a bare assignment: both sudo and pkexec drop the caller's environment.
+    return _run(
+        [*as_root, "env", "DEBIAN_FRONTEND=noninteractive",
+         "apt-get", "install", "-y", "git"],
+        "git",
+    )
+
+
 def install_git() -> bool:
     if shutil.which("winget") is None:
         log.warning("winget is not available, so git cannot be installed automatically")
@@ -104,6 +146,7 @@ FIXERS: dict[str, Callable[[], bool]] = {
     "webview2": install_webview2,
     "vcredist": install_vcredist,
     "winget": install_git,
+    "apt": install_git_apt,
 }
 
 

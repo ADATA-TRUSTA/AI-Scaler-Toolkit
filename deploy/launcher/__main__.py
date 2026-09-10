@@ -95,6 +95,25 @@ def layout_mark_name() -> str:
     return "app-mark.png"
 
 
+def _has_appindicator_typelib() -> bool:
+    """Whether the desktop can show a tray icon through AppIndicator.
+
+    The same directories AppRun checks before offering to install the package, kept in
+    step with it: this is the fallback for a machine where that install did not happen.
+    """
+    for directory in ("/usr/lib/x86_64-linux-gnu/girepository-1.0",
+                      "/usr/lib/aarch64-linux-gnu/girepository-1.0",
+                      "/usr/lib64/girepository-1.0",
+                      "/usr/lib/girepository-1.0"):
+        path = Path(directory)
+        if not path.is_dir():
+            continue
+        for pattern in ("AyatanaAppIndicator3-*.typelib", "AppIndicator3-*.typelib"):
+            if any(path.glob(pattern)):
+                return True
+    return False
+
+
 def _icon_path() -> Path | None:
     """The icon packaging chose, under the fixed name it writes.
 
@@ -712,6 +731,17 @@ class Launcher:
     # ------------------------------------------------------------------ tray
 
     def build_tray(self) -> Any:
+        if not config.IS_WINDOWS:
+            # pystray tries appindicator, then gtk, then xorg, and takes the first that
+            # imports. The last one is the problem: on a Wayland session -- the default
+            # on Ubuntu since 22.04 -- it imports fine and then draws a window nobody
+            # sees, so a missing typelib turns into a tray icon that is simply absent
+            # with nothing in the log. Naming the backend when the typelib is there
+            # makes that case raise instead, and the caller logs it. AppRun installs
+            # the typelib when it can; this covers the machines where it could not.
+            if _has_appindicator_typelib():
+                os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
+
         import pystray
         from PIL import Image
 

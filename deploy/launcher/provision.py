@@ -192,6 +192,15 @@ def build_env() -> dict[str, str]:
     # directory does not grow by gigabytes after setup.
     env["UV_PROJECT_ENVIRONMENT"] = str(config.venv_dir())
     env["HF_HOME"] = str(config.hf_home())
+    if not config.IS_WINDOWS:
+        # setup_env leaves an ordinary desktop's system packages alone unless it is asked,
+        # which is the right default for a script someone runs by hand but the wrong one
+        # here: the user launched an installer, so installing what it needs to build
+        # (cmake, git, build-essential, the Vulkan headers) is the job. Without this the
+        # tools stay missing, llama.cpp is never built, and the only trace is one line in
+        # the log telling a user with no terminal open to run apt themselves. An explicit
+        # setting in the environment still wins, including 0 to forbid it.
+        env.setdefault("TRUSTA_APT_INSTALL", "1")
     # Every default that setup_env exposes is left alone. It picks better than a guess
     # here would: cuda when nvidia-smi answers, xpu otherwise, and it proves an XPU
     # install by running a real GEMM plus a training step before declaring success.
