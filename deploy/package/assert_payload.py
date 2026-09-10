@@ -217,13 +217,33 @@ def main() -> int:
             "Something has been run against this payload; rebuild it with make_payload.py."
         )
 
-    # The installer creates a shortcut to this. Shipping sources instead builds an
-    # installer whose shortcut points at nothing -- and it installs cleanly first.
-    exe = "AIScalerToolkit.exe" if args.platform == "windows" else "AIScalerToolkit"
-    if not (root / exe).is_file() and not (root / "launcher" / "__main__.py").is_file():
-        failures.append(f"payload has neither {exe} nor launcher sources")
-    elif not (root / exe).is_file():
-        failures.append(f"payload ships launcher sources but no {exe}; run build_launcher.py first")
+    # What counts as a launcher differs by platform, because what can draw a window
+    # differs by platform.
+    #
+    # Windows freezes it: the installer creates a shortcut to an executable, and
+    # shipping sources there builds an installer whose shortcut points at nothing --
+    # which installs cleanly first, so nothing catches it but this.
+    #
+    # Linux ships sources. pywebview draws through PyGObject, a compiled module tied
+    # to the system Python and its typelibs; a frozen build carries its own
+    # interpreter, cannot see gi, and fails to open a window on every machine. AppRun
+    # builds a virtual environment on the system Python instead, which is what
+    # launcher-requirements.txt is for.
+    if args.platform == "windows":
+        exe = "AIScalerToolkit.exe"
+        if not (root / exe).is_file() and not (root / "launcher" / "__main__.py").is_file():
+            failures.append(f"payload has neither {exe} nor launcher sources")
+        elif not (root / exe).is_file():
+            failures.append(f"payload ships launcher sources but no {exe}; run build_launcher.py first")
+    else:
+        if not (root / "launcher" / "__main__.py").is_file():
+            failures.append("payload has no launcher sources; AppRun has nothing to run")
+        if not (root / "launcher-requirements.txt").is_file():
+            failures.append(
+                "payload has no launcher-requirements.txt, so AppRun cannot build the "
+                "environment that draws the window; build_appimage.sh exports it from "
+                "deploy/uv.lock"
+            )
 
     icon = root / "app.ico"
     if not icon.is_file():

@@ -30,7 +30,6 @@ BUILD_DIR="$REPO_ROOT/build/appimage"
 APPDIR="$BUILD_DIR/AppDir"
 OUT_DIR="$REPO_ROOT/dist-unsigned"
 TOOL_DIR="$BUILD_DIR/tools"
-LAUNCHER_BUILD="$BUILD_DIR/launcher"
 APPIMAGETOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage}"
 
 # To stderr, not stdout. fetch_appimagetool below returns the tool's path by printing
@@ -69,16 +68,21 @@ fetch_appimagetool() {
   printf '%s' "$tool"
 }
 
-build_launcher() {
-  # Frozen, exactly as on Windows. Without this the payload carries launcher sources
-  # and no executable, AppRun has nothing to exec, and assert_payload says so and
-  # stops the build -- which is what it used to do here, every time, because this
-  # step did not exist.
-  log "freezing the launcher"
-  uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/build_launcher.py" \
-    --out "$LAUNCHER_BUILD"
-  [[ -x "$LAUNCHER_BUILD/AIScalerToolkit/AIScalerToolkit" ]] \
-    || die "build_launcher.py produced no AIScalerToolkit executable"
+# The launcher is not frozen on Linux; AppRun runs it on the system Python so that
+# pywebview can reach the system's PyGObject. What it needs instead is the list of
+# packages to install, pinned to the same lock the Windows build freezes from -- so
+# the two platforms ship the same versions even though they package differently.
+#
+# A requirements.txt used to be exported beside the launcher sources and was removed
+# as "a copy of the record rather than the record". This is not that: it is generated
+# from deploy/uv.lock at build time into the payload, never committed, and it is the
+# only way the AppImage can say what it needs.
+export_requirements() {
+  local out="$BUILD_DIR/payload/launcher-requirements.txt"
+  log "exporting the launcher's requirements from deploy/uv.lock"
+  uv export --project "$REPO_ROOT/deploy" --no-hashes --no-dev --no-emit-project -o "$out" >/dev/null
+  [[ -s "$out" ]] || die "uv export produced no requirements"
+  log "launcher requirements: $(grep -c . "$out") lines"
 }
 
 build_payload() {
@@ -87,8 +91,8 @@ build_payload() {
   # application icon with Pillow; a bare interpreter has no Pillow, so the build
   # stopped on ModuleNotFoundError before it reached anything interesting.
   uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/make_payload.py" \
-    --platform linux --out "$BUILD_DIR/payload" --port "$SERVICE_PORT" \
-    --launcher-dir "$LAUNCHER_BUILD/AIScalerToolkit"
+    --platform linux --out "$BUILD_DIR/payload" --port "$SERVICE_PORT"
+  export_requirements
   uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/assert_payload.py" \
     --platform linux --payload "$BUILD_DIR/payload" --port "$SERVICE_PORT"
 }
@@ -123,7 +127,6 @@ main() {
   check_glibc
 
   mkdir -p "$BUILD_DIR" "$OUT_DIR"
-  build_launcher
   build_payload
   build_appdir
 

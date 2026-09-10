@@ -2,8 +2,8 @@
 #
 # AppImage entry point.
 #
-# Two jobs: say something a person can read when a dependency is missing, and start
-# the launcher. Everything else the launcher does for itself.
+# Three jobs: say something a person can read when a dependency is missing, make sure
+# the launcher has an interpreter that can draw a window, and start it.
 #
 # WebKitGTK is deliberately not bundled. It is large, and a bundled copy conflicts
 # with the system one often enough that shipping it causes more breakage than
@@ -16,9 +16,12 @@ HERE="$(dirname "$(readlink -f "${0}")")"
 APP_ID="ai-scaler-toolkit"
 APP_TITLE="AI Scaler Toolkit"
 APP_ROOT="$HERE/usr/share/$APP_ID"
-LAUNCHER="$APP_ROOT/AIScalerToolkit"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_ID"
+USER_BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
+VENV="$DATA_DIR/launcher-venv"
+REQUIREMENTS="$APP_ROOT/launcher-requirements.txt"
 
-export PATH="$HERE/usr/bin:$PATH"
+export PATH="$HERE/usr/bin:$USER_BIN:$PATH"
 
 # Nothing here is started from a terminal. The .desktop entry is Terminal=false, and
 # so is every other way a desktop launches an application -- an icon, a menu entry,
@@ -49,12 +52,97 @@ have_webkitgtk() {
   return 1
 }
 
+# curl, wget, then python3. A clean Ubuntu Desktop has no curl -- measured, not
+# assumed. python3 is the backstop because GNOME depends on it.
+fetch_to() {
+  local url="$1" out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -LsSf "$url" -o "$out"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$out" "$url"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sys,urllib.request; open(sys.argv[2],"wb").write(urllib.request.urlopen(sys.argv[1],timeout=60).read())' "$url" "$out"
+  else
+    return 1
+  fi
+  [[ -s "$out" ]]
+}
+
+ensure_uv() {
+  command -v uv >/dev/null 2>&1 && return 0
+  local script
+  script="$(mktemp)"
+  if ! fetch_to "https://astral.sh/uv/install.sh" "$script"; then
+    rm -f "$script"
+    report_problem "$APP_TITLE needs uv, and it could not be downloaded.
+
+Check the network connection and try again, or install it by hand:
+
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+It installs into your home directory and needs no administrator rights."
+    return 1
+  fi
+  env UV_INSTALL_DIR="$USER_BIN" UV_UNMANAGED_INSTALL="$USER_BIN" sh "$script" >/dev/null 2>&1
+  rm -f "$script"
+  command -v uv >/dev/null 2>&1
+}
+
+# The launcher runs on the system Python, in a virtual environment that can see the
+# system's site-packages. That is not a preference, it is the only arrangement that
+# works: pywebview draws its window through PyGObject, and PyGObject is a compiled
+# module tied to the system Python and the system's typelibs. A frozen launcher
+# carries its own interpreter, cannot see gi, and fails with
+#
+#   [pywebview] GTK cannot be loaded -- ModuleNotFoundError: No module named 'gi'
+#   WebViewException: You must have either QT or GTK with Python extensions installed
+#
+# every time, on every machine. Windows has no equivalent problem -- WebView2 is a
+# system component reached through COM, not a Python extension -- which is why the
+# two platforms are packaged differently.
+#
+# Everything else pywebview needs (itself, pystray, pillow, pyyaml) is pip-installable
+# and goes in the virtual environment, pinned by the requirements file built beside
+# this AppImage from the same lock the Windows build uses.
+ensure_launcher_env() {
+  local stamp="$VENV/.requirements-stamp"
+  local want
+  want="$(sha256sum "$REQUIREMENTS" 2>/dev/null | cut -d' ' -f1)"
+
+  if [[ -x "$VENV/bin/python" && -n "$want" && -f "$stamp" ]] \
+     && [[ "$(cat "$stamp")" == "$want" ]]; then
+    return 0
+  fi
+
+  ensure_uv || return 1
+
+  # --system-site-packages is the whole point; --python /usr/bin/python3 because a
+  # uv-managed interpreter would be a different build with no gi beside it.
+  rm -rf "$VENV"
+  mkdir -p "$(dirname "$VENV")"
+  if ! uv venv --python /usr/bin/python3 --system-site-packages "$VENV" >/dev/null 2>&1; then
+    report_problem "$APP_TITLE could not create its Python environment at
+
+  $VENV
+
+Check that /usr/bin/python3 exists and that there is space in your home directory."
+    return 1
+  fi
+  if ! uv pip install --python "$VENV/bin/python" --quiet -r "$REQUIREMENTS" >/dev/null 2>&1; then
+    report_problem "$APP_TITLE could not install the packages it needs to draw its window.
+
+Check the network connection and try again."
+    return 1
+  fi
+  printf '%s' "$want" > "$stamp"
+}
+
 if ! have_webkitgtk; then
   # The exact package name differs per distribution, so name the common ones rather
   # than guessing one and being wrong.
   report_problem "$APP_TITLE needs WebKitGTK to draw its window, and it is not installed.
 
-  Debian / Ubuntu   sudo apt install libwebkit2gtk-4.1-0
+  Debian / Ubuntu   sudo apt install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1
   Fedora            sudo dnf install webkit2gtk4.1
   Arch              sudo pacman -S webkit2gtk-4.1
   openSUSE          sudo zypper install libwebkit2gtk-4_1-0
@@ -64,32 +152,18 @@ often than the dependency itself causes trouble."
   exit 1
 fi
 
-# uv builds the backend environment on first run, and setup_env.sh expects to find it
-# rather than installing it. Said now, before the window opens, because the alternative
-# is a setup that starts and then stops on its first command.
-if ! command -v uv >/dev/null 2>&1; then
-  report_problem "$APP_TITLE needs uv to create its environment on first run.
+if [[ ! -f "$REQUIREMENTS" ]]; then
+  report_problem "This build of $APP_TITLE is incomplete: it carries no
 
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  usr/share/$APP_ID/launcher-requirements.txt
 
-It installs into your home directory and needs no administrator rights."
+so there is no way to know what the launcher needs. Please report this build as
+broken."
   exit 1
 fi
 
-# The launcher is frozen, the same as it is on Windows, so it carries pywebview,
-# pystray and the rest with it. The alternative -- shipping sources and running them
-# with the host's Python -- means either building the launcher's own environment
-# before the first window can open, or running with no dependencies at all.
-if [[ ! -x "$LAUNCHER" ]]; then
-  report_problem "This build of $APP_TITLE is incomplete: it carries no launcher
-executable at
-
-  usr/share/$APP_ID/AIScalerToolkit
-
-which means build_appimage.sh packaged a payload that was built without
---launcher-dir. Please report this build as broken."
-  exit 1
-fi
+ensure_launcher_env || exit 1
 
 cd "$APP_ROOT"
-exec "$LAUNCHER" "$@"
+export PYTHONPATH="$APP_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec "$VENV/bin/python" -m launcher "$@"
