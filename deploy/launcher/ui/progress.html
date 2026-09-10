@@ -265,10 +265,25 @@
     document.getElementById("done").classList.add("show");
   };
 
-  window.showError = function (message) {
+  window.showError = function (message, fatal) {
     var box = document.getElementById("error");
     box.textContent = message;
     box.classList.add("show");
+    // Nothing here can be installed our way out of, so offer the only remaining
+    // action rather than leaving a window with no way forward. Closing it exits;
+    // the window disappearing on its own would read as a crash.
+    if (fatal && !document.getElementById("error-close")) {
+      var btn = document.createElement("button");
+      btn.id = "error-close";
+      btn.type = "button";
+      btn.textContent = "Close";
+      btn.onclick = function () {
+        if (window.pywebview && window.pywebview.api && window.pywebview.api.close_unsupported) {
+          window.pywebview.api.close_unsupported();
+        }
+      };
+      box.appendChild(btn);
+    }
   };
 
 </script>

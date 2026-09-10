@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sys
 import threading
 import time
@@ -121,6 +122,10 @@ class WindowApi:
 
     def open_app(self) -> None:
         self._launcher.reload_window()
+
+    def close_unsupported(self) -> None:
+        """Exit, for the screen that says this machine cannot run it."""
+        self._launcher.quit()
 
     def set_compact(self, compact: bool) -> None:
         """The interface hid or showed its chat panel; match the window to it."""
@@ -252,6 +257,11 @@ class Launcher:
         self.settings_window: Any = None
         self.tray: Any = None
         self._quitting = threading.Event()
+        # Set when preflight found something this machine cannot be talked out
+        # of -- no supported GPU, most of all. Closing the window then means
+        # exiting rather than hiding to the tray: there is nothing left for a
+        # tray icon to manage, and one that does nothing is worse than none.
+        self._unsupported = False
         # What the window is currently sized to, so a page asking for the size it is
         # already at costs nothing.
         self._window_size: tuple[int, int] | None = None
@@ -375,7 +385,7 @@ class Launcher:
         A training run can last hours. Closing the window is how people put an
         application away, not how they abandon a job, so only Quit stops the service.
         """
-        if self._quitting.is_set():
+        if self._quitting.is_set() or self._unsupported:
             return True
         if self.window is not None:
             self.window.hide()
@@ -561,7 +571,16 @@ class Launcher:
             lines.append(f"  - {check.label}: {check.detail}")
             if check.remedy:
                 lines.append(f"      {check.remedy}")
-        self._js(f"window.showError({_js_string(chr(10).join(lines))})")
+
+        # Nothing we can install our way out of means the window is the end of the
+        # road, so it offers a way to close and closing exits. The alternative -- the
+        # window vanishing by itself once the message is shown -- is indistinguishable
+        # from a crash, which is the failure this whole screen exists to avoid.
+        self._unsupported = not any(remedy.can_fix(c.fixer) for c in report.blocking)
+        self._js(
+            f"window.showError({_js_string(chr(10).join(lines))}, "
+            f"{'true' if self._unsupported else 'false'})"
+        )
 
     def _choose_port(self, requested: int, suggested: int) -> int:
         """Ask rather than move quietly.
@@ -1107,6 +1126,21 @@ def main(argv: list[str] | None = None) -> int:
         launcher.shutdown()
         single_instance.release()
     log.info("window loop ended; exiting")
+
+    # Ended deliberately rather than by returning, because returning was not enough.
+    # WebKitGTK and the GTK tray leave native threads behind -- llvmpipe, VBlankMonitor,
+    # PressureMonitor, several unnamed ones -- and with them running the interpreter's
+    # own shutdown does not finish. Observed on Linux: this line was logged, main
+    # returned, and the process was still there afterwards with its tray icon still in
+    # the system bar. Someone who pressed Close then had an application that had said
+    # goodbye and not gone.
+    #
+    # Everything that must happen has happened by now: the service is stopped, the
+    # single-instance socket is released, and the log is flushed below. os._exit is the
+    # right tool once there is nothing left to unwind.
+    applog.flush()
+    if not config.IS_WINDOWS:
+        os._exit(0)
     return 0
 
 

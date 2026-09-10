@@ -13,6 +13,7 @@ having to reproduce it.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import logging.handlers
 import os
@@ -86,3 +87,15 @@ def banner() -> None:
     log.info("log file      : %s", log_path())
     log.info("LOCALAPPDATA  : %s", os.environ.get("LOCALAPPDATA", "<unset>"))
     log.info("=" * 68)
+
+
+def flush() -> None:
+    """Push every handler's buffer to disk.
+
+    Needed because the launcher ends with os._exit on Linux, which skips logging's
+    own atexit flush -- and the last lines before an exit are exactly the ones worth
+    having.
+    """
+    for handler in logging.getLogger().handlers:
+        with contextlib.suppress(Exception):
+            handler.flush()

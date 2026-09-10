@@ -113,11 +113,63 @@ def check_vcredist() -> Check:
                  fixer="vcredist")
 
 
-def check_nvidia() -> Check:
-    """Presence decides which accelerator setup_env picks, so report it rather than
-    require it -- a machine with no NVIDIA card is a valid configuration."""
-    return Check("nvidia", "NVIDIA driver", ok=_on_path("nvidia-smi"), required=False,
-                 detail="Selects the CUDA build. Intel GPUs use the XPU build instead.")
+def _has_intel_gpu() -> bool:
+    """An Intel GPU, by the same signals setup_env looks for on this platform."""
+    if config.IS_WINDOWS:
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "(Get-CimInstance Win32_VideoController).Name -join ';'"],
+                capture_output=True, text=True, timeout=30,
+                creationflags=config.subprocess_flags(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return "intel" in proc.stdout.lower()
+    # Linux: a render node, or WSL2's paravirtualised device with Level Zero beside it.
+    if any(Path("/dev/dri").glob("renderD*")):
+        return True
+    return Path("/dev/dxg").exists() and Path("/usr/lib/x86_64-linux-gnu/libze_loader.so.1").exists()
+
+
+def check_accelerator() -> Check:
+    """A GPU this build has a PyTorch for, which means NVIDIA or Intel.
+
+    Required, and it did not used to be: this reported the NVIDIA driver and said a
+    machine without one was a valid configuration. It is not. There are two torch
+    extras, cuda and xpu, and nothing else -- so on a machine with neither, setup used
+    to download several gigabytes and then fail inside a package build, with an error
+    about a missing CUDA toolkit that named nothing a user could act on.
+
+    Checked here because preflight runs before the first byte is downloaded. Whoever
+    has such a machine learns it in a sentence instead of ten minutes.
+
+    TRUSTA_ACCEL overrides it, exactly as it overrides setup_env's own detection. A
+    check that cannot be overridden is worse than no check when the detection is
+    wrong, and it is sometimes wrong: an unusual driver install, a container, a remote
+    session. Someone who names their hardware has said more than any probe can.
+    """
+    forced = os.environ.get("TRUSTA_ACCEL", "").strip().lower()
+    if forced in ("cuda", "xpu"):
+        return Check("accelerator", "GPU", ok=True, required=True,
+                     detail=f"TRUSTA_ACCEL={forced}, so detection is skipped.")
+
+    nvidia = _on_path("nvidia-smi")
+    intel = _has_intel_gpu()
+    if nvidia:
+        found = "NVIDIA, so the CUDA build"
+    elif intel:
+        found = "Intel, so the XPU build"
+    else:
+        found = ""
+    return Check(
+        "accelerator", "GPU", ok=bool(found), required=True,
+        detail=found or "no NVIDIA or Intel GPU was found on this machine.",
+        remedy="" if found else
+               "This build installs PyTorch for NVIDIA or Intel; there is no CPU-only "
+               "build. If you have one of those and it was not detected, check its "
+               "driver, or set TRUSTA_ACCEL=cuda (or xpu) to say so.",
+    )
 
 
 def check_vulkan() -> Check:
@@ -167,7 +219,7 @@ CHECKS = (
     check_webview2,
     check_vcredist,
     check_webkitgtk,
-    check_nvidia,
+    check_accelerator,
     check_vulkan,
     check_winget,
 )
