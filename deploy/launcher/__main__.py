@@ -17,7 +17,6 @@ import os
 import sys
 import threading
 import time
-import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,7 @@ from . import (
     applog,
     autostart,
     brand,
+    browser,
     components,
     config,
     env_file,
@@ -35,6 +35,7 @@ from . import (
     provision,
     remedy,
     service_manager,
+    shortcuts,
     single_instance,
     state,
     updater,
@@ -247,7 +248,7 @@ class SettingsApi:
 
     def open_url(self, url: str) -> None:
         if str(url).startswith(("http://", "https://")):
-            webbrowser.open(url)
+            self._open_url_async(url)
 
 
     # ------------------------------------------------------------- components
@@ -353,8 +354,27 @@ class Launcher:
         No marker needed: only ?ui=compact collapses the view, and only the desktop
         window ever asks for that. A browser gets the full interface by default, which
         is the only thing that makes sense in a browser tab.
+
+        On a worker, because this is reached from the tray menu, whose callbacks run on
+        the thread that also serves the GTK main loop -- and opening a URL can block
+        there for as long as the desktop's opener feels like taking.
         """
-        webbrowser.open(config.service_url(self.service.port))
+        self._open_url_async(config.service_url(self.service.port))
+
+    def _open_url_async(self, url: str) -> None:
+        def work() -> None:
+            if browser.open_url(url):
+                return
+            # Silently doing nothing is the failure this replaces. Even when no
+            # browser can be reached the address is still useful: the service is
+            # running and anything on the machine can talk to it.
+            self._notify(
+                "No browser could be opened",
+                f"The interface is running at\n\n  {url}\n\n"
+                "Open that address in a browser to use it.",
+            )
+
+        threading.Thread(target=work, name="open-url", daemon=True).start()
 
     def open_settings(self) -> None:
         """Open the settings window, or raise the one already open.
@@ -731,16 +751,15 @@ class Launcher:
     # ------------------------------------------------------------------ tray
 
     def build_tray(self) -> Any:
-        if not config.IS_WINDOWS:
-            # pystray tries appindicator, then gtk, then xorg, and takes the first that
-            # imports. The last one is the problem: on a Wayland session -- the default
-            # on Ubuntu since 22.04 -- it imports fine and then draws a window nobody
-            # sees, so a missing typelib turns into a tray icon that is simply absent
-            # with nothing in the log. Naming the backend when the typelib is there
-            # makes that case raise instead, and the caller logs it. AppRun installs
-            # the typelib when it can; this covers the machines where it could not.
-            if _has_appindicator_typelib():
-                os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
+        # pystray tries appindicator, then gtk, then xorg, and takes the first that
+        # imports. The last one is the problem: on a Wayland session -- the default on
+        # Ubuntu since 22.04 -- it imports fine and then draws a window nobody sees, so
+        # a missing typelib turns into a tray icon that is simply absent with nothing
+        # in the log. Naming the backend when the typelib is there makes that case
+        # raise instead, and the caller logs it. AppRun installs the typelib when it
+        # can; this covers the machines where it could not.
+        if not config.IS_WINDOWS and _has_appindicator_typelib():
+            os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
 
         import pystray
         from PIL import Image
@@ -1132,6 +1151,13 @@ def main(argv: list[str] | None = None) -> int:
             # to the main loop the host is about to run instead of starting one.
             launcher.tray.run_detached()
             log.info("tray attached to the main loop")
+
+    # The menu entry and the desktop icon, which Linux had neither of: the AppImage
+    # was the only way in, so between logins the user had to go and find the file.
+    # Rewritten whenever it disagrees with this copy, for the same reason autostart is
+    # refreshed below -- the recorded path goes stale when the AppImage moves.
+    with contextlib.suppress(Exception):
+        shortcuts.ensure()
 
     if state.get("autostart") and not autostart.is_enabled():
         # Default-on has to be applied once, on the first run that owns the setting.

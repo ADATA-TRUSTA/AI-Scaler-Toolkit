@@ -29,7 +29,12 @@ RUN_VALUE = config.APP_NAME
 LOGIN_FLAG = "--autostart"
 
 
-def _launch_command() -> str:
+def launch_command(*flags: str) -> str:
+    """How to start this application again later.
+
+    Shared with the menu and desktop shortcuts, which want the same command without
+    the login flag -- opening it from a menu is not a login.
+    """
     # An AppImage is mounted for the length of one run and unmounted afterwards, so
     # everything inside it -- sys.executable included -- has a path that is gone by the
     # next login. Recording one produces the quietest possible failure: an autostart
@@ -38,12 +43,13 @@ def _launch_command() -> str:
     # The AppImage runtime exports APPIMAGE, the path of the .AppImage file itself.
     # That is the thing that is still there tomorrow, and running it is exactly what
     # the user does by hand.
+    suffix = "".join(f" {flag}" for flag in flags)
     appimage = os.environ.get("APPIMAGE")
     if appimage and Path(appimage).is_file():
-        return f'"{appimage}" {LOGIN_FLAG}'
+        return f'"{appimage}"{suffix}'
     if getattr(sys, "frozen", False):
-        return f'"{Path(sys.executable).resolve()}" {LOGIN_FLAG}'
-    return f'"{sys.executable}" -m launcher {LOGIN_FLAG}'
+        return f'"{Path(sys.executable).resolve()}"{suffix}'
+    return f'"{sys.executable}" -m launcher{suffix}'
 
 
 def is_enabled() -> bool:
@@ -123,7 +129,7 @@ def enable() -> None:
     if config.IS_WINDOWS:
         subprocess.run(
             ["reg", "add", rf"HKCU\{RUN_KEY}", "/v", RUN_VALUE, "/t", "REG_SZ",
-             "/d", _launch_command(), "/f"],
+             "/d", launch_command(LOGIN_FLAG), "/f"],
             check=True, capture_output=True, creationflags=config.subprocess_flags(),
         )
         return
@@ -134,7 +140,7 @@ def enable() -> None:
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name={config.APP_TITLE}\n"
-        f"Exec={_launch_command()}\n"
+        f"Exec={launch_command(LOGIN_FLAG)}\n"
         "Terminal=false\n"
         "X-GNOME-Autostart-enabled=true\n",
         encoding="utf-8",

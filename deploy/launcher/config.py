@@ -294,6 +294,46 @@ def autostart_target() -> Path:
     return Path.home() / ".config" / "autostart" / f"{APP_ID}.desktop"
 
 
+def menu_entry_target() -> Path:
+    """The applications-menu entry. Linux only; on Windows the installer writes a
+    Start Menu shortcut."""
+    return Path.home() / ".local" / "share" / "applications" / f"{APP_ID}.desktop"
+
+
+def desktop_shortcut_target() -> Path:
+    """The icon on the desktop, matching the one the Windows installer offers.
+
+    XDG_DESKTOP_DIR when the user has one -- a localised desktop directory is normal
+    outside English installs, and writing to ~/Desktop there leaves a file nobody
+    sees.
+    """
+    return _xdg_desktop_dir() / f"{APP_ID}.desktop"
+
+
+def _xdg_desktop_dir() -> Path:
+    config_file = Path(
+        os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
+    ) / "user-dirs.dirs"
+    try:
+        for line in config_file.read_text(encoding="utf-8").splitlines():
+            if not line.startswith("XDG_DESKTOP_DIR="):
+                continue
+            value = line.split("=", 1)[1].strip().strip('"')
+            expanded = os.path.expandvars(value.replace("$HOME", str(Path.home())))
+            if expanded:
+                return Path(expanded)
+    except OSError:
+        pass
+    return Path.home() / "Desktop"
+
+
+def menu_icon_target() -> Path:
+    """Where the menu entry's Icon= name resolves from. hicolor is the theme every
+    desktop falls back to, so an icon there is found without one being configured."""
+    return (Path.home() / ".local" / "share" / "icons" / "hicolor" / "256x256"
+            / "apps" / f"{APP_ID}.png")
+
+
 def service_url(port: int) -> str:
     return f"http://{SERVICE_HOST}:{port}"
 

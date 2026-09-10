@@ -10,11 +10,10 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import urllib.request
-import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, github, state
+from . import browser, config, github, state
 
 
 @dataclass(frozen=True)
@@ -57,7 +56,7 @@ def check(repo: str = github.DEFAULT_REPO) -> UpdateStatus:
 
 def open_release_page(status: UpdateStatus) -> None:
     if status.release_url:
-        webbrowser.open(status.release_url)
+        browser.open_url(status.release_url)
 
 
 def download_and_launch(status: UpdateStatus) -> Path:

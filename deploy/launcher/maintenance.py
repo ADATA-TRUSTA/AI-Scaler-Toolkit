@@ -16,7 +16,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import applog, autostart, config
+from . import applog, autostart, config, shortcuts
 
 log = applog.get("maintenance")
 
@@ -101,5 +101,8 @@ def clear_autostart(*, dry_run: bool = False) -> bool:
     if dry_run:
         return autostart.is_enabled()
     autostart.disable()
+    # The menu entry and desktop icon go with it. They name the same absolute path,
+    # so leaving them behind gives the same silent failure with a visible icon on it.
+    shortcuts.remove()
     log.info("autostart entry cleared")
     return True
