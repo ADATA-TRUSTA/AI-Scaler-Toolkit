@@ -1049,12 +1049,40 @@ def main(argv: list[str] | None = None) -> int:
     # Navigation clears injected globals, so the hook is put back after every load.
     launcher.window.events.loaded += launcher._inject_host_hook
 
-    launcher.tray = launcher.build_tray()
-    # pywebview needs the main thread on Windows, so the tray goes to a worker. It is
-    # a daemon: if the window loop ends unexpectedly the process must still exit.
-    threading.Thread(target=launcher.tray.run, name="tray", daemon=True).start()
-
-    log.info("tray started")
+    # The tray is a convenience; the window is the product. Building it used to be
+    # unguarded, so a desktop where the tray backend cannot start took the whole
+    # application with it -- observed on Linux, where pystray picks its Xorg backend
+    # at import time and raises DisplayNameError if it cannot reach an X server. The
+    # user's machine is then one that shows nothing at all rather than one without a
+    # tray icon.
+    try:
+        launcher.tray = launcher.build_tray()
+    except Exception:
+        launcher.tray = None
+        log.exception("could not create the tray icon; carrying on without one")
+    else:
+        if config.IS_WINDOWS:
+            # pywebview needs the main thread on Windows, so the tray goes to a
+            # worker. It is a daemon: if the window loop ends unexpectedly the
+            # process must still exit.
+            threading.Thread(target=launcher.tray.run, name="tray", daemon=True).start()
+            log.info("tray started")
+        else:
+            # Not a thread on Linux. Both halves are GTK here -- pystray's
+            # AppIndicator backend and pywebview's GTK backend -- and GTK has one
+            # default main context, which whichever starts first takes. Running the
+            # tray in a worker took it, and pywebview then said
+            #
+            #   GLib-GIO-CRITICAL: g_application_run() cannot acquire the default
+            #   main context because it is already acquired by another thread!
+            #
+            # and the window loop ended immediately, leaving a process with a tray
+            # icon and no window.
+            #
+            # run_detached is pystray's answer for exactly this: it attaches the icon
+            # to the main loop the host is about to run instead of starting one.
+            launcher.tray.run_detached()
+            log.info("tray attached to the main loop")
 
     if state.get("autostart") and not autostart.is_enabled():
         # Default-on has to be applied once, on the first run that owns the setting.
