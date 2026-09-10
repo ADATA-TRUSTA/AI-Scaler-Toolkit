@@ -28,7 +28,12 @@ log = applog.get("progress")
 # recorded. Measured on a CUDA install; the first run on any machine corrects it.
 # `uv sync` prints "Resolved 286 packages" but installs far fewer -- resolution covers
 # the whole graph including alternatives -- so the resolved count is not the total.
-EXPECTED_PACKAGES = 143
+#
+# Two numbers because the two platforms install different things: Linux gets the vllm
+# extra as well, which more than doubles the tree. One number for both meant a first
+# Linux run counted past its own denominator and showed "275 of ~143" -- a progress
+# bar that is full and still going is worse than no progress bar.
+EXPECTED_PACKAGES = 143 if config.IS_WINDOWS else 319
 
 POLL_SECONDS = 1.0
 
