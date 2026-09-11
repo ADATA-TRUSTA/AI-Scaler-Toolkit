@@ -3,10 +3,11 @@
 The split is deliberate: prerequisites *we* need are detected and installed here;
 optional third-party tools are not this application's business at all.
 
-git is the one that surprises people. It looks like something a user would already
-have, but provisioning needs it directly -- setup_env fetches the GGUF conversion
-tooling with a sparse checkout -- so a machine without it fails partway through setup
-rather than at first use.
+git was checked here until setup_env stopped needing it. It fetched the GGUF conversion
+tooling with a sparse checkout, so a machine without git failed partway through setup;
+now that the sources come from an archive of the pinned tag there is nothing to check,
+and on Windows nothing to install -- winget has no per-user git, so that check was the
+only thing in a deliberately per-user installer that raised a UAC prompt.
 """
 
 from __future__ import annotations
@@ -67,22 +68,6 @@ def _reg_value_exists(root: str, key: str, value: str) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     return proc.returncode == 0
-
-
-def check_git() -> Check:
-    return Check(
-        key="git",
-        label="Git",
-        ok=_on_path("git"),
-        required=True,
-        detail="Needed by setup during installation, not just by developers.",
-        remedy="https://git-scm.com/download/win" if config.IS_WINDOWS
-        else "install git with your package manager",
-        # Linux had no fixer, so a clean desktop -- where git is genuinely not
-        # installed -- stopped at this screen with nothing to press. apt covers the
-        # distributions this is shipped for; anywhere else still gets the text above.
-        fixer="winget" if config.IS_WINDOWS else "apt",
-    )
 
 
 def check_webview2() -> Check:
@@ -187,16 +172,6 @@ def check_vulkan() -> Check:
                  remedy="usually installed with the graphics driver")
 
 
-def check_winget() -> Check:
-    if not config.IS_WINDOWS:
-        # It was reported as present here, with a Windows explanation beside it. The
-        # other Windows-only checks say so; this one now matches them.
-        return Check("winget", "winget", ok=True, required=False,
-                     detail="Not used on this platform.")
-    return Check("winget", "winget", ok=_on_path("winget"), required=False,
-                 detail="How git is installed when it is missing, without an administrator.")
-
-
 def check_webkitgtk() -> Check:
     """Linux only. Not bundled in the AppImage on purpose: it is large and conflicts
     with the system copy often enough that shipping it causes more breakage than the
@@ -222,13 +197,11 @@ def check_disk() -> Check:
 
 CHECKS = (
     check_disk,
-    check_git,
     check_webview2,
     check_vcredist,
     check_webkitgtk,
     check_accelerator,
     check_vulkan,
-    check_winget,
 )
 
 

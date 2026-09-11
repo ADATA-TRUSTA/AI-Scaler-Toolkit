@@ -29,6 +29,10 @@ REPO_ROOT = DEPLOY_DIR.parent
 CANDIDATES = (
     r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     r"C:\Program Files\Inno Setup 6\ISCC.exe",
+    # Where --scope user puts it, which is what the hint below tells people to run.
+    # Without this entry that instruction produces an installation this cannot see.
+    str(Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Default\AppData\Local"))
+        / "Programs" / "Inno Setup 6" / "ISCC.exe"),
 )
 
 INSTALL_HINT = """Inno Setup's compiler (ISCC) was not found.
