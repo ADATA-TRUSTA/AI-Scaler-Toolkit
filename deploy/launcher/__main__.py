@@ -887,28 +887,24 @@ class Launcher:
     # ------------------------------------------------------------------ exit
 
     def quit(self) -> None:
-        """The only path that stops the service.
+        """The only path that stops the service. Quit means quit.
 
-        A component install is asked about first, and the reason is a real casualty:
-        an install interrupted partway left a third-party tool with a virtual
-        environment and no packages in it -- broken, and reporting itself as present.
-        Its installer is a child of this process reading from a pipe we own, so this
-        process going away is enough to abort it mid-write.
+        There used to be a second question here, asked whenever a model was loaded or
+        a training run was going, on the grounds that the service serves other
+        applications too. It is gone. A model is loaded almost all of the time this is
+        running, so the dialog was not the rare warning it was designed as -- it stood
+        between the user and the one button whose meaning is not in doubt.
+
+        The install below still asks, and it is a different thing: not "are you sure",
+        but a warning that stopping now leaves something broken on disk. An install
+        interrupted partway left a third-party tool with a virtual environment and no
+        packages in it, reporting itself as present. Its installer is a child of this
+        process reading from a pipe we own, so this process going away is enough to
+        abort it mid-write.
 
         Closing the settings window is safe; the install runs here, not there. Quitting
         is what takes it down, so quitting is what asks.
-
-        Work in the backend is asked about for a different reason. The service holds
-        loaded models and serves them to other applications, not only to this window,
-        so stopping it can break something the user is doing somewhere else entirely --
-        which they will not connect to having quit a tray icon. Only when something is
-        actually loaded or training, because a confirmation that appears every time is
-        one nobody reads.
         """
-        if not self._confirm_quit_while_busy():
-            log.info("quit cancelled: the backend is in use")
-            return
-
         job = components.current_job()
         if job and job["running"] and not self._confirm_quit_during_install(job["id"]):
             log.info("quit cancelled: %s is still installing", job["id"])
@@ -959,53 +955,6 @@ class Launcher:
             self.service.unwatch()
         with contextlib.suppress(Exception):
             self.service.stop()
-
-    def _confirm_quit_while_busy(self) -> bool:
-        """True to go ahead. Silent unless the backend is holding something."""
-        body = service_manager.health(self.service.port, timeout=2.0)
-        if not body:
-            return True
-        doing = []
-        if body.get("training_active"):
-            doing.append("a training run is in progress")
-        if body.get("model_loaded"):
-            doing.append("a model is loaded")
-        if not doing:
-            return True
-
-        log.info("quit while busy: %s", "; ".join(doing))
-        return self._ask(
-            "The backend is in use",
-            f"{' and '.join(doing).capitalize()}.\n\n"
-            "Other applications can be using the loaded model through this service, "
-            "and quitting stops it for them too.\n\n"
-            "OK: quit anyway.\nCancel: leave it running.",
-        )
-
-    def _ask(self, title: str, message: str) -> bool:
-        """A yes/no the user cannot miss, without needing a window to hang it on."""
-        if sys.platform != "win32":
-            target = self.settings_window or self.window
-            if target is None:
-                return True
-            with contextlib.suppress(Exception):
-                return bool(target.create_confirmation_dialog(title, message))
-            return True
-
-        import ctypes
-
-        MB_OKCANCEL, MB_ICONWARNING = 0x1, 0x30
-        MB_SETFOREGROUND, MB_TOPMOST = 0x10000, 0x40000
-        IDOK = 1
-        try:
-            answer = ctypes.windll.user32.MessageBoxW(
-                None, message, f"{config.APP_TITLE} — {title}",
-                MB_OKCANCEL | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
-            )
-        except Exception:
-            log.exception("could not ask")
-            return True
-        return answer == IDOK
 
     def _confirm_quit_during_install(self, component_id: str) -> bool:
         """Ask before abandoning an install. Defaults to quitting if we cannot ask."""
