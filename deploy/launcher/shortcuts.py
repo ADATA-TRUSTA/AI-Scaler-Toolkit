@@ -26,37 +26,51 @@ from . import applog, autostart, config
 log = applog.get("shortcuts")
 
 
-def _entry_text() -> str:
+def _entry_text(icon: Path | None) -> str:
+    # Icon= is the installed file's path, not the theme name it was installed under.
+    #
+    # A themed name is the tidier form and it does not work on a first run: the icon
+    # goes into ~/.local/share/icons/hicolor, that directory has no index.theme of its
+    # own, and GNOME's desktop-icons extension does not resolve a name there until its
+    # caches are rebuilt. The shortcut therefore showed a blank document until the user
+    # logged out and back in -- which is what hid this, since the icon was fine on every
+    # machine that had been restarted since installing.
+    #
+    # A path is resolved by the loader directly, so it is right immediately. The file is
+    # still installed into hicolor, which is where it belongs and where anything that
+    # does look up by name will find it.
+    #
     # Categories so the entry lands somewhere sensible in a menu that has sections.
-    # StartupWMClass matches what the toolkit reports for the window, which is what
-    # lets a running window associate with this icon in a dock instead of appearing
-    # as a second, unnamed one.
+    # StartupWMClass matches what the toolkit reports for the window, which is what lets
+    # a running window associate with this icon in a dock instead of appearing as a
+    # second, unnamed one.
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name={config.APP_TITLE}\n"
         "Comment=Fine-tune and serve local language models\n"
         f"Exec={autostart.launch_command()}\n"
-        f"Icon={config.APP_ID}\n"
+        f"Icon={icon if icon else config.APP_ID}\n"
         "Terminal=false\n"
         "Categories=Development;Science;\n"
         f"StartupWMClass={config.APP_ID}\n"
     )
 
 
-def _write_icon() -> bool:
+def _write_icon() -> Path | None:
+    """Install the icon and return where it landed, or None if it could not be."""
     source = config.payload_dir() / "app-mark.png"
     if not source.is_file():
         log.info("no app-mark.png in the payload; the menu entry gets no icon")
-        return False
+        return None
     target = config.menu_icon_target()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
     except OSError as exc:
         log.warning("could not write the icon to %s: %s", target, exc)
-        return False
-    return True
+        return None
+    return target
 
 
 def _trust(path: Path) -> None:
@@ -80,8 +94,7 @@ def ensure() -> None:
     if config.IS_WINDOWS:
         return
 
-    text = _entry_text()
-    _write_icon()
+    text = _entry_text(_write_icon())
 
     menu = config.menu_entry_target()
     try:
