@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import signal
 import socket
 import subprocess
 import threading
@@ -49,15 +50,65 @@ def is_port_free(port: int, host: str = config.SERVICE_HOST) -> bool:
         return sock.connect_ex((host, port)) != 0
 
 
+def _listening_pid_linux(port: int) -> int | None:
+    """The same answer as netstat below, from /proc.
+
+    /proc/net/tcp lists every socket with the inode that owns it, and /proc/<pid>/fd
+    holds a symlink named socket:[inode] for each socket a process has open; joining
+    the two identifies the listener. ss and lsof answer the same question, and neither
+    is guaranteed to be installed -- ss is missing from minimal images and lsof from
+    most of them -- whereas /proc is Linux itself.
+
+    Matched on the port alone. The service binds the loopback address, but a
+    hand-started backend on the same port may have bound 0.0.0.0, and that is still
+    the process standing between this launcher and the port it needs.
+    """
+    inodes = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            lines = Path(f"/proc/net/{name}").read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != "0A":  # 0A is TCP_LISTEN
+                continue
+            _, _, local_port = fields[1].rpartition(":")
+            try:
+                if int(local_port, 16) == port:
+                    inodes.add(fields[9])
+            except ValueError:
+                continue
+    if not inodes:
+        return None
+
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            for descriptor in (entry / "fd").iterdir():
+                target = os.readlink(descriptor)
+                if target.startswith("socket:[") and target[8:-1] in inodes:
+                    return int(entry.name)
+        except OSError:
+            continue  # gone, or someone else's process
+    return None
+
+
 def listening_pid(port: int, host: str = config.SERVICE_HOST) -> int | None:
     """Which process is listening on this port, if any.
 
     Needed because a launcher can adopt a service it did not spawn, and then has no
     handle to stop it with. netstat rather than a library: this runs inside a frozen
     build where every dependency is weight, and the answer is one line of output.
+
+    This returned None on Linux, which made every caller a no-op there: stopping an
+    adopted service did nothing and said nothing, so Quit -- which calls itself the
+    only path that stops the service -- left the backend running, exactly the fault
+    the Windows side of this was written to fix.
     """
     if not config.IS_WINDOWS:
-        return None
+        return _listening_pid_linux(port)
     try:
         result = subprocess.run(["netstat", "-ano", "-p", "TCP"],
                                 capture_output=True, text=True, timeout=30,
@@ -75,6 +126,35 @@ def listening_pid(port: int, host: str = config.SERVICE_HOST) -> int | None:
 
 def terminate_pid(pid: int) -> bool:
     """Ask a process to go, then insist. Someone else's service is still someone's."""
+    if not config.IS_WINDOWS:
+        # SIGTERM, then SIGKILL, to the process group so that the engine subprocesses
+        # the backend spawned (llama-server, vLLM) go with it rather than being
+        # reparented and left holding the GPU.
+        #
+        # Never to our own group, which would take this launcher with it. That is not
+        # hypothetical: a service started by a previous launcher from the same shell
+        # inherits that group, and the launcher started next in it shares it.
+        try:
+            group: int | None = os.getpgid(pid)
+            if group == os.getpgid(0):
+                group = None
+        except OSError:
+            group = None
+
+        for signal_number in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                if group is not None:
+                    os.killpg(group, signal_number)
+                else:
+                    os.kill(pid, signal_number)
+            except OSError:
+                return True  # already gone
+            time.sleep(1.0 if signal_number == signal.SIGTERM else 0.2)
+            if not listening_pid_alive(pid):
+                return True
+        log.warning("could not stop pid %s", pid)
+        return False
+
     try:
         subprocess.run(["taskkill", "/PID", str(pid), "/T"],
                        capture_output=True, timeout=20,
@@ -91,6 +171,11 @@ def terminate_pid(pid: int) -> bool:
 
 
 def listening_pid_alive(pid: int) -> bool:
+    if not config.IS_WINDOWS:
+        # /proc rather than signal 0: a process this launcher did not spawn is not its
+        # child, so there is no reaping, and a zombie would answer signal 0 as alive.
+        return Path(f"/proc/{pid}").is_dir()
+
     try:
         result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                                 capture_output=True, text=True, timeout=20,

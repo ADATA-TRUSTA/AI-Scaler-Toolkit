@@ -156,6 +156,62 @@ def _payload_stamp(shipped: Path) -> str:
     return f"walk:{count}:{total}:{int(newest)}"
 
 
+# What a payload refresh must carry across, relative to the payload root.
+#
+# These are made on this machine rather than shipped, and they live inside the backend
+# project because that is where the backend looks for them. Replacing the payload
+# wholesale therefore deleted, on every upgrade: the user's registered models, the
+# settings the launcher and setup_env recorded, and a llama build that takes ten
+# minutes of CPU to make again. Nothing said so -- the next start simply had no models
+# in it and no llama binary, while state.json still reported the machine as
+# provisioned.
+#
+# Windows never had this: its installer overwrites rather than replaces, so all of it
+# survived there. This brings Linux to the same place.
+#
+# Named individually rather than by directory. service/configs also holds shipped
+# deepspeed configurations, and keeping the whole directory would pin those to
+# whatever the first installed release contained.
+PRESERVED_PAYLOAD_PATHS = (
+    "backend/.env",
+    "backend/service/configs/models_registry.json",
+    "backend/service/utils/llama-bin",
+    "backend/service/utils/llama-build",
+    "backend/service/utils/llama.cpp",
+)
+
+
+_payload_refreshed = False
+
+
+def payload_was_refreshed() -> bool:
+    """Whether this run replaced the working payload, i.e. this is the first start
+    after an upgrade. False until ensure_writable_payload has run."""
+    return _payload_refreshed
+
+
+def _move_preserved(source: Path, target: Path) -> None:
+    """Move whatever of PRESERVED_PAYLOAD_PATHS exists from one tree to another.
+
+    A move, not a copy: on one filesystem it is a rename, and llama-build alone is
+    several gigabytes.
+
+    Never over something already there, which is what makes an interrupted refresh
+    safe to repeat. A set-aside copy exists only because a previous attempt did not
+    finish putting it back, so it is the one to keep; and nothing in the list is ever
+    shipped, so on the way back there is nothing of the new release to overwrite.
+    """
+    import shutil
+
+    for relative in PRESERVED_PAYLOAD_PATHS:
+        origin = source / relative
+        destination = target / relative
+        if not origin.exists() or destination.exists():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(origin), str(destination))
+
+
 def ensure_writable_payload() -> Path:
     """Make sure the payload the launcher works from can be written to.
 
@@ -168,6 +224,8 @@ def ensure_writable_payload() -> Path:
     stale copy would go on being used and the upgrade would appear to do nothing.
     """
     import shutil
+
+    global _payload_refreshed
 
     shipped = shipped_payload_dir()
     if _is_writable(shipped):
@@ -182,12 +240,19 @@ def ensure_writable_payload() -> Path:
 
     # Replaced rather than merged. A copy over the top of an older one leaves whatever
     # the new release removed, which is the same class of fault the Windows installer
-    # needed [InstallDelete] for.
+    # needed [InstallDelete] for -- but everything in PRESERVED_PAYLOAD_PATHS has to
+    # come through it, so it is set aside first and put back afterwards.
+    keep = working.parent / "payload.keep"
     if working.exists():
+        _move_preserved(working, keep)
         shutil.rmtree(working, ignore_errors=True)
     working.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(shipped, working)
+    if keep.is_dir():
+        _move_preserved(keep, working)
+        shutil.rmtree(keep, ignore_errors=True)
     stamp_file.write_text(stamp + "\n", encoding="utf-8")
+    _payload_refreshed = True
     return working
 
 

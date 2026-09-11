@@ -354,14 +354,13 @@ class Launcher:
         No marker needed: only ?ui=compact collapses the view, and only the desktop
         window ever asks for that. A browser gets the full interface by default, which
         is the only thing that makes sense in a browser tab.
-
-        On a worker, because this is reached from the tray menu, whose callbacks run on
-        the thread that also serves the GTK main loop -- and opening a URL can block
-        there for as long as the desktop's opener feels like taking.
         """
         self._open_url_async(config.service_url(self.service.port))
 
     def _open_url_async(self, url: str) -> None:
+        """Opening a URL can block for as long as the desktop's opener feels like
+        taking, and every caller here is a thread that must not be held up: a tray
+        menu item, or the page's own JavaScript bridge."""
         def work() -> None:
             if browser.open_url(url):
                 return
@@ -708,6 +707,24 @@ class Launcher:
                 log.info("bootstrap: quitting, so not starting the service")
                 return
 
+            # A service that outlived the launcher is normally adopted. Not after an
+            # upgrade: the payload was replaced under it, which is the directory it
+            # was started in and the code it is running. Its working directory no
+            # longer exists, so every relative path it touches fails with
+            #
+            #   FileNotFoundError: [Errno 2] No such file or directory
+            #
+            # while /health goes on answering "healthy" -- a backend that reports
+            # itself fine and cannot load a model. Replacing it is also simply
+            # correct: an upgrade should leave the new backend running, not the old.
+            if config.payload_was_refreshed() and self.service.status() == "ours":
+                log.info("the payload was replaced under a running service; "
+                         "restarting it on the new one")
+                self._set_step("Restarting the service", None,
+                               "the update replaced it", 0)
+                with contextlib.suppress(Exception):
+                    self.service.stop()
+
             log.info("bootstrap: starting the service")
             self._js(f"window.setPhase({_js_string('done')})")
             self._set_step("Starting the service", None, "loading the GPU runtime", 0)
@@ -782,14 +799,51 @@ class Launcher:
         # Checking for updates went to the settings page. It belongs where someone
         # goes to look for it, not behind a right-click.
         menu = pystray.Menu(
-            pystray.MenuItem("Open window", lambda: self.open_window(), default=True),
-            pystray.MenuItem("Open full interface in browser", lambda: self.open_in_browser()),
+            pystray.MenuItem("Open window", self._menu_action(self.open_window, "open"),
+                             default=True),
+            pystray.MenuItem("Open full interface in browser",
+                             self._menu_action(self.open_in_browser, "browser")),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Settings", lambda: self.open_settings()),
+            pystray.MenuItem("Settings", self._menu_action(self.open_settings, "settings")),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", lambda: self.quit()),
+            pystray.MenuItem("Quit", self._menu_action(self.quit, "quit")),
         )
         return pystray.Icon(config.APP_ID, image, config.APP_TITLE, menu)
+
+    def _menu_action(self, action: Any, name: str) -> Any:
+        """Run a menu item on a worker, never on the thread that serves the UI.
+
+        On Linux the tray is attached to the window's GTK main loop (see run_detached
+        below), so a menu callback runs on the very thread pywebview needs in order to
+        do anything -- and two of these items are nothing but pywebview calls.
+
+        Both failures are silent. create_window does its work only when it is called
+        from somewhere other than the main thread:
+
+            if threading.current_thread().name != 'MainThread' and guilib:
+                ...
+                guilib.create_window(window)
+            return window
+
+        so Settings appended a window to a list, returned it, logged "opening the
+        settings window", and showed nothing, forever. create_confirmation_dialog is
+        the other shape of the same problem: it queues work on the main loop and waits
+        for the answer, which on the main loop is a deadlock -- reached only by
+        quitting with a model loaded, which is why it went unnoticed.
+
+        Windows already ran these on pystray's own thread; a worker changes nothing
+        there, and one rule for both platforms is easier to keep right than two.
+        """
+        def start() -> None:
+            threading.Thread(target=self._run_menu_action, args=(action, name),
+                             name=f"tray-{name}", daemon=True).start()
+        return start
+
+    def _run_menu_action(self, action: Any, name: str) -> None:
+        try:
+            action()
+        except Exception:
+            log.exception("tray: %s failed", name)
 
     def _guard(self, action: Any) -> None:
         try:
