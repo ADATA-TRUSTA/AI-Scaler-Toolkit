@@ -76,6 +76,7 @@ def provisioning_output(*, dry_run: bool = False) -> Removal:
     result = Removal()
     _remove(config.venv_dir(), "virtual environment", result, dry_run=dry_run)
     _remove(config.llama_dir(), "llama runtime", result, dry_run=dry_run)
+    _remove(config.llama_build_dir(), "llama sources and build tree", result, dry_run=dry_run)
     _remove(config.legacy_llama_binary(), "llama binary (legacy location)", result, dry_run=dry_run)
     _remove(config.gguf_tools_dir(), "GGUF conversion tooling", result, dry_run=dry_run)
     _remove(config.llama_staging_dir(), "llama installer staging", result, dry_run=dry_run)

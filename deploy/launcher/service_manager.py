@@ -147,8 +147,21 @@ def terminate_pid(pid: int) -> bool:
                     os.killpg(group, signal_number)
                 else:
                     os.kill(pid, signal_number)
-            except OSError:
+            except ProcessLookupError:
                 return True  # already gone
+            except PermissionError:
+                # Not ours to stop. The fingerprint says the service on this port is
+                # this backend, which is not the same as saying this user started it --
+                # on a shared machine, or after a system-wide install, it can belong to
+                # someone else. Reporting that as a successful stop made Quit claim to
+                # have stopped a service that was still holding the port, and the next
+                # start adopted it again.
+                log.warning("pid %s belongs to another user; it cannot be stopped from "
+                            "here", pid)
+                return False
+            except OSError:
+                log.warning("could not signal pid %s", pid)
+                return False
             time.sleep(1.0 if signal_number == signal.SIGTERM else 0.2)
             if not listening_pid_alive(pid):
                 return True

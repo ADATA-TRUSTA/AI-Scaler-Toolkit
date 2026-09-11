@@ -57,8 +57,15 @@ def _handoff(command: list[str]) -> bool:
 
 
 def _spawn(command: list[str]) -> bool:
-    """Start a browser directly. It keeps running, so the test is the opposite one:
-    it must still be alive once it has had a moment to fail."""
+    """Start a browser directly.
+
+    Success has two shapes here, and counting only one of them was a bug. A browser
+    with no instance running becomes the window and stays alive, so still running after
+    a moment means it worked. A browser that already has an instance forwards the URL
+    to it and exits 0 immediately -- the common case, and it was being read as a
+    failure: every remaining candidate was tried and the user was told no browser could
+    be opened, in front of the tab that had just opened.
+    """
     try:
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=True)
@@ -66,11 +73,12 @@ def _spawn(command: list[str]) -> bool:
         log.info("%s could not start: %s", command[0], exc)
         return False
     try:
-        proc.wait(timeout=2.0)
+        code = proc.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
         return True  # still running, which for a browser is what success looks like
-    log.info("%s exited immediately with %s", command[0], proc.returncode)
-    return False
+    if code != 0:
+        log.info("%s exited immediately with %s", command[0], code)
+    return code == 0
 
 
 def open_url(url: str) -> bool:

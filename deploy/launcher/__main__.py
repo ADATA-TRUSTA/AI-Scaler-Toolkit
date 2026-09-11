@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -862,9 +864,29 @@ class Launcher:
         """
         log.info("notification: %s -- %s", title, message)
         if sys.platform != "win32":
-            with contextlib.suppress(Exception):
-                if self.tray is not None:
-                    self.tray.notify(message, title)
+            # Not tray.notify(). pystray's AppIndicator backend -- the one build_tray
+            # now asks for by name -- implements no _notify, so the base class raises
+            # NotImplementedError and the suppress around it threw the message away.
+            # Every call here was silently doing nothing, which is the fault the
+            # caller of this exists to report.
+            #
+            # The same cascade AppRun uses before Python is available, for the same
+            # reason: what a desktop has to show a message with varies, and stderr
+            # reaches nobody when the application was started from an icon.
+            body = f"{title}\n\n{message}"
+            for command in (["zenity", "--info", "--no-wrap", f"--title={config.APP_TITLE}",
+                             f"--text={body}"],
+                            ["kdialog", "--title", config.APP_TITLE, "--msgbox", body],
+                            ["notify-send", title, message]):
+                if shutil.which(command[0]) is None:
+                    continue
+                with contextlib.suppress(OSError):
+                    # Detached: zenity and kdialog stay up until dismissed, and this is
+                    # called from a worker that has other things to do.
+                    subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                    return
+            log.warning("no way to show a notification on this desktop")
             return
 
         import ctypes
@@ -1073,8 +1095,13 @@ def main(argv: list[str] | None = None) -> int:
         working = config.ensure_writable_payload()
         log.info("payload: %s", working)
     except OSError:
-        log.exception("could not prepare a writable payload; continuing with the "
-                      "shipped one, which may be read-only")
+        # Not "continuing with the shipped one": where this can fail at all the shipped
+        # payload is a read-only mount, so what follows runs against whatever state the
+        # working copy was left in. Anything preserved from it is in payload.keep and
+        # comes back on the next attempt, so the honest thing is to say so and let the
+        # next step fail where the user can see it.
+        log.exception("could not prepare a writable payload at %s; what follows may "
+                      "not work, and a restart will try again", config.working_payload_dir())
 
     # Logging in is not a request to install anything. Setup takes eight minutes, opens
     # a window and downloads gigabytes, and doing that because someone turned their

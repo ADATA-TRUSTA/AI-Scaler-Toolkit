@@ -89,6 +89,43 @@ def _trust(path: Path) -> None:
                    capture_output=True, check=False)
 
 
+def _should_write(entry: Path, text: str) -> bool:
+    """Whether to write over an entry that is already there.
+
+    An absent or unreadable one is written. An existing one is left alone unless the
+    program it names is gone, which is the rule autostart.refresh() already applies to
+    the login entry and for the same reason: two working copies can exist -- an install
+    and a newer build someone downloaded to try -- and whichever ran last should not get
+    to claim the other's shortcuts. Rewriting on every difference did exactly that, and
+    the copy from Downloads is the one that then gets deleted, leaving both entries
+    pointing at nothing.
+
+    A stale entry is still repointed, because an entry naming a path that no longer
+    exists is the quiet failure this is here to avoid.
+    """
+    current = _read(entry)
+    if current is None:
+        return True
+    if current == text:
+        return False
+    program = _program_in(current)
+    return program is None or not program.exists()
+
+
+def _program_in(entry_text: str) -> Path | None:
+    """The executable an entry's Exec= line runs, quoted or not."""
+    for line in entry_text.splitlines():
+        if not line.startswith("Exec="):
+            continue
+        command = line[len("Exec="):].strip()
+        if command.startswith('"'):
+            end = command.find('"', 1)
+            return Path(command[1:end]) if end != -1 else None
+        first = command.split(" ", 1)[0]
+        return Path(first) if first else None
+    return None
+
+
 def ensure() -> None:
     """Create the menu entry and the desktop icon if they are not already there."""
     if config.IS_WINDOWS:
@@ -99,7 +136,7 @@ def ensure() -> None:
     menu = config.menu_entry_target()
     try:
         menu.parent.mkdir(parents=True, exist_ok=True)
-        if _read(menu) != text:
+        if _should_write(menu, text):
             menu.write_text(text, encoding="utf-8")
             log.info("wrote the menu entry to %s", menu)
             _refresh_menu()
@@ -112,7 +149,7 @@ def ensure() -> None:
         # Nothing to put an icon on, and creating the directory would be presumptuous.
         return
     try:
-        if _read(desktop) != text:
+        if _should_write(desktop, text):
             desktop.write_text(text, encoding="utf-8")
             log.info("wrote the desktop shortcut to %s", desktop)
         _trust(desktop)

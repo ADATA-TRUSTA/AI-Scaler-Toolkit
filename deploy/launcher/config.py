@@ -169,12 +169,17 @@ def _payload_stamp(shipped: Path) -> str:
 # Windows never had this: its installer overwrites rather than replaces, so all of it
 # survived there. This brings Linux to the same place.
 #
-# Named individually rather than by directory. service/configs also holds shipped
-# deepspeed configurations, and keeping the whole directory would pin those to
-# whatever the first installed release contained.
+# An entry may name one path or end in a * to mean every file matching it, which is
+# how service/configs is handled: the backend writes models_registry.json,
+# current_inference_config.json, current_training_config.json and
+# last_finetuned_model.json into it, and naming them one by one is how three of the
+# four came to be missing here -- only the registry was listed, and an upgrade went on
+# quietly deleting the rest. The directory cannot be kept whole either, because it also
+# holds deepspeed configurations that ship with the release and must come from the new
+# one. Matching the files the backend writes says both things at once.
 PRESERVED_PAYLOAD_PATHS = (
     "backend/.env",
-    "backend/service/configs/models_registry.json",
+    "backend/service/configs/*.json",
     "backend/service/utils/llama-bin",
     "backend/service/utils/llama-build",
     "backend/service/utils/llama.cpp",
@@ -203,13 +208,18 @@ def _move_preserved(source: Path, target: Path) -> None:
     """
     import shutil
 
-    for relative in PRESERVED_PAYLOAD_PATHS:
-        origin = source / relative
-        destination = target / relative
-        if not origin.exists() or destination.exists():
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(origin), str(destination))
+    for pattern in PRESERVED_PAYLOAD_PATHS:
+        if "*" in pattern:
+            found = sorted(source.glob(pattern))
+        else:
+            candidate = source / pattern
+            found = [candidate] if candidate.exists() else []
+        for origin in found:
+            destination = target / origin.relative_to(source)
+            if destination.exists():
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(origin), str(destination))
 
 
 def ensure_writable_payload() -> Path:
@@ -245,7 +255,14 @@ def ensure_writable_payload() -> Path:
     keep = working.parent / "payload.keep"
     if working.exists():
         _move_preserved(working, keep)
-        shutil.rmtree(working, ignore_errors=True)
+        # Not ignore_errors: whatever it could not remove is still there, copytree
+        # then fails with FileExistsError, and the caller -- which catches OSError and
+        # logs "continuing with the shipped one" -- goes on using a payload that has
+        # been half deleted and not replaced. On a read-only AppImage there is no
+        # shipped one to continue with, so that message is wrong as well as the state.
+        shutil.rmtree(working)
+        if working.exists():
+            raise OSError(f"{working} could not be emptied before replacing it")
     working.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(shipped, working)
     if keep.is_dir():
@@ -322,6 +339,18 @@ def llama_dir() -> Path:
     reporting "already present" and skipping the step it was supposed to exercise.
     """
     return backend_dir() / "service" / "utils" / "llama-bin"
+
+
+def llama_build_dir() -> Path:
+    """Where setup_env extracts the llama.cpp sources and compiles them on Linux.
+
+    The largest thing provisioning leaves behind -- 400 MB of sources and object files
+    on a measured install -- and it was missing from the reset, which claims to remove
+    everything setup_env put on the machine. Kept across upgrades on purpose (see
+    PRESERVED_PAYLOAD_PATHS), which is exactly why a reset has to be the thing that
+    removes it.
+    """
+    return backend_dir() / "service" / "utils" / "llama-build"
 
 
 def llama_binary() -> Path:

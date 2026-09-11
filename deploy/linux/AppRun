@@ -43,11 +43,22 @@ report_problem() {
   printf '%s\n' "$body" >&2
 }
 
+# The typelib, not the shared library. pywebview reaches WebKitGTK through gi, so what
+# has to be there is WebKit2-4.1.typelib from gir1.2-webkit2-4.1 -- a different package
+# from the library, and a different major from the 4.0 that Ubuntu 22.04 ships by
+# default. Globbing libwebkit2gtk-*.so* matched both of those cases, so the check passed
+# on machines that then failed to draw a window with
+#
+#   WebViewException: You must have either QT or GTK with Python extensions installed
+#
+# which is the Python traceback this check exists to replace.
 have_webkitgtk() {
   local dir
-  for dir in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu; do
+  for dir in /usr/lib/x86_64-linux-gnu/girepository-1.0 \
+             /usr/lib/aarch64-linux-gnu/girepository-1.0 \
+             /usr/lib64/girepository-1.0 /usr/lib/girepository-1.0; do
     [[ -d "$dir" ]] || continue
-    compgen -G "$dir/libwebkit2gtk-*.so*" >/dev/null && return 0
+    compgen -G "$dir/WebKit2-4.1.typelib" >/dev/null && return 0
   done
   return 1
 }
@@ -88,6 +99,14 @@ apt_install() {
     fi
   fi
   # env, not a bare assignment: both sudo and pkexec drop the caller's environment.
+  "${as_root[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1 && return 0
+
+  # Refresh and try once more, the way setup_env.sh's copy of this already does. A
+  # desktop installed from an image a few months old has an index naming versions the
+  # mirrors no longer carry, so the first install fails with 404s -- and without this
+  # the user is told to install it by hand on a machine where one update would have
+  # fixed it.
+  "${as_root[@]}" env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || return 1
   "${as_root[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
 }
 
