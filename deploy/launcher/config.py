@@ -260,6 +260,15 @@ def backend_dir() -> Path:
     return payload_dir() / "backend"
 
 
+def vcruntime_dir() -> Path:
+    """The Visual C++ runtime the payload ships, which setup_env places beside the
+    binaries that import it. See deploy/package/vcruntime.py for why it is shipped.
+
+    Absent from a source checkout, where nothing has assembled a payload -- and not
+    needed there, since a machine that builds this has the runtime installed."""
+    return payload_dir() / "vcruntime"
+
+
 def frontend_config() -> Path:
     """The runtime config the WebUI fetches. Holds apiBaseUrl and hideChatPanel."""
     return payload_dir() / "frontend" / "dist" / "config.json"

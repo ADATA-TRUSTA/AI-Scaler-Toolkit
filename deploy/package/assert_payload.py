@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import layout  # noqa: E402
 import make_icon  # noqa: E402
+import vcruntime  # noqa: E402
 
 EXPECTED = {
     "windows": {
@@ -235,6 +236,14 @@ def main() -> int:
             failures.append(f"payload has neither {exe} nor launcher sources")
         elif not (root / exe).is_file():
             failures.append(f"payload ships launcher sources but no {exe}; run build_launcher.py first")
+        # Without these the installer succeeds and the application fails on the user's
+        # machine, with a missing-DLL box naming a file they have never heard of.
+        for name in vcruntime.RUNTIME_DLLS:
+            if not (root / vcruntime.PAYLOAD_DIR / name).is_file():
+                failures.append(
+                    f"payload is missing {vcruntime.PAYLOAD_DIR}/{name}; torch and llama "
+                    "both import it and Windows does not carry it"
+                )
     else:
         if not (root / "launcher" / "__main__.py").is_file():
             failures.append("payload has no launcher sources; AppRun has nothing to run")

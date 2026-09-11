@@ -192,6 +192,12 @@ def build_env() -> dict[str, str]:
     # directory does not grow by gigabytes after setup.
     env["UV_PROJECT_ENVIRONMENT"] = str(config.venv_dir())
     env["HF_HOME"] = str(config.hf_home())
+    # Where setup_env finds the Visual C++ runtime to place beside torch and llama.
+    # Passed rather than derived: the backend project is also run straight from a
+    # checkout, where there is no payload and no need for one.
+    runtime = config.vcruntime_dir()
+    if config.IS_WINDOWS and runtime.is_dir():
+        env["TRUSTA_VCRUNTIME_DIR"] = str(runtime)
     if not config.IS_WINDOWS:
         # setup_env leaves an ordinary desktop's system packages alone unless it is asked,
         # which is the right default for a script someone runs by hand but the wrong one

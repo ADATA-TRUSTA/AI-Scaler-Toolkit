@@ -89,18 +89,6 @@ def check_webview2() -> Check:
                  fixer="webview2")
 
 
-def check_vcredist() -> Check:
-    """Native extensions in torch and llama link against the MSVC runtime."""
-    if not config.IS_WINDOWS:
-        return Check("vcredist", "Visual C++ runtime", ok=True, required=False,
-                     detail="Not used on this platform.")
-    found = _reg_value_exists("HKLM", r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64", "Installed")
-    return Check("vcredist", "Visual C++ runtime", ok=found, required=True,
-                 detail="Required by the GPU runtime and llama.",
-                 remedy="https://aka.ms/vs/17/release/vc_redist.x64.exe",
-                 fixer="vcredist")
-
-
 def _has_intel_gpu() -> bool:
     """An Intel GPU, by the same signals setup_env looks for on this platform."""
     if config.IS_WINDOWS:
@@ -198,7 +186,6 @@ def check_disk() -> Check:
 CHECKS = (
     check_disk,
     check_webview2,
-    check_vcredist,
     check_webkitgtk,
     check_accelerator,
     check_vulkan,

@@ -1,23 +1,28 @@
 """Install the prerequisites this application needs, when they are missing.
 
-The line drawn here is not "can we install it" but "whose problem is it". Both of these
-are needed by *setup itself*: without WebView2 there is no window to show, and without
-the Visual C++ runtime the GPU packages will not import. Leaving those to the user
-means an application that cannot start and cannot say usefully why.
+One entry is left, and the line drawn is not "can we install it" but "whose problem is
+it". WebView2 is needed by *setup itself* -- without it there is no window to show --
+and its bootstrapper installs per-user when it is not elevated. Leaving that to the
+user means an application that cannot start and cannot say usefully why.
 
 Optional third-party tools are the opposite case: not needed by setup, not this
 application's to manage, and no longer listed anywhere in it.
 
-git used to be a third entry, installed through winget. It is gone because setup_env
-no longer needs it, which is the better fix: winget's Git.Git has no per-user
-installer, so that one line put a UAC prompt in front of a user who had just run an
-installer built entirely to avoid one.
+Two entries were removed rather than fixed, because each was the wrong answer to a
+question that had a better one, and each raised a UAC prompt in an installer built
+from end to end to need none:
 
-WebView2's bootstrapper installs per-user when it is not elevated. The Visual C++
-runtime does not and cannot -- it is a machine-wide component, there is no per-user
-form of it, and installing it prompts. That is the one prompt this installation can
-raise, and only on a machine that does not already have a runtime most desktop
-software ships with.
+  git, installed through winget, which has no per-user Git package and elevates
+  whatever --scope it is given. setup_env fetches the llama.cpp sources as an archive
+  now and does not need git at all.
+
+  The Visual C++ runtime, which is a machine-wide component with no per-user form, so
+  installing it always prompts. The payload carries the three DLLs instead and
+  setup_env places them beside the binaries that import them -- the same app-local
+  deployment the frozen launcher already relies on. See deploy/package/vcruntime.py.
+
+So this installation now raises no administrator prompt at all, which is what it was
+always supposed to do.
 """
 
 from __future__ import annotations
@@ -35,7 +40,6 @@ log = applog.get("remedy")
 # Microsoft's evergreen bootstrapper: small, and it installs the current runtime rather
 # than pinning one that will be stale by the time anyone runs it.
 WEBVIEW2_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
-VCREDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
 _TIMEOUT = 900
 
@@ -83,17 +87,9 @@ def install_webview2() -> bool:
     return _run([str(installer), "/silent", "/install"], "WebView2 runtime")
 
 
-def install_vcredist() -> bool:
-    installer = _download(VCREDIST_URL, "vc_redist.x64.exe")
-    if installer is None:
-        return False
-    return _run([str(installer), "/install", "/quiet", "/norestart"], "Visual C++ runtime")
-
-
 # Keyed by the fixer name each check declares.
 FIXERS: dict[str, Callable[[], bool]] = {
     "webview2": install_webview2,
-    "vcredist": install_vcredist,
 }
 
 

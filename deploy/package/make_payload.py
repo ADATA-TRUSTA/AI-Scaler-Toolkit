@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import layout  # noqa: E402
 import make_icon  # noqa: E402
+import vcruntime  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PORT = 8571
@@ -248,6 +250,13 @@ def main() -> int:
             raise SystemExit(f"{src} not found in the assembled layout")
         count = copy_filtered(src, payload / name)
         print(f"[payload] {name}: {count} files")
+
+    # Windows only: torch and llama.cpp both import MSVCP140 / VCRUNTIME140 /
+    # VCRUNTIME140_1, and Windows does not carry them. Shipping them beside the
+    # binaries is what removes the administrator prompt that installing Microsoft's
+    # redistributable at first run used to raise. See vcruntime.py.
+    if args.platform == "windows":
+        vcruntime.collect(payload, os.environ.get("VCRUNTIME_DIR"))
 
     if args.launcher_dir:
         launcher_build = Path(args.launcher_dir).resolve()
