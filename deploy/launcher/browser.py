@@ -28,15 +28,44 @@ from . import applog, config
 
 log = applog.get("browser")
 
-# How long a handoff tool gets to exit before it is treated as stuck. They normally
-# return in well under a second; this is generous so that a slow-but-working desktop
-# is not cut off.
-_HANDOFF_TIMEOUT = 8.0
+# How long a handoff tool gets to exit before it is treated as stuck. A working one
+# returns in well under a second, so this is already generous; it used to be 8, which
+# with two tools to try meant sixteen seconds of nothing happening after a click.
+_HANDOFF_TIMEOUT = 4.0
 
 # Tried in turn when the desktop's own opener does not work, which is the case this
 # exists for: the desktop has no http handler, but a browser is installed.
 _BROWSERS = ("firefox", "google-chrome", "chromium", "chromium-browser",
              "microsoft-edge", "brave-browser", "epiphany")
+
+
+def _desktop_has_http_handler() -> bool:
+    """Whether anything is registered to open an http URL.
+
+    Asked before xdg-open and gio are tried, because when nothing is registered they do
+    not fail -- they hang, and each one then costs its full timeout. That is the case
+    this module exists for, so it was also the slow path: the tray's "open in browser"
+    took sixteen seconds to do anything on a desktop where no browser had ever claimed
+    x-scheme-handler/http. Measured at 0.03s to ask, against 8s to find out the hard
+    way, twice.
+
+    A "yes" here is not a promise that the opener works, so the timeouts still apply;
+    it only skips a tool that is certain to be useless.
+
+    xdg-mime and nothing else. `gio mime x-scheme-handler/http` was tried as a second
+    opinion and is worse than useless for this: with no handler registered it prints
+    "No default applications for ..." on stdout and exits 0, so "did it answer with
+    something" reads that as a yes. Returning True when the tool is missing is the
+    honest default -- unknown means try it and let the timeout decide.
+    """
+    if shutil.which("xdg-mime") is None:
+        return True
+    try:
+        result = subprocess.run(["xdg-mime", "query", "default", "x-scheme-handler/http"],
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return bool(result.stdout.strip())
 
 
 def _handoff(command: list[str]) -> bool:
@@ -91,13 +120,23 @@ def open_url(url: str) -> bool:
         # ShellExecute, which reports its own failures. None of the above applies.
         return webbrowser.open(url)
 
-    for tool in ("xdg-open", "gio"):
-        if not shutil.which(tool):
-            continue
-        command = [tool, url] if tool == "xdg-open" else [tool, "open", url]
-        if _handoff(command):
-            log.info("%s opened it", tool)
+    if _desktop_has_http_handler():
+        # One handoff tool, not both. On a desktop that has xdg-open, gio is what
+        # xdg-open delegates to -- so when xdg-open cannot open the URL, gio fails the
+        # same way, and on the desktop this was measured on it fails by hanging until
+        # its timeout. Trying both doubled the wait for nothing. gio is still the
+        # fallback where xdg-open is absent, which is what which() decides.
+        if shutil.which("xdg-open"):
+            command = ["xdg-open", url]
+        elif shutil.which("gio"):
+            command = ["gio", "open", url]
+        else:
+            command = []
+        if command and _handoff(command):
+            log.info("%s opened it", command[0])
             return True
+    else:
+        log.info("no application claims http; going straight to the browsers")
 
     for name in _BROWSERS:
         path = shutil.which(name)
