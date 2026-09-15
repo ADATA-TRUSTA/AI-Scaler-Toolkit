@@ -103,8 +103,19 @@ fetch_appimagetool() {
 
 # The launcher is not frozen on Linux; AppRun runs it on the system Python so that
 # pywebview can reach the system's PyGObject. What it needs instead is the list of
-# packages to install, pinned to the same lock the Windows build freezes from -- so
-# the two platforms ship the same versions even though they package differently.
+# packages to install, exported from the same lock the Windows build freezes from.
+#
+# The versions are not guaranteed to match Windows, and this used to claim they were.
+# AppRun installs into whatever /usr/bin/python3 is, which is 3.12 on Ubuntu 24.04 and
+# 3.10 on the 22.04 this build's glibc floor targets -- and uv then resolves whatever
+# fits that interpreter. Hashes are stripped for the same reason: with them, an
+# artifact listed for one Python and installed under another falls back to the sdist,
+# and the build of Pillow that follows fails on a machine with no compiler.
+#
+# The way out is not to bundle an interpreter. gi is an ABI-tagged C extension of the
+# distribution's Python -- measured: a uv-managed 3.12 loads the system gi on 24.04 and
+# could not on 22.04, where gi is built for 3.10 -- so bundling one trades a version
+# mismatch for no window at all on the oldest distribution this supports.
 #
 # A requirements.txt used to be exported beside the launcher sources and was removed
 # as "a copy of the record rather than the record". This is not that: it is generated

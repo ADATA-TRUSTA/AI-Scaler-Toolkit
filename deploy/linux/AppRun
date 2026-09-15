@@ -127,6 +127,15 @@ fetch_to() {
 }
 
 ensure_uv() {
+  # The copy this AppImage carries, pinned and hashed at build time, before anything
+  # on the machine and before the network. It is put on PATH rather than only called
+  # by path, because uv re-executes itself by name and a bare "uv" has to reach the
+  # same binary. See deploy/package/uvtool.py.
+  if [[ -x "$APP_ROOT/uv/uv" ]]; then
+    PATH="$APP_ROOT/uv:$PATH"
+    export PATH
+    return 0
+  fi
   command -v uv >/dev/null 2>&1 && return 0
   local script
   script="$(mktemp)"

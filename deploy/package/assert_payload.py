@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import layout  # noqa: E402
 import make_icon  # noqa: E402
+import uvtool  # noqa: E402
 import vcruntime  # noqa: E402
 
 EXPECTED = {
@@ -141,6 +142,24 @@ def check_ui_scripts(root: Path) -> list[str]:
     return problems
 
 
+def _check_uv(root: Path, binary: str, failures: list[str]) -> None:
+    """uv has to be in the payload, not fetched on the user's machine.
+
+    Checked because its absence is invisible until provisioning runs: setup_env falls
+    back to downloading astral.sh's install script, which works -- so a build that
+    shipped without uv would pass every test and quietly reintroduce the remote script
+    this was added to remove.
+    """
+    path = root / uvtool.PAYLOAD_DIR / binary
+    if not path.is_file():
+        failures.append(
+            f"payload is missing {uvtool.PAYLOAD_DIR}/{binary}; provisioning would fall "
+            "back to downloading and running the installer from astral.sh"
+        )
+    elif not (root / uvtool.PAYLOAD_DIR / "VERSION").is_file():
+        failures.append(f"payload has {uvtool.PAYLOAD_DIR}/{binary} but no VERSION beside it")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=sorted(EXPECTED), required=True)
@@ -244,7 +263,9 @@ def main() -> int:
                     f"payload is missing {vcruntime.PAYLOAD_DIR}/{name}; torch and llama "
                     "both import it and Windows does not carry it"
                 )
+        _check_uv(root, "uv.exe", failures)
     else:
+        _check_uv(root, "uv", failures)
         if not (root / "launcher" / "__main__.py").is_file():
             failures.append("payload has no launcher sources; AppRun has nothing to run")
         if not (root / "launcher-requirements.txt").is_file():

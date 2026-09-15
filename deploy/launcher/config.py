@@ -286,6 +286,19 @@ def vcruntime_dir() -> Path:
     return payload_dir() / "vcruntime"
 
 
+def uv_binary() -> Path | None:
+    """The uv the payload ships, or None when there is none to ship.
+
+    setup_env installs uv from astral.sh when it cannot find one, which means running a
+    downloaded script; an installed build carries a pinned, hashed copy instead, so that
+    never happens on a user's machine. A source checkout has no payload and falls back,
+    which is the right answer for a developer's machine.
+    """
+    name = "uv.exe" if IS_WINDOWS else "uv"
+    candidate = payload_dir() / "uv" / name
+    return candidate if candidate.is_file() else None
+
+
 def frontend_config() -> Path:
     """The runtime config the WebUI fetches. Holds apiBaseUrl and hideChatPanel."""
     return payload_dir() / "frontend" / "dist" / "config.json"

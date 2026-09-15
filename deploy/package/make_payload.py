@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import layout  # noqa: E402
 import make_icon  # noqa: E402
+import uvtool  # noqa: E402
 import vcruntime  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -257,6 +258,11 @@ def main() -> int:
     # redistributable at first run used to raise. See vcruntime.py.
     if args.platform == "windows":
         vcruntime.collect(payload, os.environ.get("VCRUNTIME_DIR"))
+
+    # uv, so provisioning does not start by downloading and running a script from
+    # astral.sh. Both platforms: it is what installs the Python and syncs the lock, so
+    # it is the first thing every install needs and the last one that was unverified.
+    uvtool.collect(payload, args.platform)
 
     if args.launcher_dir:
         launcher_build = Path(args.launcher_dir).resolve()

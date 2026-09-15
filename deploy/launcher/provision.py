@@ -198,6 +198,14 @@ def build_env() -> dict[str, str]:
     runtime = config.vcruntime_dir()
     if config.IS_WINDOWS and runtime.is_dir():
         env["TRUSTA_VCRUNTIME_DIR"] = str(runtime)
+    # The uv the payload carries. Without it setup_env downloads astral.sh's install
+    # script and runs it, which is fine on a developer's machine and not something to
+    # do on a user's behalf. Also puts it on PATH, because uv re-executes itself by
+    # name in places and a bare "uv" has to resolve to the same binary.
+    uv = config.uv_binary()
+    if uv is not None:
+        env["TRUSTA_UV"] = str(uv)
+        env["PATH"] = str(uv.parent) + os.pathsep + env.get("PATH", "")
     if not config.IS_WINDOWS:
         # setup_env leaves an ordinary desktop's system packages alone unless it is asked,
         # which is the right default for a script someone runs by hand but the wrong one
