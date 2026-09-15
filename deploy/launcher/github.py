@@ -22,6 +22,11 @@ class Release:
     asset_url: str | None
     asset_name: str | None
     prerelease: bool
+    # GitHub publishes a SHA-256 for every release asset. It is carried here because
+    # the caller downloads this asset and, on Windows, runs it: an installer is the one
+    # thing in the product that must not be executed on the strength of the transfer
+    # having finished. None for a release published before GitHub recorded one.
+    asset_sha256: str | None = None
 
 
 def parse_version(tag: str) -> tuple[int, int, int] | None:
@@ -38,6 +43,24 @@ def is_newer(candidate: str, current: str | None) -> bool:
         return False
     old = parse_version(current or "")
     return old is None or new > old
+
+
+def _digest(asset: dict | None) -> str | None:
+    """The asset's SHA-256, as GitHub reports it: "sha256:<hex>".
+
+    Anything else is treated as absent rather than guessed at. A digest in some other
+    form is one this cannot check, and a checker that accepts what it cannot verify is
+    worse than none -- it reads as a guarantee in the log.
+    """
+    if not asset:
+        return None
+    value = str(asset.get("digest") or "")
+    if not value.startswith("sha256:"):
+        return None
+    hex_part = value[len("sha256:"):].strip().lower()
+    if len(hex_part) != 64 or any(c not in "0123456789abcdef" for c in hex_part):
+        return None
+    return hex_part
 
 
 class NoReleases(Exception):
@@ -78,5 +101,6 @@ def latest(repo: str = DEFAULT_REPO, asset_suffix: str = ".exe", timeout: float 
         url=body.get("html_url", ""),
         asset_url=asset.get("browser_download_url") if asset else None,
         asset_name=asset.get("name") if asset else None,
+        asset_sha256=_digest(asset),
         prerelease=bool(body.get("prerelease")),
     )
