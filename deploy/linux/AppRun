@@ -20,6 +20,10 @@ DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_ID"
 USER_BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
 VENV="$DATA_DIR/launcher-venv"
 REQUIREMENTS="$APP_ROOT/launcher-requirements.txt"
+# PyGObject, built for LAUNCHER_PYTHON when this AppImage was built. See
+# ensure_launcher_env for why it is carried rather than borrowed from the system.
+GI_DIR="$APP_ROOT/launcher-gi"
+LAUNCHER_PYTHON="3.12"
 
 export PATH="$HERE/usr/bin:$USER_BIN:$PATH"
 
@@ -155,26 +159,32 @@ It installs into your home directory and needs no administrator rights."
   command -v uv >/dev/null 2>&1
 }
 
-# The launcher runs on the system Python, in a virtual environment that can see the
-# system's site-packages. That is not a preference, it is the only arrangement that
-# works: pywebview draws its window through PyGObject, and PyGObject is a compiled
-# module tied to the system Python and the system's typelibs. A frozen launcher
-# carries its own interpreter, cannot see gi, and fails with
+# The launcher runs on an interpreter uv manages, with the PyGObject this AppImage
+# carries, built for that interpreter when the AppImage was built.
 #
-#   [pywebview] GTK cannot be loaded -- ModuleNotFoundError: No module named 'gi'
-#   WebViewException: You must have either QT or GTK with Python extensions installed
+# It used to run on /usr/bin/python3 with --system-site-packages, because pywebview
+# draws its window through PyGObject and PyGObject is an ABI-tagged C extension of the
+# distribution's Python: cp310 on Ubuntu 22.04, cp312 on 24.04. Borrowing it meant
+# borrowing the interpreter, and that meant a different Python -- and so a different
+# resolution of every other package -- on every distribution, which is the opposite of
+# what shipping a single artifact is for.
 #
-# every time, on every machine. Windows has no equivalent problem -- WebView2 is a
-# system component reached through COM, not a Python extension -- which is why the
-# two platforms are packaged differently.
+# Carrying gi cuts that tie. The extension links against libglib, libgobject and
+# libgirepository-1.0.so.1 and nothing else, all present with a stable ABI across the
+# range this supports, so one build works everywhere. The typelibs and the libraries
+# still come from the machine; only the Python binding is ours.
 #
-# Everything else pywebview needs (itself, pystray, pillow, pyyaml) is pip-installable
-# and goes in the virtual environment, pinned by the requirements file built beside
-# this AppImage from the same lock the Windows build uses.
+# Everything else pywebview needs (itself, pystray, pillow, pyyaml) comes from the
+# requirements file beside this AppImage, hash-pinned from the same lock the Windows
+# build freezes from -- which is only possible because the interpreter is now fixed.
 ensure_launcher_env() {
   local stamp="$VENV/.requirements-stamp"
   local want
-  want="$(sha256sum "$REQUIREMENTS" 2>/dev/null | cut -d' ' -f1)"
+  # Both inputs, because a rebuilt gi with unchanged requirements is still a different
+  # environment, and reusing the old one would keep an extension built for another
+  # interpreter in place.
+  want="$( { sha256sum "$REQUIREMENTS"; find "$GI_DIR" -type f -exec sha256sum {} + 2>/dev/null; } \
+           | sort | sha256sum | cut -d' ' -f1)"
 
   if [[ -x "$VENV/bin/python" && -n "$want" && -f "$stamp" ]] \
      && [[ "$(cat "$stamp")" == "$want" ]]; then
@@ -183,22 +193,42 @@ ensure_launcher_env() {
 
   ensure_uv || return 1
 
-  # --system-site-packages is the whole point; --python /usr/bin/python3 because a
-  # uv-managed interpreter would be a different build with no gi beside it.
   rm -rf "$VENV"
   mkdir -p "$(dirname "$VENV")"
-  if ! uv venv --python /usr/bin/python3 --system-site-packages "$VENV" >/dev/null 2>&1; then
+  # No --system-site-packages: the distribution's packages are built for its own
+  # interpreter, and mixing them into this one is what this arrangement exists to stop.
+  if ! uv venv --python "$LAUNCHER_PYTHON" "$VENV" >/dev/null 2>&1; then
     report_problem "$APP_TITLE could not create its Python environment at
 
   $VENV
 
-Check that /usr/bin/python3 exists and that there is space in your home directory."
+It needs to download Python $LAUNCHER_PYTHON the first time. Check the network
+connection and that there is space in your home directory."
     return 1
   fi
   if ! uv pip install --python "$VENV/bin/python" --quiet -r "$REQUIREMENTS" >/dev/null 2>&1; then
     report_problem "$APP_TITLE could not install the packages it needs to draw its window.
 
 Check the network connection and try again."
+    return 1
+  fi
+
+  # A .pth rather than PYTHONPATH: this process starts the backend, and PYTHONPATH is
+  # inherited, so it would put this interpreter's gi on the path of a service that has
+  # its own environment. A .pth belongs to this interpreter and goes no further.
+  local site
+  site="$("$VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null)"
+  if [[ -z "$site" ]]; then
+    report_problem "$APP_TITLE could not work out where to install its GTK bindings."
+    return 1
+  fi
+  printf '%s\n' "$GI_DIR" > "$site/trusta-gi.pth"
+
+  if ! "$VENV/bin/python" -c 'import gi' >/dev/null 2>&1; then
+    report_problem "$APP_TITLE carries GTK bindings that this system cannot load.
+
+This build is for x86_64 systems with GLib 2.72 or newer. Please report it with
+your distribution and version."
     return 1
   fi
   printf '%s' "$want" > "$stamp"
@@ -239,6 +269,15 @@ if [[ ! -f "$REQUIREMENTS" ]]; then
 
 so there is no way to know what the launcher needs. Please report this build as
 broken."
+  exit 1
+fi
+
+if [[ ! -d "$GI_DIR/gi" ]]; then
+  report_problem "This build of $APP_TITLE is incomplete: it carries no
+
+  usr/share/$APP_ID/launcher-gi
+
+so there is nothing to draw its window with. Please report this build as broken."
   exit 1
 fi
 

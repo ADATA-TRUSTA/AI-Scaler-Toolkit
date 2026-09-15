@@ -25,6 +25,16 @@ APP_NAME="AI Scaler Toolkit"
 APP_ID="ai-scaler-toolkit"
 SERVICE_PORT="${SERVICE_PORT:-8571}"
 VERSION="${APP_VERSION:-0.0.0}"
+# The interpreter the launcher runs on, obtained by uv rather than taken from the
+# machine. Fixing it is what makes one set of packages -- and one PyGObject build --
+# correct everywhere, instead of whatever the distribution happened to ship.
+LAUNCHER_PYTHON="${LAUNCHER_PYTHON:-3.12}"
+
+# The assembled layout to package. Defaults to this repository, which is where a
+# developer's is; the release pipeline assembles into a directory of its own and points
+# here. Every other build script already took a path -- this one did not, so the only way
+# to build from a layout elsewhere was to overwrite the repository's own.
+LAYOUT="${TRUSTA_LAYOUT:-$REPO_ROOT}"
 
 BUILD_DIR="$REPO_ROOT/build/appimage"
 APPDIR="$BUILD_DIR/AppDir"
@@ -101,32 +111,72 @@ fetch_appimagetool() {
   printf '%s' "$tool"
 }
 
-# The launcher is not frozen on Linux; AppRun runs it on the system Python so that
-# pywebview can reach the system's PyGObject. What it needs instead is the list of
-# packages to install, exported from the same lock the Windows build freezes from.
+# The launcher is not frozen on Linux; AppRun runs it on an interpreter uv manages, and
+# what it needs is the list of packages to install -- exported from the same lock the
+# Windows build freezes from, so the two platforms do ship the same versions.
 #
-# The versions are not guaranteed to match Windows, and this used to claim they were.
-# AppRun installs into whatever /usr/bin/python3 is, which is 3.12 on Ubuntu 24.04 and
-# 3.10 on the 22.04 this build's glibc floor targets -- and uv then resolves whatever
-# fits that interpreter. Hashes are stripped for the same reason: with them, an
-# artifact listed for one Python and installed under another falls back to the sdist,
-# and the build of Pillow that follows fails on a machine with no compiler.
-#
-# The way out is not to bundle an interpreter. gi is an ABI-tagged C extension of the
-# distribution's Python -- measured: a uv-managed 3.12 loads the system gi on 24.04 and
-# could not on 22.04, where gi is built for 3.10 -- so bundling one trades a version
-# mismatch for no window at all on the oldest distribution this supports.
-#
-# A requirements.txt used to be exported beside the launcher sources and was removed
-# as "a copy of the record rather than the record". This is not that: it is generated
-# from deploy/uv.lock at build time into the payload, never committed, and it is the
-# only way the AppImage can say what it needs.
+# With hashes, now that they can be. They used to be stripped and the comment here used
+# to claim a version parity that did not exist: AppRun installed into whatever
+# /usr/bin/python3 was, 3.12 on Ubuntu 24.04 and 3.10 on the 22.04 this build's glibc
+# floor targets, and uv resolved whatever fitted. Hashes made that fail rather than
+# diverge quietly -- an artifact listed for one Python, installed under another, falls
+# back to the sdist, and building Pillow on a desktop with no compiler is where it
+# ended. Fixing the interpreter fixes the artifacts, so the hashes can go back in.
 export_requirements() {
   local out="$BUILD_DIR/payload/launcher-requirements.txt"
   log "exporting the launcher's requirements from deploy/uv.lock"
-  uv export --project "$REPO_ROOT/deploy" --no-hashes --no-dev --no-emit-project -o "$out" >/dev/null
+  uv export --project "$REPO_ROOT/deploy" --no-dev --no-emit-project -o "$out" >/dev/null
   [[ -s "$out" ]] || die "uv export produced no requirements"
-  log "launcher requirements: $(grep -c . "$out") lines"
+  grep -q -- "--hash=sha256:" "$out" || die "the exported requirements carry no hashes"
+  log "launcher requirements: $(grep -c -- '--hash=sha256:' "$out") hashed artifacts"
+}
+
+# PyGObject, built here for the interpreter the AppImage will run, and shipped.
+#
+# This is what makes fixing the interpreter possible at all. gi is an ABI-tagged C
+# extension, so the distribution's own is built for the distribution's Python -- cp310
+# on 22.04, cp312 on 24.04 -- and a uv-managed 3.12 can load 24.04's and not 22.04's.
+# Building it here instead cuts that tie: the extension links against libglib,
+# libgobject and libgirepository-1.0.so.1 and nothing else, and those are present with a
+# stable ABI on both. Measured: built on 22.04 against glib 2.72, it loads Gtk 3.24 and
+# WebKit2 4.1 on 24.04 with glib 2.80.
+#
+# Pinned below 3.52 because that release requires girepository-2.0, which wants glib
+# 2.80 -- newer than the 2.72 on the oldest distribution this supports. The typelibs and
+# the libraries themselves still come from the machine, as they always did; only the
+# Python binding is ours.
+GI_PIN="${GI_PIN:-pygobject<3.52}"
+
+build_gi() {
+  local out="$BUILD_DIR/payload/launcher-gi"
+  for tool in pkg-config cc; do
+    command -v "$tool" >/dev/null 2>&1 || die \
+      "$tool is needed to build PyGObject. On Debian/Ubuntu:
+    apt-get install build-essential pkg-config libgirepository1.0-dev libcairo2-dev"
+  done
+  pkg-config --exists gobject-introspection-1.0 || die \
+    "libgirepository1.0-dev is needed to build PyGObject (apt-get install libgirepository1.0-dev)"
+
+  log "building PyGObject ($GI_PIN) for the launcher's interpreter"
+  local work
+  work="$(mktemp -d)"
+  # shellcheck disable=SC2064 - the path is wanted now, not at trap time
+  trap "rm -rf '$work'" RETURN
+  uv venv --python "$LAUNCHER_PYTHON" "$work/v" >/dev/null 2>&1 \
+    || die "could not create a $LAUNCHER_PYTHON environment to build PyGObject in"
+  uv pip install --python "$work/v/bin/python" --quiet "$GI_PIN" \
+    || die "could not build PyGObject. The dev packages above are the usual cause."
+
+  rm -rf "$out"
+  mkdir -p "$out"
+  cp -a "$work/v/lib/python"*/site-packages/gi "$out/"
+  # The build host's glibc is this AppImage's floor already, so an extension built here
+  # runs anywhere the AppImage does. Checked rather than assumed, because a missing
+  # extension shows up as "no module named gi" on a user's machine and nowhere here.
+  local ext
+  ext="$(find "$out/gi" -name '_gi.cpython-*.so' -printf '%f\n' | head -1)"
+  [[ -n "$ext" ]] || die "PyGObject built no _gi extension; the build produced nothing usable"
+  log "PyGObject: $ext ($(du -sh "$out" | cut -f1))"
 }
 
 build_payload() {
@@ -135,8 +185,9 @@ build_payload() {
   # application icon with Pillow; a bare interpreter has no Pillow, so the build
   # stopped on ModuleNotFoundError before it reached anything interesting.
   uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/make_payload.py" \
-    --platform linux --out "$BUILD_DIR/payload" --port "$SERVICE_PORT"
+    --platform linux --source "$LAYOUT" --out "$BUILD_DIR/payload" --port "$SERVICE_PORT"
   export_requirements
+  build_gi
   uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/assert_payload.py" \
     --platform linux --payload "$BUILD_DIR/payload" --port "$SERVICE_PORT"
 }

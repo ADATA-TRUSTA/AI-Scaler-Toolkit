@@ -34,6 +34,11 @@ EXPECTED = {
 
 TITLE_RE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
+# The interpreter AppRun asks uv for, as a C extension's ABI tag. Kept here rather than
+# read from the payload: the point is to check the built extension against what will run
+# it, and taking both from the same place would check nothing.
+PY_TAG = "cpython-312"
+
 
 def check_health_fingerprint(root: Path) -> list[str]:
     """The launcher recognises its own service by the keys /health returns.
@@ -273,6 +278,21 @@ def main() -> int:
                 "payload has no launcher-requirements.txt, so AppRun cannot build the "
                 "environment that draws the window; build_appimage.sh exports it from "
                 "deploy/uv.lock"
+            )
+        # PyGObject, built for the interpreter AppRun uses. Absent, the window cannot be
+        # drawn at all -- and the failure lands on the user as "No module named gi",
+        # long after the build that forgot it.
+        extensions = sorted((root / "launcher-gi" / "gi").glob("_gi.cpython-*.so"))
+        if not extensions:
+            failures.append(
+                "payload has no launcher-gi/gi/_gi.cpython-*.so; pywebview would have no "
+                "GTK bindings and the launcher would start without a window. "
+                "build_appimage.sh builds it"
+            )
+        elif f".{PY_TAG}-" not in extensions[0].name:
+            failures.append(
+                f"launcher-gi carries {extensions[0].name}, which is not built for the "
+                f"{PY_TAG} interpreter AppRun runs; it would not import"
             )
 
     icon = root / "app.ico"
