@@ -30,7 +30,17 @@ BUILD_DIR="$REPO_ROOT/build/appimage"
 APPDIR="$BUILD_DIR/AppDir"
 OUT_DIR="$REPO_ROOT/dist-unsigned"
 TOOL_DIR="$BUILD_DIR/tools"
-APPIMAGETOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage}"
+# A release tag, not "continuous". That tag is a moving target: it is republished whenever the
+# project builds, so the same source tree here produces AppImages made by different tools
+# depending on the day, and nothing in the output records which. Not theoretical -- while this
+# was being pinned, the binary under "continuous" was already a different one from the 1.9.1
+# release three weeks earlier, same size, different hash.
+#
+# The hash is the one GitHub publishes for the asset. Overriding the URL without also setting
+# the hash skips the check, which is the escape hatch for building against a local tool.
+APPIMAGETOOL_VERSION="${APPIMAGETOOL_VERSION:-1.9.1}"
+APPIMAGETOOL_SHA256="${APPIMAGETOOL_SHA256-ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0}"
+APPIMAGETOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-x86_64.AppImage}"
 
 # To stderr, not stdout. fetch_appimagetool below returns the tool's path by printing
 # it, and a progress line printed alongside lands in the same variable -- the build
@@ -57,14 +67,37 @@ require() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required but not on PATH"
 }
 
+sha256_is() {
+  local file="$1" expected="$2" actual
+  [[ -f "$file" ]] || return 1
+  actual="$(sha256sum "$file" | cut -d' ' -f1)"
+  [[ "$actual" == "$expected" ]]
+}
+
 fetch_appimagetool() {
   mkdir -p "$TOOL_DIR"
-  local tool="$TOOL_DIR/appimagetool"
-  if [[ ! -x "$tool" ]]; then
-    log "downloading appimagetool"
-    curl -fsSL -o "$tool" "$APPIMAGETOOL_URL"
-    chmod +x "$tool"
+  # Named for the version, so changing the pin fetches rather than reuses whatever is cached.
+  local tool="$TOOL_DIR/appimagetool-$APPIMAGETOOL_VERSION"
+  if [[ -x "$tool" ]] && { [[ -z "$APPIMAGETOOL_SHA256" ]] || sha256_is "$tool" "$APPIMAGETOOL_SHA256"; }; then
+    printf '%s' "$tool"
+    return
   fi
+  log "downloading appimagetool $APPIMAGETOOL_VERSION"
+  # To .part first: a half-written file that happens to be executable would otherwise be cached
+  # and reused by the next build, and an interrupted download is how it gets there.
+  curl -fsSL -o "$tool.part" "$APPIMAGETOOL_URL" || die "could not download $APPIMAGETOOL_URL"
+  if [[ -n "$APPIMAGETOOL_SHA256" ]] && ! sha256_is "$tool.part" "$APPIMAGETOOL_SHA256"; then
+    local actual
+    actual="$(sha256sum "$tool.part" | cut -d' ' -f1)"
+    rm -f "$tool.part"
+    die "appimagetool does not match its published hash.
+    expected $APPIMAGETOOL_SHA256
+    got      $actual
+    from     $APPIMAGETOOL_URL"
+  fi
+  [[ -n "$APPIMAGETOOL_SHA256" ]] || log "WARNING: APPIMAGETOOL_SHA256 is unset; the tool is unverified"
+  mv "$tool.part" "$tool"
+  chmod +x "$tool"
   printf '%s' "$tool"
 }
 
