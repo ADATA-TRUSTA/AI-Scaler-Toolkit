@@ -39,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import applog, config
+from . import applog, config, shortcuts
 
 log = applog.get("components")
 
@@ -514,6 +514,14 @@ def _install_comfyui_linux(out: Progress) -> bool:
         return False
 
     out.note(f"Installed to {target}.")
+    # An AppImage integrates with nothing by itself: without this it is a file in a
+    # directory, absent from the menu and the dock, and the only way to start it is to
+    # go and find it. The components' own Windows installers write Start Menu entries;
+    # this is the same thing on the platform where it is the installer's job.
+    if shortcuts.ensure_component("comfyui", target, "ComfyUI"):
+        out.note("Added it to the applications menu.")
+    else:
+        out.note(f"It is not in the applications menu; start it from {target}.")
     out.note("The first time you open ComfyUI it downloads its own copy of PyTorch, "
              "around 2.5 GB, separate from this application's.")
     out.note("An AppImage needs FUSE to run. If it will not start, install libfuse2 "

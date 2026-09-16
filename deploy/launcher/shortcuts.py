@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from . import applog, autostart, config
@@ -157,10 +158,134 @@ def ensure() -> None:
         log.warning("could not write the desktop shortcut to %s: %s", desktop, exc)
 
 
+def ensure_component(component_id: str, program: Path, fallback_name: str) -> bool:
+    """Put a component we installed into the applications menu.
+
+    An AppImage is a single file and integrates with nothing by itself: dropped in a
+    directory it is invisible to the menu, the dock and the launcher's search, and the
+    only way to start it is to find the file. On Windows the components' own installers
+    write Start Menu entries, so this is the Linux half of what they already do.
+
+    The entry is built from the one inside the AppImage rather than invented, so the
+    name, the icon and the categories are the vendor's own -- with Exec rewritten to
+    the path we installed it at, since theirs assumes it is running from inside the
+    mounted image.
+    """
+    if config.IS_WINDOWS or not program.is_file():
+        return False
+
+    details = _read_appimage_entry(program)
+    name = details.get("Name") or fallback_name
+    icon = _extract_appimage_icon(program, component_id, details.get("Icon", ""))
+    # %U and friends are placeholders the desktop fills in; an Exec that keeps them
+    # while naming our path is still correct, and dropping them would lose the ability
+    # to open a file with the component.
+    arguments = details.get("_exec_args", "")
+
+    entry = (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name={name}\n"
+        f"Comment={details.get('Comment', '')}\n"
+        f"Exec=\"{program}\"{(' ' + arguments) if arguments else ''}\n"
+        f"Icon={icon if icon else 'application-x-executable'}\n"
+        "Terminal=false\n"
+        f"Categories={details.get('Categories', 'Utility;')}\n"
+        # Ours, so the uninstaller can tell an entry it wrote from one it did not.
+        f"X-TrustaComponent={component_id}\n"
+    )
+    target = config.component_entry_target(component_id)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(entry, encoding="utf-8")
+    except OSError as exc:
+        log.warning("could not write the menu entry for %s: %s", component_id, exc)
+        return False
+    log.info("wrote the menu entry for %s to %s", component_id, target)
+    _refresh_menu()
+    return True
+
+
+def _read_appimage_entry(program: Path) -> dict[str, str]:
+    """The .desktop an AppImage carries, as a dict. Empty when it cannot be read.
+
+    Every AppImage has one at its root -- that is how the format works -- so this is
+    reading the vendor's own answer rather than guessing at a name and an icon.
+    """
+    with tempfile.TemporaryDirectory() as work:
+        try:
+            subprocess.run([str(program), "--appimage-extract", "*.desktop"],
+                           cwd=work, capture_output=True, timeout=120, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.info("could not read the desktop entry inside %s: %s", program.name, exc)
+            return {}
+        found = sorted(Path(work).rglob("*.desktop"))
+        if not found:
+            return {}
+        values: dict[str, str] = {}
+        for line in found[0].read_text(encoding="utf-8", errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            if _ and key not in values:
+                values[key.strip()] = value.strip()
+    # Exec is the vendor's own command inside the image; only its arguments survive.
+    exec_line = values.get("Exec", "")
+    values["_exec_args"] = exec_line.split(" ", 1)[1] if " " in exec_line else ""
+    return values
+
+
+def _extract_appimage_icon(program: Path, component_id: str, name: str) -> Path | None:
+    """Copy the icon out of the AppImage, and return where it landed.
+
+    By path, not by theme name, for the reason recorded in _entry_text: a name in
+    hicolor does not resolve until the icon caches are rebuilt, which on a first run
+    means a blank square until the next login.
+
+    From the theme directory inside the image, not from its root. The root carries the
+    icon and .DirIcon as symlinks into usr/share/icons, so extracting either of those
+    names on its own produces a dangling link -- a path that exists, is not a file, and
+    silently yields no icon at all. Measured on ComfyUI: the root name extracted
+    cleanly and gave nothing, while the theme directory gave eight real sizes.
+    """
+    patterns = [
+        f"usr/share/icons/hicolor/*/apps/{name}.png" if name else "usr/share/icons/*",
+        "usr/share/icons/*",
+        f"{name}.png" if name else "*.png",
+    ]
+    with tempfile.TemporaryDirectory() as work:
+        for pattern in patterns:
+            try:
+                subprocess.run([str(program), "--appimage-extract", pattern],
+                               cwd=work, capture_output=True, timeout=120, check=False)
+            except (OSError, subprocess.SubprocessError):
+                return None
+            # The largest, because an AppImage carries several sizes and the menu wants
+            # the one that still looks right on a high-density display. is_file() also
+            # rejects the dangling symlinks described above.
+            icons = [p for p in Path(work).rglob("*")
+                     if p.is_file() and not p.is_symlink() and p.stat().st_size > 0]
+            if not icons:
+                continue
+            best = max(icons, key=lambda p: p.stat().st_size)
+            target = config.component_icon_target(component_id)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(best, target)
+            except OSError as exc:
+                log.info("could not install the icon for %s: %s", component_id, exc)
+                return None
+            return target
+    return None
+
+
 def remove() -> None:
     """Called by the uninstaller."""
     if config.IS_WINDOWS:
         return
+    for path in _component_entries():
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("could not remove %s: %s", path, exc)
     for path in (config.menu_entry_target(), config.desktop_shortcut_target(),
                  config.menu_icon_target()):
         try:
@@ -168,6 +293,23 @@ def remove() -> None:
         except OSError as exc:
             log.warning("could not remove %s: %s", path, exc)
     _refresh_menu()
+
+
+def _component_entries() -> list[Path]:
+    """Every menu entry this application wrote for a component, and their icons.
+
+    Found by the prefix rather than by a list of component ids, so an entry left by a
+    component that has since been removed from the catalogue is still cleaned up.
+    """
+    found: list[Path] = []
+    for directory, pattern in (
+        (config.menu_entry_target().parent, f"{config.APP_ID}-*.desktop"),
+        (config.menu_icon_target().parent, f"{config.APP_ID}-*.png"),
+    ):
+        with contextlib.suppress(OSError):
+            found.extend(p for p in directory.glob(pattern)
+                         if p != config.menu_entry_target() and p != config.menu_icon_target())
+    return found
 
 
 def _read(path: Path) -> str | None:

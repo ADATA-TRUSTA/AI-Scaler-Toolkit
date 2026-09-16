@@ -443,6 +443,22 @@ def _xdg_desktop_dir() -> Path:
     return Path.home() / "Desktop"
 
 
+def component_entry_target(component_id: str) -> Path:
+    """The menu entry for a component this application installed.
+
+    Namespaced under APP_ID so it cannot collide with an entry the component's own
+    packaging writes, and so uninstalling can find every entry we are responsible for
+    without guessing at names.
+    """
+    return (Path.home() / ".local" / "share" / "applications"
+            / f"{APP_ID}-{component_id}.desktop")
+
+
+def component_icon_target(component_id: str) -> Path:
+    return (Path.home() / ".local" / "share" / "icons" / "hicolor" / "256x256"
+            / "apps" / f"{APP_ID}-{component_id}.png")
+
+
 def menu_icon_target() -> Path:
     """Where the menu entry's Icon= name resolves from. hicolor is the theme every
     desktop falls back to, so an icon there is found without one being configured."""
