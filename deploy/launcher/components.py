@@ -184,7 +184,7 @@ def detect_comfyui() -> str | None:
     # The unpacked tree first: when it exists this machine could not mount an AppImage,
     # so the file beside it is the one thing that will not start.
     hit = _first_existing(
-        comfy_unpacked() / "AppRun",
+        comfy_runner(),
         comfy_appimage(),
         Path.home() / "Applications" / "ComfyUI.AppImage",
         Path.home() / ".local/bin/ComfyUI",
@@ -202,6 +202,39 @@ def comfy_unpacked() -> Path:
     return comfy_appimage().with_name("ComfyUI.unpacked")
 
 
+def comfy_runner() -> Path:
+    """The file to run once it has been unpacked -- see _write_runner for why not AppRun."""
+    return comfy_unpacked() / "run"
+
+
+def _write_runner(tree: Path) -> None:
+    """Put a two-line script beside AppRun that sets APPDIR before calling it.
+
+    AppRun is written to be started by the AppImage runtime, which exports APPDIR.
+    Started directly it tries to work the value out itself, and ComfyUI's does it with
+
+        while [[ "$path" != "" && ! -e "$path/$1" ]]; do path=${path%/*}; done
+
+    -- it looks for a file named after the first argument. With no arguments that stops
+    immediately and is right; with any argument it walks up to the root, leaves APPDIR
+    empty, and the next line runs "/comfyui-desktop-2", which does not exist. Their own
+    desktop entry passes --no-sandbox, so the failing case is the normal one.
+
+    Fixing their AppRun would be editing someone else's program; this sets the variable
+    the runtime would have set and calls it unchanged.
+    """
+    runner = tree / "run"
+    runner.write_text(
+        "#!/bin/sh\n"
+        "# Written by this application when it unpacked the AppImage. It supplies the\n"
+        "# one variable the AppImage runtime would have set, and changes nothing else.\n"
+        'HERE="$(dirname "$(readlink -f "$0")")"\n'
+        'APPDIR="$HERE" exec "$HERE/AppRun" "$@"\n',
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+
+
 def _unpack_appimage(program: Path, out: Progress) -> bool:
     """Extract an AppImage so it can run without FUSE.
 
@@ -212,8 +245,8 @@ def _unpack_appimage(program: Path, out: Progress) -> bool:
     was that same decision, and it would be undone by asking for root to run it.
 
     --appimage-extract needs no FUSE: the runtime reads its own squashfs. So the
-    fallback is to unpack once, keep the tree, and run its AppRun. It costs disk -- a
-    few hundred megabytes more than the compressed file -- and no permission at all.
+    fallback is to unpack once, keep the tree, and run it from there. It costs disk --
+    a few hundred megabytes more than the compressed file -- and no permission at all.
     """
     destination = comfy_unpacked()
     work = destination.with_name(destination.name + ".partial")
@@ -241,8 +274,12 @@ def _unpack_appimage(program: Path, out: Progress) -> bool:
         shutil.rmtree(work, ignore_errors=True)
         return False
     shutil.rmtree(work, ignore_errors=True)
-    with contextlib.suppress(OSError):
+    try:
         (destination / "AppRun").chmod(0o755)
+        _write_runner(destination)
+    except OSError as exc:
+        out.note(f"Unpacked, but could not make it runnable: {exc}")
+        return False
     log.info("unpacked %s to %s", program.name, destination)
     return True
 
