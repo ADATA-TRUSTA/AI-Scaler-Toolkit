@@ -53,6 +53,12 @@ DEFAULTS: dict[str, Any] = {
     # still trimmed to whatever screen the window is next opened on.
     "compact_size": None,
     "expanded_size": None,
+    # Whether the service accepts connections from other machines on the network.
+    # Off, and deliberately: the API has no authentication, so binding it beyond
+    # loopback hands everyone on the network the model, the settings and the ability
+    # to load and unload. That is a reasonable thing to want and not a reasonable
+    # default, so it is a decision the user makes once, knowing what it means.
+    "lan_access": False,
 }
 
 

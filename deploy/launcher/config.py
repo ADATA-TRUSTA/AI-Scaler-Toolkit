@@ -470,6 +470,39 @@ def service_url(port: int) -> str:
     return f"http://{SERVICE_HOST}:{port}"
 
 
+def bind_host() -> str:
+    """The address the service listens on, which is not the address we talk to it on.
+
+    Those are different questions and conflating them is a way to break the launcher
+    while trying to open a port: whatever it binds to, 127.0.0.1 always reaches it, so
+    everything here keeps using SERVICE_HOST to connect and only the bind moves.
+    """
+    from . import state
+
+    return "0.0.0.0" if state.get("lan_access") else SERVICE_HOST  # noqa: S104 - the point
+
+
+def lan_address() -> str | None:
+    """This machine's address on the network, or None when it has none.
+
+    Found by asking the routing table which interface would be used to reach the
+    outside, not by listing interfaces and guessing: a machine with a VPN, a container
+    bridge and a wireless card has several plausible answers and only one of them is
+    the one another machine on the network can use. No packet is sent -- a UDP socket
+    has no handshake, so connect() only fixes the local endpoint.
+    """
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.settimeout(1.0)
+            probe.connect(("192.0.2.1", 9))  # TEST-NET-1, routable to nowhere
+            address = probe.getsockname()[0]
+    except OSError:
+        return None
+    return address if address and not address.startswith("127.") else None
+
+
 def openai_base_url(port: int) -> str:
     """Where an OpenAI-compatible client should point.
 

@@ -437,6 +437,51 @@ class SettingsApi:
     def list_components(self) -> list[dict[str, Any]]:
         return components.listing()
 
+    def set_lan_access(self, enabled: bool) -> dict[str, Any]:
+        """Let other machines on the network reach the service, or stop letting them.
+
+        The service binds where .env says, so this rewrites that one key and restarts
+        it -- a listening socket's address cannot be changed under it.
+
+        There is no authentication on this API. Anyone who can reach the port can use
+        the loaded model, read the settings and load or unload. That is the user's call
+        to make, which is why this exists, and why the page states it plainly rather
+        than describing the switch as "network mode".
+        """
+        enabled = bool(enabled)
+        state.set("lan_access", enabled)
+        env_file.set_host(config.bind_host())
+        try:
+            self._launcher.service.restart()
+        except Exception as exc:  # noqa: BLE001 - reported, not raised at the page
+            log.exception("could not restart the service after changing the bind address")
+            return {"ok": False, "error": f"Could not restart the service: {exc}"}
+        log.info("lan access %s; service bound to %s",
+                 "enabled" if enabled else "disabled", config.bind_host())
+        return {"ok": True, **self.network_details()}
+
+    def network_details(self) -> dict[str, Any]:
+        """What another machine would need, and whether it can be used yet.
+
+        The commands are given as text to copy rather than a file to download: the
+        other machine's Hermes owns its own configuration, and `hermes config set` is
+        its supported way to change it. Handing over a fragment of YAML instead would
+        mean someone pasting it into a two-thousand-line file that is not ours.
+        """
+        port = self._launcher.service.port
+        address = config.lan_address()
+        enabled = bool(state.get("lan_access"))
+        base = f"http://{address}:{port}/v1" if address else None
+        return {
+            "lan_access": enabled,
+            "address": address or "",
+            "base_url": base or "",
+            "commands": (
+                ["hermes config set model.provider custom",
+                 f"hermes config set model.base_url {base}"] if base and enabled else []
+            ),
+        }
+
     def open_component(self, component_id: str) -> dict[str, Any]:
         started, error = components.open_component(str(component_id))
         return {"ok": started, "error": error}

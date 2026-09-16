@@ -25,6 +25,7 @@ telling someone to install something they already have is its own kind of wrong.
 
 from __future__ import annotations
 
+import contextlib
 import locale
 import os
 import platform
@@ -60,6 +61,12 @@ COMFY_PAGE = "https://comfy.org/download/"
 
 _MAX_LINES = 400
 _INSTALL_TIMEOUT = 3600
+
+# How long a component gets to fail before it is called started. An application that is
+# going to refuse -- a missing library, a broken install -- says so and exits at once;
+# one that is going to run is still running. Long enough to catch the first, short
+# enough not to be a pause the user notices.
+_START_GRACE_SECONDS = 2.5
 
 
 # --------------------------------------------------------------------------- detect
@@ -524,6 +531,19 @@ def _install_comfyui_linux(out: Progress) -> bool:
         return False
 
     out.note(f"Installed to {target}.")
+
+    # Asked now, not left for the user to discover. An AppImage needs FUSE, and without
+    # it this one prints "AppImages require FUSE to run" and exits -- so a machine that
+    # lacks it gets 220 MB that cannot start, and finds out by clicking Open and
+    # watching nothing happen. Measured on a stock Ubuntu 24.04 desktop, which does not
+    # ship libfuse2.
+    started, detail = _spawn([str(target), "--version"])
+    if not started and "fuse" in detail.lower():
+        out.note("It is installed but cannot start on this system yet: an AppImage "
+                 "needs FUSE, which is not present.")
+        out.note("Install it with:  sudo apt install libfuse2")
+        out.note("Nothing else is needed afterwards -- the file is already in place.")
+
     # An AppImage integrates with nothing by itself: without this it is a file in a
     # directory, absent from the menu and the dock, and the only way to start it is to
     # go and find it. The components' own Windows installers write Start Menu entries;
@@ -534,8 +554,6 @@ def _install_comfyui_linux(out: Progress) -> bool:
         out.note(f"It is not in the applications menu; start it from {target}.")
     out.note("The first time you open ComfyUI it downloads its own copy of PyTorch, "
              "around 2.5 GB, separate from this application's.")
-    out.note("An AppImage needs FUSE to run. If it will not start, install libfuse2 "
-             "(Debian/Ubuntu: sudo apt install libfuse2).")
     return True
 
 
@@ -828,21 +846,47 @@ def open_component(component_id: str) -> tuple[bool, str]:
             if not found:
                 continue
             command = [found, flag, str(program)] if flag else [found, str(program)]
-            try:
-                subprocess.Popen(command, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
-            except OSError:
-                continue
-            return True, ""
+            started, detail = _spawn(command)
+            if started:
+                return True, ""
+            log.info("%s could not start %s: %s", name, component.name, detail)
         return False, (f"No terminal found to run {component.name} in. "
                        f"Run it yourself with: {program}")
 
-    try:
-        subprocess.Popen([str(program)], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError as exc:
-        return False, f"Could not open {component.name}: {exc}"
+    started, detail = _spawn([str(program)])
+    if not started:
+        return False, f"{component.name} would not start. {detail}".strip()
     return True, ""
+
+
+def _spawn(command: list[str]) -> tuple[bool, str]:
+    """Start something and find out whether it stayed started.
+
+    Popen not raising means the file could be executed, which is a much weaker claim
+    than the program running: a ComfyUI AppImage on a machine without libfuse2 starts,
+    prints that it needs FUSE and exits, and reporting that as success gives the user a
+    button that does nothing and says nothing. Measured on the VM, where exactly that
+    happened.
+
+    So it is given a moment to fail. Still running afterwards is what success looks
+    like for an application; exiting in that time is a failure worth repeating back,
+    with whatever it said on the way out.
+    """
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, errors="replace", start_new_session=True,
+                                   creationflags=config.subprocess_flags())
+    except OSError as exc:
+        return False, str(exc)
+    try:
+        process.wait(timeout=_START_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        return True, ""
+    output = ""
+    with contextlib.suppress(Exception):
+        output = (process.stdout.read() or "").strip() if process.stdout else ""
+    first = next((line for line in output.splitlines() if line.strip()), "")
+    return False, first[:200]
 
 
 # What Hermes ships with. Anything else in base_url is a deliberate choice by whoever

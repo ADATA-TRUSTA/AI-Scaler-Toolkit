@@ -196,6 +196,29 @@
         </div>
       </div>
 
+      <div class="row">
+        <div>
+          <div class="label">Let other computers on this network use it</div>
+          <!-- Said plainly, and before the switch rather than after it. There is no
+               password on this API: whoever can reach the port can use the loaded
+               model and load or unload it. Calling this "network mode" and leaving
+               that in a tooltip would be the kind of wording that gets someone's
+               machine used by a stranger. -->
+          <div class="hint">Off, the service answers only this computer. On, any
+            computer on the same network can use it — <strong>there is no password</strong>,
+            so anyone who can reach it can use the model you have loaded, and load or
+            unload others. Turn it on for a network you trust.</div>
+          <div class="hint" id="lan-details" hidden></div>
+        </div>
+        <div class="control">
+          <label class="switch">
+            <input type="checkbox" id="lan-access">
+            <span class="slider"></span>
+          </label>
+          <div class="status" id="lan-status"></div>
+        </div>
+      </div>
+
       <ul class="facts" id="inference-ports"></ul>
       <p class="hint" id="inference-note"></p>
 
@@ -282,6 +305,8 @@
     el("tab-components").addEventListener("click", function () { showView("components"); });
 
     // --------------------------------------------------------------- settings
+    api.network_details().then(paintNetwork);
+
     api.get_state().then(function (s) {
       el("autostart").checked = s.autostart;
       el("port").value = s.service_port;
@@ -330,6 +355,45 @@
           box.checked = !box.checked;
           setStatus("port-status", r.error, "err");
         }
+      });
+    });
+
+    function paintNetwork(n) {
+      if (!n) { return; }
+      el("lan-access").checked = !!n.lan_access;
+      var box = el("lan-details");
+      if (n.lan_access && n.commands && n.commands.length) {
+        box.hidden = false;
+        box.innerHTML = "Reachable at <code>" + escapeHtml(n.base_url) + "</code>. " +
+          "On the other computer, with Hermes installed:<br>" +
+          n.commands.map(function (c) {
+            return "<code>" + escapeHtml(c) + "</code>";
+          }).join("<br>");
+      } else if (n.lan_access) {
+        box.hidden = false;
+        // On, but this machine has no address another one could use -- loopback only,
+        // or no network at all. Saying so beats showing a URL that cannot work.
+        box.textContent = "It is on, but this computer has no network address other " +
+          "computers could reach.";
+      } else {
+        box.hidden = true;
+        box.textContent = "";
+      }
+    }
+
+    el("lan-access").addEventListener("change", function (e) {
+      var box = e.target;
+      box.disabled = true;
+      setStatus("lan-status", "Restarting the service…", "");
+      api.set_lan_access(box.checked).then(function (r) {
+        box.disabled = false;
+        if (!r.ok) {
+          box.checked = !box.checked;
+          setStatus("lan-status", r.error, "err");
+          return;
+        }
+        setStatus("lan-status", box.checked ? "Open to this network" : "This computer only", "ok");
+        paintNetwork(r);
       });
     });
 

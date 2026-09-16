@@ -49,7 +49,7 @@ def desired(port: int) -> dict[str, str]:
     guess here would either duplicate or contradict it.
     """
     return {
-        "SERVICE_HOST": config.SERVICE_HOST,
+        "SERVICE_HOST": config.bind_host(),
         "SERVICE_PORT": str(port),
         "HF_HOME": str(config.hf_home()),
         "LOG_DIR": str(config.log_dir()),
@@ -79,19 +79,37 @@ def ensure(port: int) -> list[str]:
 
 def set_port(port: int) -> None:
     """Change SERVICE_PORT in place, leaving everything else untouched."""
+    set_key("SERVICE_PORT", str(port))
+
+
+def set_host(host: str) -> None:
+    """Change the address the service binds to, leaving everything else untouched."""
+    set_key("SERVICE_HOST", host)
+
+
+def set_key(key: str, value: str) -> None:
+    """Replace one key in place. The file is the user's as much as ours -- setup_env
+    appends to it and so may they -- so nothing else in it is touched."""
     path = env_path()
     if not path.is_file():
-        ensure(port)
-        return
+        ensure(state_port())
+        if not path.is_file():
+            return
 
     out: list[str] = []
     replaced = False
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip().startswith("SERVICE_PORT="):
-            out.append(f"SERVICE_PORT={port}")
+        if line.strip().startswith(f"{key}="):
+            out.append(f"{key}={value}")
             replaced = True
         else:
             out.append(line)
     if not replaced:
-        out.append(f"SERVICE_PORT={port}")
+        out.append(f"{key}={value}")
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def state_port() -> int:
+    from . import state
+
+    return state.service_port()
