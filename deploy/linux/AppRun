@@ -197,7 +197,14 @@ ensure_launcher_env() {
   mkdir -p "$(dirname "$VENV")"
   # No --system-site-packages: the distribution's packages are built for its own
   # interpreter, and mixing them into this one is what this arrangement exists to stop.
-  if ! uv venv --python "$LAUNCHER_PYTHON" "$VENV" >/dev/null 2>&1; then
+  #
+  # only-managed, because "--python 3.12" alone takes whatever 3.12 the machine already
+  # has and only downloads one when there is none. That reintroduces exactly what this
+  # replaced: observed here, the same command produced uv's 3.12.14 on a machine that
+  # had it cached and the distribution's 3.12.3 on one that did not. Both load the
+  # carried gi and select the same wheels, so nothing visibly breaks -- which is what
+  # makes it worth pinning rather than leaving to chance.
+  if ! uv venv --python "$LAUNCHER_PYTHON" --python-preference only-managed "$VENV" >/dev/null 2>&1; then
     report_problem "$APP_TITLE could not create its Python environment at
 
   $VENV
