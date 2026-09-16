@@ -88,6 +88,38 @@ MIN_WINDOW_SIZE = (520, 480)
 SCREEN_MARGIN = (32, 96)
 
 
+def claim_desktop_identity() -> None:
+    """Say which application this window belongs to, before one is created.
+
+    A Linux desktop matches a window to its .desktop file -- and so to its icon and its
+    place in the dock -- by the window's app_id, which GTK takes from the program name.
+    pywebview's GTK backend sets no program name, no WM_CLASS and no application id:
+    checked, there is not a line in it that does. So the window arrived anonymous, the
+    shell could not pair it with ai-scaler-toolkit.desktop, and the dock showed a
+    generic icon beside an entry whose Icon= was correct all along.
+
+    Set here rather than anywhere nearer the window, because GTK reads the program name
+    when the window is realised and ignores it afterwards.
+
+    Windows does not work this way -- the taskbar follows the executable, which the
+    installer already owns -- and there is nothing to do there.
+    """
+    if config.IS_WINDOWS:
+        return
+    try:
+        import gi
+
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib
+
+        GLib.set_prgname(config.APP_ID)
+        GLib.set_application_name(config.APP_TITLE)
+    except Exception as exc:  # noqa: BLE001 - an unnamed window is a cosmetic loss
+        log.info("could not claim the desktop identity: %s", exc)
+        return
+    log.info("desktop identity: %s (%s)", config.APP_ID, config.APP_TITLE)
+
+
 def screen_size() -> tuple[int, int] | None:
     """The screen a window will open on, or None when that cannot be established.
 
@@ -1219,6 +1251,8 @@ def main(argv: list[str] | None = None) -> int:
         log.info("started by the autostart entry with setup not yet done; "
                  "leaving it for a deliberate launch")
         return 0
+
+    claim_desktop_identity()
 
     import webview
 
