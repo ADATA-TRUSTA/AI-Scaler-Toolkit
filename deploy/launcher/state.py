@@ -45,6 +45,14 @@ DEFAULTS: dict[str, Any] = {
     # How long setup took and on which accelerator. The completion screen no longer
     # waits to be dismissed, so this is where that information stays available.
     "last_setup": None,
+    # [width, height] the user last dragged the window to, kept per shape because the
+    # window has two: the settings column on its own, and that column with the chat
+    # panel beside it. One remembered size for both is what made showing the chat
+    # panel appear to do nothing -- it applied to whichever shape you switched to, so
+    # the window never changed and the button looked broken. Null until dragged, and
+    # still trimmed to whatever screen the window is next opened on.
+    "compact_size": None,
+    "expanded_size": None,
 }
 
 

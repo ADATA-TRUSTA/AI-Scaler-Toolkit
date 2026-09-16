@@ -87,6 +87,17 @@ MIN_WINDOW_SIZE = (520, 480)
 # less contended than height, hence the difference.
 SCREEN_MARGIN = (32, 96)
 
+# How long after asking for a size a resize still counts as ours rather than the user's.
+# Not a size tolerance: the window manager does not grant what was asked for -- asking
+# for 640x653 produced an event reporting 692x742, its own decorations -- and any
+# tolerance wide enough to cover that is wide enough to swallow a real drag.
+_OUR_RESIZE_WINDOW = 2.0
+
+# How long the window must sit still before a drag is treated as finished. A drag
+# delivers an event per frame: one measured drag produced thirty in two seconds, and
+# each would otherwise rewrite the state file for a decision the user had not made yet.
+_DRAG_SETTLE_SECONDS = 0.4
+
 
 def claim_desktop_identity() -> None:
     """Say which application this window belongs to, before one is created.
@@ -162,6 +173,28 @@ def fit_to_screen(size: tuple[int, int]) -> tuple[int, int]:
     )
 
 
+def size_key(compact: bool) -> str:
+    return "compact_size" if compact else "expanded_size"
+
+
+def remembered_size(compact: bool) -> tuple[int, int] | None:
+    """The size the user last dragged this shape to, if they ever did.
+
+    Per shape, because the window has two and they are not interchangeable: the
+    settings column alone, and that column with the chat panel beside it. Trimmed to
+    the current screen on the way out, so a size chosen on a desktop monitor does not
+    hang off the edge of the laptop it is next opened on.
+    """
+    stored = state.get(size_key(compact))
+    try:
+        width, height = int(stored[0]), int(stored[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if width < MIN_WINDOW_SIZE[0] or height < MIN_WINDOW_SIZE[1]:
+        return None
+    return fit_to_screen((width, height))
+
+
 def interface_size(compact: bool) -> tuple[int, int]:
     """How big to make the window for the interface, on this screen.
 
@@ -172,7 +205,15 @@ def interface_size(compact: bool) -> tuple[int, int]:
 
     Width only adapts when expanded -- see COMPACT_WIDTH. Height always does, since
     every part of the interface is a list that can usefully be longer.
+
+    A size the user dragged this shape to wins, because they decided it. Toggling the
+    chat panel still moves the window -- to the other shape's size -- so the control
+    always does something visible, which is what one size for both shapes took away.
     """
+    chosen = remembered_size(compact)
+    if chosen is not None:
+        return chosen
+
     screen = screen_size()
     if screen is None:
         return COMPACT_SIZE if compact else EXPANDED_SIZE
@@ -285,7 +326,7 @@ class WindowApi:
 
     def set_compact(self, compact: bool) -> None:
         """The interface hid or showed its chat panel; match the window to it."""
-        self._launcher.set_window_size(interface_size(compact))
+        self._launcher.set_compact(compact)
 
 
 class SettingsApi:
@@ -425,6 +466,22 @@ class Launcher:
         # What the window is currently sized to, so a page asking for the size it is
         # already at costs nothing.
         self._window_size: tuple[int, int] | None = None
+        # Which shape the interface is in, so a drag is remembered against the right
+        # one. The packaged config.json decides how it starts; the page changes it.
+        self._compact = self._starts_compact()
+        # When we last asked for a size, and how much bigger the frame came back than
+        # the content area. The window manager does not grant what is asked for -- it
+        # adds its decorations and reports the result -- so the offset is learnt from
+        # our own resizes and every later event is read through it. Without that, one
+        # toggle's reported size fed into the next toggle's request and the window grew
+        # by the decorations each time: measured 744 -> 796 -> 848.
+        self._resize_asked_at = time.monotonic()
+        self._decoration = (0, 0)
+        self._maximized = False
+        # A drag delivers an event per frame -- around thirty in two seconds, measured.
+        # Writing state on each one rewrites the whole file thirty times for one
+        # decision, so the write waits until the drag stops.
+        self._resize_timer: threading.Timer | None = None
 
     # ---------------------------------------------------------------- window
 
@@ -447,9 +504,62 @@ class Launcher:
         if self._window_size == (width, height):
             return
         self._window_size = (width, height)
+        # Stamped before the call, so the event this is about to cause is recognised as
+        # ours rather than mistaken for the user dragging the frame.
+        self._resize_asked_at = time.monotonic()
         log.info("resizing the window to %dx%d", width, height)
         with contextlib.suppress(Exception):
             self.window.resize(width, height)
+
+    def set_compact(self, compact: bool) -> None:
+        """The interface hid or showed its chat panel; match the window to it."""
+        self._compact = compact
+        self.set_window_size(interface_size(compact))
+
+    def _on_maximized(self) -> None:
+        self._maximized = True
+
+    def _on_restored(self) -> None:
+        self._maximized = False
+
+    def _on_resized(self, width: int, height: int) -> None:
+        """Remember a size the user chose for the shape the window is in.
+
+        Every resize arrives here, ours included, and the two numbers are not in the
+        same units: resize() sets the content area and the event reports the frame
+        around it -- 52 by 89 pixels of difference on GNOME. So what arrives just after
+        we asked is the answer to our own request and gives us that offset; anything
+        else is the user, read back through it.
+
+        Not written here. A drag delivers an event per frame, so the write is deferred
+        until they stop, and only the size they stopped at is kept.
+        """
+        if time.monotonic() - self._resize_asked_at < _OUR_RESIZE_WINDOW:
+            if self._window_size is not None:
+                self._decoration = (width - self._window_size[0], height - self._window_size[1])
+            return
+        if self._maximized:
+            # A maximised window is the desktop's size, not a size anyone chose, and
+            # restoring would otherwise leave that recorded as a preference.
+            return
+
+        content = (width - self._decoration[0], height - self._decoration[1])
+        if content[0] < MIN_WINDOW_SIZE[0] or content[1] < MIN_WINDOW_SIZE[1]:
+            return
+        self._window_size = content
+        if self._resize_timer is not None:
+            self._resize_timer.cancel()
+        self._resize_timer = threading.Timer(_DRAG_SETTLE_SECONDS, self._remember_size, (content,))
+        self._resize_timer.daemon = True
+        self._resize_timer.start()
+
+    def _remember_size(self, content: tuple[int, int]) -> None:
+        key = size_key(self._compact)
+        if state.get(key) == list(content):
+            return
+        log.info("remembering the %s window at %dx%d",
+                 "compact" if self._compact else "expanded", content[0], content[1])
+        state.set(key, list(content))
 
     def reload_window(self) -> None:
         if self.window is None:
@@ -1288,7 +1398,13 @@ def main(argv: list[str] | None = None) -> int:
         height=height,
         min_size=MIN_WINDOW_SIZE,
     )
+    # What it was created at, before any event can arrive. Without this the first
+    # resized event -- the window simply being drawn -- is measured against nothing.
+    launcher._window_size = (width, height)
     launcher.window.events.closing += launcher._on_closing
+    launcher.window.events.resized += launcher._on_resized
+    launcher.window.events.maximized += launcher._on_maximized
+    launcher.window.events.restored += launcher._on_restored
     # Navigation clears injected globals, so the hook is put back after every load.
     launcher.window.events.loaded += launcher._inject_host_hook
 

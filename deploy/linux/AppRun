@@ -188,7 +188,9 @@ ensure_launcher_env() {
 
   if [[ -x "$VENV/bin/python" && -n "$want" && -f "$stamp" ]] \
      && [[ "$(cat "$stamp")" == "$want" ]]; then
-    return 0
+    # The environment is right, but where gi lives is not -- see link_bundled_gi.
+    link_bundled_gi
+    return $?
   fi
 
   ensure_uv || return 1
@@ -220,9 +222,26 @@ Check the network connection and try again."
     return 1
   fi
 
-  # A .pth rather than PYTHONPATH: this process starts the backend, and PYTHONPATH is
-  # inherited, so it would put this interpreter's gi on the path of a service that has
-  # its own environment. A .pth belongs to this interpreter and goes no further.
+  link_bundled_gi || return 1
+  printf '%s' "$want" > "$stamp"
+}
+
+# Point the environment at the gi this AppImage carries. Rewritten on every start, not
+# only when the environment is rebuilt, because the path changes on every start: an
+# AppImage mounts itself at a fresh /tmp/.mount_XXXXXX each time it runs, and $GI_DIR is
+# inside it. Written once and left, the file names a mount that no longer exists -- the
+# second launch of a build then cannot import gi and pywebview says "You must have
+# either QT or GTK with Python extensions installed", which is no window at all.
+#
+# That is not hypothetical, and it hid well: rebuilding the AppImage changes the hash
+# the environment is stamped with, which rebuilds it and rewrites this file, so every
+# test that followed a build passed. Only a second run of the same build fails, which is
+# what every user does and no build-and-test cycle does.
+#
+# A .pth rather than PYTHONPATH: this process starts the backend, and PYTHONPATH is
+# inherited, so it would put this interpreter's gi on the path of a service that has its
+# own environment. A .pth belongs to this interpreter and goes no further.
+link_bundled_gi() {
   local site
   site="$("$VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null)"
   if [[ -z "$site" ]]; then
@@ -238,7 +257,6 @@ This build is for x86_64 systems with GLib 2.72 or newer. Please report it with
 your distribution and version."
     return 1
   fi
-  printf '%s' "$want" > "$stamp"
 }
 
 if ! have_webkitgtk; then
