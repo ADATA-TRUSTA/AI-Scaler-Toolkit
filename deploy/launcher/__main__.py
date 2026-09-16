@@ -351,8 +351,12 @@ class SettingsApi:
             updater.open_release_page(self._update)
 
     def open_url(self, url: str) -> None:
+        # Through the launcher, which is where _open_url_async lives. Calling it on
+        # self raised AttributeError, and pywebview swallows what a bridge method
+        # raises -- so every "Vendor page" button did nothing at all, on both
+        # platforms, with nothing in the log to say why.
         if str(url).startswith(("http://", "https://")):
-            self._open_url_async(url)
+            self._launcher._open_url_async(url)
 
 
     # ------------------------------------------------------------- components

@@ -47,9 +47,15 @@ HERMES_PS1 = "https://hermes-agent.nousresearch.com/install.ps1"
 HERMES_SH = "https://hermes-agent.nousresearch.com/install.sh"
 HERMES_PAGE = "https://github.com/nousresearch/hermes-agent"
 
-# electron-builder's conventional download path. It redirects to the current build, so
-# it does not go stale the way a pinned release asset would.
+# The vendor's conventional download paths. They redirect to the current build, so they
+# do not go stale the way a pinned release asset would.
+#
+# The AppImage on Linux, not the .deb: a .deb is a system-wide install and needs root,
+# and this application installs without elevation -- offering a component that asks for
+# a password would be the one place it did. The AppImage is a file in the user's own
+# directory, which is the same bargain everything else here makes.
 COMFY_WINDOWS = "https://download.comfy.org/windows/nsis/x64"
+COMFY_LINUX = "https://download.comfy.org/linux/appimage/x64"
 COMFY_PAGE = "https://comfy.org/download/"
 
 _MAX_LINES = 400
@@ -165,8 +171,25 @@ def detect_comfyui() -> str | None:
     if found:
         return found
 
-    hit = _first_existing(Path.home() / ".local/bin/ComfyUI", Path("/opt/ComfyUI/ComfyUI"))
+    # Where the AppImage below is put, plus the places someone who installed it
+    # themselves is likely to have put it. Detection stays looser than the install path
+    # on purpose: telling someone to install what they already have is its own wrong.
+    hit = _first_existing(
+        comfy_appimage(),
+        Path.home() / "Applications" / "ComfyUI.AppImage",
+        Path.home() / ".local/bin/ComfyUI",
+        Path("/opt/ComfyUI/ComfyUI"),
+    )
     return str(hit) if hit else None
+
+
+def comfy_appimage() -> Path:
+    """Where the Linux build is installed to.
+
+    An AppImage is a single file, so "installing" it is putting it somewhere sensible
+    and making it executable. Beside this application's own data, which is per-user and
+    goes with it when it is uninstalled."""
+    return config.data_dir() / "components" / "ComfyUI.AppImage"
 
 
 # -------------------------------------------------------------------------- install
@@ -436,9 +459,7 @@ def install_hermes(out: Progress) -> bool:
 
 def install_comfyui(out: Progress) -> bool:
     if sys.platform != "win32":
-        out.note("ComfyUI Desktop only publishes a Windows build. The download page has "
-                 "the instructions for other systems.")
-        return False
+        return _install_comfyui_linux(out)
     target = Path(tempfile.gettempdir()) / "ComfyUI-Setup.exe"
     if not _download(COMFY_WINDOWS, target, out):
         return False
@@ -450,6 +471,53 @@ def install_comfyui(out: Progress) -> bool:
         return False
     out.note("Installed. The first time you open ComfyUI it downloads its own copy of "
              "PyTorch, around 2.5 GB, separate from this application's.")
+    return True
+
+
+def _install_comfyui_linux(out: Progress) -> bool:
+    """Put the AppImage in place and make it runnable.
+
+    There is nothing to run: an AppImage is the application. This used to say the
+    vendor published no Linux build, which was true when it was written and is not now
+    -- they ship an AppImage and a .deb alongside the Windows and macOS builds.
+
+    Downloaded to a temporary name and moved into place only once it has arrived, so an
+    interrupted download does not leave something that looks installed and is not.
+    """
+    target = comfy_appimage()
+    partial = target.with_suffix(".partial")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        out.note(f"Could not create {target.parent}: {exc}")
+        return False
+
+    if not _download(COMFY_LINUX, partial, out):
+        partial.unlink(missing_ok=True)
+        return False
+
+    # An AppImage starts with an ELF header. Checked because the download endpoint is a
+    # redirect to the vendor's CDN, and an error page saved to disk is still a file
+    # that arrived successfully -- it would sit there as an unrunnable "install".
+    try:
+        with partial.open("rb") as handle:
+            if handle.read(4) != b"\x7fELF":
+                out.note("What downloaded is not a Linux application. The vendor's "
+                         "download page is linked below.")
+                partial.unlink(missing_ok=True)
+                return False
+        partial.chmod(0o755)
+        partial.replace(target)
+    except OSError as exc:
+        out.note(f"Could not install it to {target}: {exc}")
+        partial.unlink(missing_ok=True)
+        return False
+
+    out.note(f"Installed to {target}.")
+    out.note("The first time you open ComfyUI it downloads its own copy of PyTorch, "
+             "around 2.5 GB, separate from this application's.")
+    out.note("An AppImage needs FUSE to run. If it will not start, install libfuse2 "
+             "(Debian/Ubuntu: sudo apt install libfuse2).")
     return True
 
 
@@ -528,12 +596,12 @@ CATALOGUE: tuple[Component, ...] = (
         id="comfyui",
         name="ComfyUI",
         description="Node-based generative AI workflows, the official desktop build.",
-        note="A 180 MB download. On first launch it fetches its own PyTorch, about "
-             "2.5 GB and separate from this application's, so budget the disk twice.",
+        note="A 180 MB download on Windows, 220 MB on Linux. On first launch it "
+             "fetches its own PyTorch, about 2.5 GB and separate from this "
+             "application's, so budget the disk twice.",
         page=COMFY_PAGE,
         detect=detect_comfyui,
         install=install_comfyui,
-        windows_only=True,
     ),
 )
 
