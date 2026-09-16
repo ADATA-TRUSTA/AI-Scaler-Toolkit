@@ -416,6 +416,18 @@
                       escapeHtml(c.detail) + "</div>" : "") +
           (c.location ? '<div class="where">' + escapeHtml(c.location) + "</div>" : "") +
           '<div class="component-actions">' + action +
+            // Only once it is installed: an Open button on something that is not there
+            // is a button that can only disappoint.
+            (installed && !c.busy
+              ? '<button data-open="' + escapeHtml(c.id) + '">' +
+                (c.terminal ? "Open in terminal" : "Open") + "</button>"
+              : "") +
+            // Hermes speaks to an OpenAI-compatible endpoint, and this backend is one.
+            // The button says where it will point rather than "Configure", because the
+            // thing it changes belongs to another application.
+            (c.can_point_here && !c.busy
+              ? '<button data-point="' + escapeHtml(c.id) + '">Use this machine\'s model</button>'
+              : "") +
             '<button class="link" data-page="' + escapeHtml(c.page) + '">Vendor page</button>' +
           "</div>" +
           '<div class="outcome" id="outcome-' + escapeHtml(c.id) + '"></div>' +
@@ -433,6 +445,29 @@
         Array.prototype.forEach.call(
           el("component-list").querySelectorAll("[data-page]"), function (b) {
             b.addEventListener("click", function () { api.open_url(b.getAttribute("data-page")); });
+          });
+        Array.prototype.forEach.call(
+          el("component-list").querySelectorAll("[data-open]"), function (b) {
+            b.addEventListener("click", function () {
+              var id = b.getAttribute("data-open");
+              // Reported even on success is wrong here -- the component appearing is
+              // the confirmation. Only a failure needs saying, because nothing else
+              // would tell the user that a click did nothing.
+              api.open_component(id).then(function (r) {
+                if (!r.ok) { say(id, r.error || "Could not open it."); }
+              });
+            });
+          });
+        Array.prototype.forEach.call(
+          el("component-list").querySelectorAll("[data-point]"), function (b) {
+            b.addEventListener("click", function () {
+              var id = b.getAttribute("data-point");
+              b.disabled = true;
+              api.point_component_here(id).then(function (r) {
+                b.disabled = false;
+                say(id, r.ok ? r.detail : r.error);
+              });
+            });
           });
         // A page opened while an install is already running picks it up rather than
         // showing a stale idle card.
@@ -474,6 +509,15 @@
           }
         });
       }, 1000);
+    }
+
+    // One place a card speaks from, so Open and "use this machine" land where an
+    // install's own outcome does rather than inventing a second kind of message.
+    function say(id, text) {
+      var outcome = el("outcome-" + id);
+      if (!outcome) { return; }
+      outcome.textContent = text || "";
+      outcome.className = "outcome";
     }
 
     function install(id) {

@@ -437,6 +437,39 @@ class SettingsApi:
     def list_components(self) -> list[dict[str, Any]]:
         return components.listing()
 
+    def open_component(self, component_id: str) -> dict[str, Any]:
+        started, error = components.open_component(str(component_id))
+        return {"ok": started, "error": error}
+
+    def point_component_here(self, component_id: str) -> dict[str, Any]:
+        """Point a component at this machine's model service.
+
+        Only Hermes for now, and only because it takes an OpenAI-compatible endpoint --
+        which this backend exposes whatever engine is loaded. The model name is passed
+        when one is loaded and left out when none is: the endpoint is valid either way,
+        and gating the whole action on a loaded model would refuse a setting that is
+        correct before the first model is chosen.
+        """
+        if str(component_id) != "hermes":
+            return {"ok": False, "error": "That component has nothing to point here."}
+        port = self._launcher.service.port
+        ok, message = components.point_hermes_here(
+            config.openai_base_url(port), self._loaded_model_id(port))
+        return {"ok": ok, "error": "" if ok else message, "detail": message if ok else ""}
+
+    def _loaded_model_id(self, port: int) -> str | None:
+        """What /v1/models reports, or None. Never raises: this is a convenience."""
+        import json
+        import urllib.request
+        try:
+            with urllib.request.urlopen(
+                    f"{config.openai_base_url(port)}/models", timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception:  # noqa: BLE001 - no model name is a fine answer
+            return None
+        entries = data.get("data") or []
+        return str(entries[0].get("id")) if entries and entries[0].get("id") else None
+
     def install_component(self, component_id: str) -> dict[str, Any]:
         started, error = components.start(str(component_id))
         return {"ok": started, "error": error}

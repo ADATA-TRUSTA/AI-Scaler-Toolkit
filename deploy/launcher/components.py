@@ -408,7 +408,17 @@ def install_hermes(out: Progress) -> bool:
                        "install-hermes.log")
         if code != 0:
             out.note(f"The installer exited with code {code}.")
-        return code == 0
+            return False
+        # Its own installer says to reload the shell, which is a per-terminal fix and
+        # no help to anyone looking for it in a menu. The entry names the absolute path
+        # for the same reason: a desktop does not read .bashrc, so "hermes" alone would
+        # not resolve there even after the shell was reloaded.
+        located = detect_hermes()
+        if located and shortcuts.ensure_component(
+                "hermes", Path(located), "Hermes Agent", terminal=True,
+                comment="Self-improving AI agent by Nous Research"):
+            out.note("Added it to the applications menu; it opens in a terminal.")
+        return True
 
     script = Path(tempfile.gettempdir()) / "hermes-install.ps1"
     if not _download(HERMES_PS1, script, out):
@@ -576,6 +586,11 @@ class Component:
     detect: Callable[[], str | None]
     install: Callable[[Progress], bool]
     windows_only: bool = False
+    # Whether this is a command-line tool, which decides how opening it is arranged: a
+    # terminal has to be found for it, and its menu entry asks the desktop for one.
+    # Hermes ships a windowed build on Windows and a command on Linux, so this is
+    # per-platform rather than a property of the component.
+    terminal: bool = False
     # Turns this component's own known failures into an instruction. Keeping it here
     # rather than in a shared if-chain keyed on id means the knowledge sits with the
     # thing it is about, and adding a component cannot break another one's advice.
@@ -599,6 +614,10 @@ CATALOGUE: tuple[Component, ...] = (
         install=install_hermes,
         explain=explain_hermes,
         describe=describe_hermes,
+        # A command on Linux. Its source tree carries a windowed build, but the Linux
+        # installer does not produce one -- checked on a real install: apps/desktop has
+        # no release directory. Windows gets Hermes.exe and needs no terminal.
+        terminal=not config.IS_WINDOWS,
     ),
     Component(
         id="comfyui",
@@ -762,6 +781,142 @@ def start(component_id: str) -> tuple[bool, str]:
     return True, ""
 
 
+def open_component(component_id: str) -> tuple[bool, str]:
+    """Start an installed component. Returns (started, message).
+
+    Through the desktop entry where there is one, rather than running the program
+    ourselves: the entry already says how this component wants to be started -- with a
+    terminal or without, with the vendor's own arguments -- and the desktop is the
+    thing that knows which terminal to use. Running it directly would have to guess
+    both, and guessing wrong on a command-line tool means a click that does nothing.
+    """
+    component = BY_ID.get(component_id)
+    if component is None:
+        return False, "Unknown component."
+    located = component.detect()
+    if not located:
+        return False, f"{component.name} does not look installed."
+    program = Path(located)
+
+    if config.IS_WINDOWS:
+        try:
+            os.startfile(program)  # noqa: S606 - the point is to open it as the shell would
+        except OSError as exc:
+            return False, f"Could not open {component.name}: {exc}"
+        return True, ""
+
+    entry = config.component_entry_target(component_id)
+    launcher_cmd = shutil.which("gio")
+    if entry.is_file() and launcher_cmd:
+        try:
+            subprocess.Popen([launcher_cmd, "launch", str(entry)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError as exc:
+            log.info("gio launch failed for %s: %s", component_id, exc)
+        else:
+            return True, ""
+
+    if component.terminal:
+        # No desktop entry to defer to, so the terminal has to be found. Ordered by how
+        # likely it is to be the one this desktop actually uses: the Debian alternative
+        # first, because it is whatever the user or the distribution chose.
+        for name, flag in (("x-terminal-emulator", "-e"), ("gnome-terminal", "--"),
+                           ("konsole", "-e"), ("xfce4-terminal", "-x"),
+                           ("kitty", ""), ("alacritty", "-e"), ("xterm", "-e")):
+            found = shutil.which(name)
+            if not found:
+                continue
+            command = [found, flag, str(program)] if flag else [found, str(program)]
+            try:
+                subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:
+                continue
+            return True, ""
+        return False, (f"No terminal found to run {component.name} in. "
+                       f"Run it yourself with: {program}")
+
+    try:
+        subprocess.Popen([str(program)], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        return False, f"Could not open {component.name}: {exc}"
+    return True, ""
+
+
+# What Hermes ships with. Anything else in base_url is a deliberate choice by whoever
+# set it, and is not ours to overwrite.
+HERMES_STOCK_BASE_URLS = ("https://openrouter.ai/api/v1", "")
+
+
+def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str]:
+    """Point an installed Hermes at this machine's model service.
+
+    Through `hermes config set`, which is the vendor's own supported way to change it.
+    Editing ~/.hermes/config.yaml directly would mean parsing and rewriting two
+    thousand lines of someone else's commented configuration, and getting the merge
+    wrong loses settings that are not ours.
+
+    It refuses when base_url is already something other than the shipped default: that
+    is a decision somebody made, and silently replacing it is how an application earns
+    a reputation for meddling. The values are reported instead, to be applied by hand.
+    """
+    program = detect_hermes()
+    if not program:
+        return False, "Hermes does not look installed."
+
+    current = _hermes_config_get(program, "model.base_url")
+    if current is not None and current not in HERMES_STOCK_BASE_URLS and current != service_url:
+        return False, (
+            f"Hermes is already pointed at {current}, which someone chose. Leaving it "
+            f"alone. To change it by hand:\n"
+            f"  hermes config set model.provider custom\n"
+            f"  hermes config set model.base_url {service_url}")
+
+    settings = [("model.provider", "custom"), ("model.base_url", service_url)]
+    if model:
+        settings.append(("model.default", model))
+    for key, value in settings:
+        ok, detail = _hermes_config_set(program, key, value)
+        if not ok:
+            return False, f"Could not set {key}: {detail}"
+
+    log.info("pointed Hermes at %s (model %s)", service_url, model or "unset")
+    if model:
+        return True, f"Hermes now uses {model} on this machine."
+    return True, ("Hermes now uses this machine. Load a model here and it will be "
+                  "offered; until then Hermes has nothing to talk to.")
+
+
+def _hermes_command(program: str) -> list[str]:
+    return [program]
+
+
+def _hermes_config_get(program: str, key: str) -> str | None:
+    try:
+        result = subprocess.run(_hermes_command(program) + ["config", "get", key],
+                                capture_output=True, text=True, timeout=120,
+                                creationflags=config.subprocess_flags())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip().splitlines()[-1].strip() if result.stdout.strip() else None
+
+
+def _hermes_config_set(program: str, key: str, value: str) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(_hermes_command(program) + ["config", "set", key, value],
+                                capture_output=True, text=True, timeout=120,
+                                creationflags=config.subprocess_flags())
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout).strip()[:200]
+    return True, ""
+
+
 def listing() -> list[dict]:
     job = current_job()
     busy = job["id"] if job and job["running"] else ""
@@ -791,5 +946,10 @@ def listing() -> list[dict]:
             "available": not (component.windows_only and sys.platform != "win32"),
             "busy": busy == component.id,
             "blocked": bool(busy) and busy != component.id,
+            # Said here rather than worked out in the page, so the card does not have
+            # to know which components are command-line tools or which platform it is
+            # on -- both are this file's business.
+            "terminal": component.terminal,
+            "can_point_here": component.id == "hermes" and located is not None,
         })
     return out

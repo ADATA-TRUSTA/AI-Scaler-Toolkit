@@ -158,25 +158,30 @@ def ensure() -> None:
         log.warning("could not write the desktop shortcut to %s: %s", desktop, exc)
 
 
-def ensure_component(component_id: str, program: Path, fallback_name: str) -> bool:
+def ensure_component(component_id: str, program: Path, fallback_name: str,
+                     *, terminal: bool = False, comment: str = "") -> bool:
     """Put a component we installed into the applications menu.
 
-    An AppImage is a single file and integrates with nothing by itself: dropped in a
-    directory it is invisible to the menu, the dock and the launcher's search, and the
-    only way to start it is to find the file. On Windows the components' own installers
-    write Start Menu entries, so this is the Linux half of what they already do.
+    A program dropped in a directory integrates with nothing by itself: it is invisible
+    to the menu, the dock and the launcher's search, and the only way to start it is to
+    find the file. On Windows the components' own installers write Start Menu entries,
+    so this is the Linux half of what they already do.
 
-    The entry is built from the one inside the AppImage rather than invented, so the
-    name, the icon and the categories are the vendor's own -- with Exec rewritten to
-    the path we installed it at, since theirs assumes it is running from inside the
-    mounted image.
+    For an AppImage the entry is built from the one inside it, so the name, the icon and
+    the categories are the vendor's own -- only Exec is rewritten, to the path we
+    installed it at, since theirs assumes it is running from inside the mounted image.
+
+    terminal=True for a command-line tool. The desktop then opens it in whatever
+    terminal that desktop uses, which is the only portable answer: guessing between
+    gnome-terminal, konsole and the rest gets it wrong on the desktops we did not think
+    of, and getting it wrong means a menu entry that does nothing when clicked.
     """
     if config.IS_WINDOWS or not program.is_file():
         return False
 
-    details = _read_appimage_entry(program)
+    details = _read_appimage_entry(program) if program.suffix.lower() == ".appimage" else {}
     name = details.get("Name") or fallback_name
-    icon = _extract_appimage_icon(program, component_id, details.get("Icon", ""))
+    icon = _extract_appimage_icon(program, component_id, details.get("Icon", "")) if details else None
     # %U and friends are placeholders the desktop fills in; an Exec that keeps them
     # while naming our path is still correct, and dropping them would lose the ability
     # to open a file with the component.
@@ -186,11 +191,11 @@ def ensure_component(component_id: str, program: Path, fallback_name: str) -> bo
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name={name}\n"
-        f"Comment={details.get('Comment', '')}\n"
+        f"Comment={details.get('Comment') or comment}\n"
         f"Exec=\"{program}\"{(' ' + arguments) if arguments else ''}\n"
-        f"Icon={icon if icon else 'application-x-executable'}\n"
-        "Terminal=false\n"
-        f"Categories={details.get('Categories', 'Utility;')}\n"
+        f"Icon={icon if icon else 'utilities-terminal' if terminal else 'application-x-executable'}\n"
+        f"Terminal={'true' if terminal else 'false'}\n"
+        f"Categories={details.get('Categories', 'Development;Utility;')}\n"
         # Ours, so the uninstaller can tell an entry it wrote from one it did not.
         f"X-TrustaComponent={component_id}\n"
     )

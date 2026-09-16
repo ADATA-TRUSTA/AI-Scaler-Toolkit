@@ -470,6 +470,16 @@ def service_url(port: int) -> str:
     return f"http://{SERVICE_HOST}:{port}"
 
 
+def openai_base_url(port: int) -> str:
+    """Where an OpenAI-compatible client should point.
+
+    The backend exposes /v1/chat/completions and /v1/models whatever engine is loaded,
+    so this is a stable address to hand to a tool that speaks that protocol -- which is
+    how a third-party agent uses a model served here instead of a cloud API.
+    """
+    return f"{service_url(port)}/v1"
+
+
 def interface_url(port: int, *, compact: bool = False) -> str:
     """The interface itself, not the root that redirects to it.
 
