@@ -49,8 +49,110 @@ UI_DIR = config.resource_root() / "launcher" / "ui"
 # interface that follows needs a large one, and the shape depends on whether the chat
 # panel is showing -- a column laid out for 480px in a 1320px frame is mostly empty.
 SETUP_SIZE = (660, 580)
+
+# Used only when the screen cannot be established; otherwise the interface is sized to
+# it by interface_size below.
 COMPACT_SIZE = (640, 880)
 EXPANDED_SIZE = (1320, 880)
+
+# The settings column is laid out at a fixed 480px and does not reflow, so the compact
+# window has one correct width whatever the screen is -- widening it adds empty space,
+# not content. Only the expanded shape, which is that column plus a chat panel that
+# takes what is left, has anything to do with a bigger screen.
+COMPACT_WIDTH = 640
+
+# How much of the screen the window asks for, and the most it is allowed to take. The
+# fraction is what leaves room for the desktop's own furniture, and that slack is doing
+# real work: nothing here can measure a dock. Wayland does not tell a client where the
+# struts are -- Gdk's get_workarea returns the whole screen, and so does the webview's
+# screen.availWidth -- and it does not let a client place its own window either, so a
+# window that comes out too wide cannot be measured or moved back afterwards. Leaving
+# a fifth of the width unasked-for is what keeps it on screen wherever it is put.
+#
+# Caps only, deliberately no lower bound. A first version had one, and on a 1024x768
+# display it pushed the width up to a figure the screen could not give, which then got
+# clamped to 97% of it -- and the dock took the rest. A minimum wider than the screen
+# is not a minimum, it is an overflow. MIN_WINDOW_SIZE below is the real floor.
+MAX_WINDOW_SIZE = (1600, 1000)
+SCREEN_FRACTION = (0.80, 0.85)
+
+# Nothing smaller is usable, so the sizes above are never trimmed below this even on a
+# screen that cannot fit it -- a window running off the edge is better than one with no
+# room for its own controls.
+MIN_WINDOW_SIZE = (520, 480)
+
+# Taken off the screen before a window is sized to it. A desktop keeps some of the
+# screen for itself -- a top bar, a dock, the window's own title bar -- and a window
+# sized to the full height opens with its lower edge under whatever is there. Width is
+# less contended than height, hence the difference.
+SCREEN_MARGIN = (32, 96)
+
+
+def screen_size() -> tuple[int, int] | None:
+    """The screen a window will open on, or None when that cannot be established.
+
+    pywebview answers this from its platform layer, which is up before the loop starts,
+    so it can be asked while deciding the size to create a window at. A session that
+    reports no screens at all -- headless, or an unusual compositor -- gets None, and
+    the caller then uses the size it asked for, which is what this did before.
+
+    The first screen, not the largest: that is the primary on every backend that orders
+    them, and it is where a window opens unless something else places it.
+    """
+    try:
+        import webview
+
+        screens = webview.screens
+    except Exception:  # noqa: BLE001 - any failure here means "cannot tell"
+        return None
+    for screen in screens or ():
+        width, height = getattr(screen, "width", 0), getattr(screen, "height", 0)
+        if width and height:
+            return int(width), int(height)
+    return None
+
+
+def fit_to_screen(size: tuple[int, int]) -> tuple[int, int]:
+    """Trim a wanted size to what the screen can actually show.
+
+    The sizes above are written for a desktop monitor and were applied whatever the
+    screen was. On a 1024x768 display -- a VM, a projector, an older laptop -- asking
+    for the interface put a 1320x880 window past two edges at once, with the controls
+    down the right-hand side of the page unreachable. Showing the chat panel is where
+    that surfaced, because it is the only action that makes the window wider.
+    """
+    screen = screen_size()
+    if screen is None:
+        return size
+    return (
+        min(size[0], max(MIN_WINDOW_SIZE[0], screen[0] - SCREEN_MARGIN[0])),
+        min(size[1], max(MIN_WINDOW_SIZE[1], screen[1] - SCREEN_MARGIN[1])),
+    )
+
+
+def interface_size(compact: bool) -> tuple[int, int]:
+    """How big to make the window for the interface, on this screen.
+
+    Sized to the screen rather than fixed. The constants above were written on one
+    monitor and applied everywhere: on a 1024x768 display the expanded window ran past
+    two edges at once, and on a large one it stayed a small window in the middle of an
+    empty desktop.
+
+    Width only adapts when expanded -- see COMPACT_WIDTH. Height always does, since
+    every part of the interface is a list that can usefully be longer.
+    """
+    screen = screen_size()
+    if screen is None:
+        return COMPACT_SIZE if compact else EXPANDED_SIZE
+
+    width = COMPACT_WIDTH
+    if not compact:
+        width = min(MAX_WINDOW_SIZE[0], round(screen[0] * SCREEN_FRACTION[0]))
+    height = min(MAX_WINDOW_SIZE[1], round(screen[1] * SCREEN_FRACTION[1]))
+    # Through fit_to_screen, not instead of it: the bounds above are what the interface
+    # wants, and the screen still has the last word on a display smaller than the lower
+    # bound.
+    return fit_to_screen((width, height))
 
 # Long enough to read "Setup complete" and the time it took, short enough not to be a
 # step. The button was removed: after a nine-minute wait, asking for a click before
@@ -151,7 +253,7 @@ class WindowApi:
 
     def set_compact(self, compact: bool) -> None:
         """The interface hid or showed its chat panel; match the window to it."""
-        self._launcher.set_window_size(COMPACT_SIZE if compact else EXPANDED_SIZE)
+        self._launcher.set_window_size(interface_size(compact))
 
 
 class SettingsApi:
@@ -297,10 +399,11 @@ class Launcher:
         with contextlib.suppress(Exception):
             self.window.evaluate_js(script)
 
+
     def set_window_size(self, size: tuple[int, int]) -> None:
         if self.window is None:
             return
-        width, height = size
+        width, height = fit_to_screen(size)
         # Every page reports the width it needs when it mounts, so the size it is
         # already at is reported constantly. Acting on those made the log read like a
         # window resizing itself in a loop -- which is what it looked like to me when
@@ -321,7 +424,7 @@ class Launcher:
         url = config.interface_url(self.service.port, compact=compact)
         # Sized before the page loads rather than after, so the interface does not
         # appear at the setup window's size and then jump.
-        self.set_window_size(COMPACT_SIZE if compact else EXPANDED_SIZE)
+        self.set_window_size(interface_size(compact))
         log.info("loading %s", url)
         self.window.load_url(url)
 
@@ -1128,12 +1231,16 @@ def main(argv: list[str] | None = None) -> int:
     # size and then jump to the interface size once the service answered -- which on
     # an already-installed machine is a small window sitting there for a minute or
     # more and then resizing, for no reason the user can see.
+    # Trimmed to the screen here as well as on every later resize: a window created
+    # larger than the display opens past its edges, and the first thing the user sees
+    # is the one thing they cannot drag back.
     if provision.is_provisioned():
-        width, height = COMPACT_SIZE if launcher._starts_compact() else EXPANDED_SIZE
+        width, height = interface_size(launcher._starts_compact())
         log.info("already provisioned; opening at the interface size %dx%d", width, height)
     else:
-        width, height = SETUP_SIZE
+        width, height = fit_to_screen(SETUP_SIZE)
         log.info("setup is needed; opening at the setup size %dx%d", width, height)
+    log.info("screen: %s", screen_size() or "unknown")
 
     launcher.window = webview.create_window(
         config.APP_TITLE,
@@ -1141,7 +1248,7 @@ def main(argv: list[str] | None = None) -> int:
         js_api=WindowApi(launcher),
         width=width,
         height=height,
-        min_size=(520, 480),
+        min_size=MIN_WINDOW_SIZE,
     )
     launcher.window.events.closing += launcher._on_closing
     # Navigation clears injected globals, so the hook is put back after every load.
