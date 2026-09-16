@@ -133,6 +133,8 @@
     font-family: ui-monospace, Consolas, monospace; word-break: break-all;
   }
   .component-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+  /* Sits with the button it describes, not under the card. */
+  .hint.inline { margin-top: 0; font-size: 12.5px; }
   .component .outcome { font-size: 13px; margin-top: 10px; }
   .component .outcome.ok { color: var(--ok); }
   .component .outcome.err { color: var(--err); }
@@ -490,7 +492,10 @@
             // The button says where it will point rather than "Configure", because the
             // thing it changes belongs to another application.
             (c.can_point_here && !c.busy
-              ? '<button data-point="' + escapeHtml(c.id) + '">Use this machine\'s model</button>'
+              ? '<button data-point="' + escapeHtml(c.id) + '">Use this machine\'s model</button>' +
+                '<span class="hint inline">' +
+                (servedModel ? "will use " + escapeHtml(servedModel)
+                             : "no model loaded yet — sets the address only") + "</span>"
               : "") +
             '<button class="link" data-page="' + escapeHtml(c.page) + '">Vendor page</button>' +
           "</div>" +
@@ -499,8 +504,15 @@
         "</div>";
     }
 
+    // What a component pointed at this machine would be given, kept beside the cards
+    // so one can say it before the button is pressed rather than after.
+    var servedModel = "";
+
     function refreshComponents() {
-      return api.list_components().then(function (list) {
+      return api.network_details().then(function (n) {
+        servedModel = (n && n.model) || "";
+        return api.list_components();
+      }).then(function (list) {
         el("component-list").innerHTML = list.map(cardHtml).join("");
         Array.prototype.forEach.call(
           el("component-list").querySelectorAll("[data-install]"), function (b) {

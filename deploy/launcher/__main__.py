@@ -476,6 +476,13 @@ class SettingsApi:
             "lan_access": enabled,
             "address": address or "",
             "base_url": base or "",
+            # What a component pointed here would be given. Reported so the card can
+            # say it before the button is pressed rather than after: "it will use
+            # qwen2.5-7b" and "there is no model loaded yet" are different enough that
+            # finding out afterwards is a surprise, and disabling the button instead
+            # would block the one moment someone most wants to connect a tool -- while
+            # setting the machine up, before any model is chosen.
+            "model": self._loaded_model_id(port) or "",
             "commands": (
                 ["hermes config set model.provider custom",
                  f"hermes config set model.base_url {base}"] if base and enabled else []
