@@ -159,7 +159,8 @@ def ensure() -> None:
 
 
 def ensure_component(component_id: str, program: Path, fallback_name: str,
-                     *, terminal: bool = False, comment: str = "") -> bool:
+                     *, terminal: bool = False, comment: str = "",
+                     source: Path | None = None) -> bool:
     """Put a component we installed into the applications menu.
 
     A program dropped in a directory integrates with nothing by itself: it is invisible
@@ -171,6 +172,10 @@ def ensure_component(component_id: str, program: Path, fallback_name: str,
     the categories are the vendor's own -- only Exec is rewritten, to the path we
     installed it at, since theirs assumes it is running from inside the mounted image.
 
+    source names that image when it is not the thing being run -- on a system without
+    FUSE we unpack the AppImage and Exec has to name the unpacked AppRun, but the entry
+    should still carry the vendor's name and icon rather than fall back to ours.
+
     terminal=True for a command-line tool. The desktop then opens it in whatever
     terminal that desktop uses, which is the only portable answer: guessing between
     gnome-terminal, konsole and the rest gets it wrong on the desktops we did not think
@@ -179,9 +184,13 @@ def ensure_component(component_id: str, program: Path, fallback_name: str,
     if config.IS_WINDOWS or not program.is_file():
         return False
 
-    details = _read_appimage_entry(program) if program.suffix.lower() == ".appimage" else {}
+    # Exec names what actually runs; the name, icon and categories come from the image.
+    # Those are two different files once an AppImage has been unpacked to run at all.
+    origin = source if source is not None else program
+    details = (_read_appimage_entry(origin)
+               if origin.is_file() and origin.suffix.lower() == ".appimage" else {})
     name = details.get("Name") or fallback_name
-    icon = _extract_appimage_icon(program, component_id, details.get("Icon", "")) if details else None
+    icon = _extract_appimage_icon(origin, component_id, details.get("Icon", "")) if details else None
     # %U and friends are placeholders the desktop fills in; an Exec that keeps them
     # while naming our path is still correct, and dropping them would lose the ability
     # to open a file with the component.

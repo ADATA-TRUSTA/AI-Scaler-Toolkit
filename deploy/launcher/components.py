@@ -181,13 +181,70 @@ def detect_comfyui() -> str | None:
     # Where the AppImage below is put, plus the places someone who installed it
     # themselves is likely to have put it. Detection stays looser than the install path
     # on purpose: telling someone to install what they already have is its own wrong.
+    # The unpacked tree first: when it exists this machine could not mount an AppImage,
+    # so the file beside it is the one thing that will not start.
     hit = _first_existing(
+        comfy_unpacked() / "AppRun",
         comfy_appimage(),
         Path.home() / "Applications" / "ComfyUI.AppImage",
         Path.home() / ".local/bin/ComfyUI",
         Path("/opt/ComfyUI/ComfyUI"),
     )
     return str(hit) if hit else None
+
+
+def comfy_unpacked() -> Path:
+    """Where an AppImage is unpacked to when this machine cannot mount one.
+
+    Beside the file it came from, named after it, so the pair is obviously one thing
+    and the uninstaller that removes the components directory removes both.
+    """
+    return comfy_appimage().with_name("ComfyUI.unpacked")
+
+
+def _unpack_appimage(program: Path, out: Progress) -> bool:
+    """Extract an AppImage so it can run without FUSE.
+
+    Ubuntu 24.04 ships fuse3 and not libfuse2, and an AppImage of this generation wants
+    libfuse2 -- so on a current desktop the file downloads, installs, and refuses to
+    start. Installing libfuse2 fixes it and costs a password, which is the one thing
+    this application has been built not to ask for; choosing the AppImage over the .deb
+    was that same decision, and it would be undone by asking for root to run it.
+
+    --appimage-extract needs no FUSE: the runtime reads its own squashfs. So the
+    fallback is to unpack once, keep the tree, and run its AppRun. It costs disk -- a
+    few hundred megabytes more than the compressed file -- and no permission at all.
+    """
+    destination = comfy_unpacked()
+    work = destination.with_name(destination.name + ".partial")
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run([str(program), "--appimage-extract"], cwd=work,
+                                capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as exc:
+        out.note(f"Unpacking failed: {exc}")
+        shutil.rmtree(work, ignore_errors=True)
+        return False
+    extracted = work / "squashfs-root"
+    if result.returncode != 0 or not (extracted / "AppRun").is_file():
+        out.note("Unpacking produced nothing runnable.")
+        shutil.rmtree(work, ignore_errors=True)
+        return False
+    # Moved into place only once it is complete, so an interrupted unpack cannot leave
+    # a half tree that detection would report as installed.
+    shutil.rmtree(destination, ignore_errors=True)
+    try:
+        extracted.replace(destination)
+    except OSError as exc:
+        out.note(f"Could not put the unpacked application in place: {exc}")
+        shutil.rmtree(work, ignore_errors=True)
+        return False
+    shutil.rmtree(work, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        (destination / "AppRun").chmod(0o755)
+    log.info("unpacked %s to %s", program.name, destination)
+    return True
 
 
 def comfy_appimage() -> Path:
@@ -539,19 +596,26 @@ def _install_comfyui_linux(out: Progress) -> bool:
     # ship libfuse2.
     started, detail = _spawn([str(target), "--version"])
     if not started and "fuse" in detail.lower():
-        out.note("It is installed but cannot start on this system yet: an AppImage "
-                 "needs FUSE, which is not present.")
-        out.note("Install it with:  sudo apt install libfuse2")
-        out.note("Nothing else is needed afterwards -- the file is already in place.")
+        out.note("This system has no FUSE, which an AppImage normally needs. Unpacking "
+                 "it instead, which needs nothing.")
+        if _unpack_appimage(target, out):
+            out.note("Unpacked. It starts the same way; nothing else is needed.")
+        else:
+            out.note("Could not unpack it either. Installing FUSE would fix it:")
+            out.note("  sudo apt install libfuse2")
 
     # An AppImage integrates with nothing by itself: without this it is a file in a
     # directory, absent from the menu and the dock, and the only way to start it is to
     # go and find it. The components' own Windows installers write Start Menu entries;
     # this is the same thing on the platform where it is the installer's job.
-    if shortcuts.ensure_component("comfyui", target, "ComfyUI"):
+    # The entry names whichever of the two actually runs here. Pointing it at the
+    # AppImage on a machine that unpacked it because the AppImage will not run would be
+    # a menu entry that does nothing -- the exact failure the unpacking avoided.
+    runnable = Path(detect_comfyui() or target)
+    if shortcuts.ensure_component("comfyui", runnable, "ComfyUI", source=target):
         out.note("Added it to the applications menu.")
     else:
-        out.note(f"It is not in the applications menu; start it from {target}.")
+        out.note(f"It is not in the applications menu; start it from {runnable}.")
     out.note("The first time you open ComfyUI it downloads its own copy of PyTorch, "
              "around 2.5 GB, separate from this application's.")
     return True

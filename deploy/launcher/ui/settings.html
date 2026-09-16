@@ -138,6 +138,15 @@
   .component .outcome { font-size: 13px; margin-top: 10px; }
   .component .outcome.ok { color: var(--ok); }
   .component .outcome.err { color: var(--err); }
+  /* Separated by a line rather than spacing: it is about a computer that is not this
+     one, so it should not read as one more sentence about the card above it. */
+  .component .remote { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .component .remote .label { font-size: 13px; }
+  code {
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 5px; display: inline-block; margin-top: 3px; word-break: break-all;
+  }
 
   pre.log {
     margin: 12px 0 0; padding: 12px 14px; max-height: 220px; overflow: auto;
@@ -366,11 +375,11 @@
       var box = el("lan-details");
       if (n.lan_access && n.commands && n.commands.length) {
         box.hidden = false;
+        // The address here, the instructions on the Hermes card. What to type on the
+        // other computer is a thing you do to Hermes, so it belongs where Hermes is
+        // rather than duplicated under a switch that is already long enough.
         box.innerHTML = "Reachable at <code>" + escapeHtml(n.base_url) + "</code>. " +
-          "On the other computer, with Hermes installed:<br>" +
-          n.commands.map(function (c) {
-            return "<code>" + escapeHtml(c) + "</code>";
-          }).join("<br>");
+          "The Hermes card under Components says what to run on the other computer.";
       } else if (n.lan_access) {
         box.hidden = false;
         // On, but this machine has no address another one could use -- loopback only,
@@ -396,6 +405,9 @@
         }
         setStatus("lan-status", box.checked ? "Open to this network" : "This computer only", "ok");
         paintNetwork(r);
+        // The Hermes card carries the commands this switch decides, so it is stale the
+        // moment the switch moves -- even though the switch is on the other tab.
+        refreshComponents();
       });
     });
 
@@ -499,6 +511,10 @@
               : "") +
             '<button class="link" data-page="' + escapeHtml(c.page) + '">Vendor page</button>' +
           "</div>" +
+          // The same wiring, done by hand, for a Hermes that is not on this computer.
+          // The button above can only reach the local one; everyone else has to type
+          // it, so the commands live next to the button rather than in Settings.
+          (c.can_point_here ? remoteHtml() : "") +
           '<div class="outcome" id="outcome-' + escapeHtml(c.id) + '"></div>' +
           '<pre class="log" id="log-' + escapeHtml(c.id) + '" hidden></pre>' +
         "</div>";
@@ -507,9 +523,33 @@
     // What a component pointed at this machine would be given, kept beside the cards
     // so one can say it before the button is pressed rather than after.
     var servedModel = "";
+    // The same answer the Settings switch paints from, so the card cannot contradict it.
+    var netInfo = null;
+
+    // Three states, and the two that are not "here is what to type" matter more: a
+    // reader who is looking for how to connect another computer needs to be told that
+    // the switch is off, not shown nothing at all.
+    function remoteHtml() {
+      if (!netInfo) { return ""; }
+      var body;
+      if (!netInfo.lan_access) {
+        body = "Off. Turn on <em>Let other computers on this network use it</em> in " +
+          "Settings first.";
+      } else if (netInfo.commands && netInfo.commands.length) {
+        body = "Run these on the other computer, where Hermes is installed:<br>" +
+          netInfo.commands.map(function (c) {
+            return "<code>" + escapeHtml(c) + "</code>";
+          }).join("<br>");
+      } else {
+        body = "On, but this computer has no network address others could reach.";
+      }
+      return '<div class="remote"><div class="label">Hermes on another computer</div>' +
+        '<div class="hint">' + body + "</div></div>";
+    }
 
     function refreshComponents() {
       return api.network_details().then(function (n) {
+        netInfo = n || null;
         servedModel = (n && n.model) || "";
         return api.list_components();
       }).then(function (list) {
