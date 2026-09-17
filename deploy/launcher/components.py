@@ -1088,6 +1088,14 @@ def _spawn(command: list[str]) -> tuple[bool, str]:
 HERMES_PROVIDER_ID = "trusta-ast"
 HERMES_PROVIDER_NAME = "TRUSTA AST"
 
+# A stable name for "whatever is loaded here", rather than the id of whatever happens
+# to be loaded at the moment the button is pressed. This service answers on the model
+# it has loaded and ignores the name asked for -- checked against it: a request naming
+# trusta-ast-default came back answered by Qwen/Qwen2.5-0.5B-Instruct -- so writing the
+# real id would buy nothing and cost a Hermes endpoint that silently names yesterday's
+# model every time a different one is loaded here.
+HERMES_MODEL_ALIAS = "trusta-ast-default"
+
 # Providers Hermes ships selected. Finding one of these means nobody has chosen yet;
 # anything else is a decision, and is not ours to overwrite.
 HERMES_STOCK_PROVIDERS = ("openrouter", "custom")
@@ -1120,16 +1128,14 @@ def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str]:
     settings = [
         (f"providers.{HERMES_PROVIDER_ID}.name", HERMES_PROVIDER_NAME),
         (f"providers.{HERMES_PROVIDER_ID}.base_url", service_url),
-        # Hermes then asks this service what it is serving, so the list in its endpoint
-        # editor is whatever is loaded here at the time -- which is a better answer than
-        # any model name written now, and the reason a name is only written below when
-        # there is a real one to write.
+        # Hermes then asks this service what it is serving, so its endpoint editor
+        # lists whatever is loaded here at the time rather than what was loaded when
+        # this button was pressed.
         (f"providers.{HERMES_PROVIDER_ID}.discover_models", "true"),
+        (f"providers.{HERMES_PROVIDER_ID}.model", HERMES_MODEL_ALIAS),
         ("model.provider", HERMES_PROVIDER_ID),
+        ("model.default", HERMES_MODEL_ALIAS),
     ]
-    if model:
-        settings += [(f"providers.{HERMES_PROVIDER_ID}.model", model),
-                     ("model.default", model)]
     for key, value in settings:
         ok, detail = _hermes_config_set(program, key, value)
         if not ok:
