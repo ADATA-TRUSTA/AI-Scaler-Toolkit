@@ -542,8 +542,54 @@ class SettingsApi:
         if not model:
             return {"ok": False, "error": "Load a model first; there is nothing to "
                                           "point Hermes at yet."}
+        refusal = self._tool_calling_refusal(port)
+        if refusal:
+            return {"ok": False, "error": f"Hermes sends tools with every request, and "
+                                          f"this service will not take them. {refusal}"}
         ok, message = components.point_hermes_here(config.openai_base_url(port), model)
         return {"ok": ok, "error": "" if ok else message, "detail": message if ok else ""}
+
+    def _tool_calling_refusal(self, port: int) -> str:
+        """The service's own reason a request carrying tools would be refused, or "".
+
+        Asked rather than worked out. Whether tool calling works depends on the loaded
+        engine, and for vLLM on a parser having been configured as well -- conditions
+        the service already evaluates, and that this side would otherwise keep a second
+        copy of, to drift from the first. Hermes sends tools on every request, so a
+        Hermes pointed at a service that refuses them fails on its first message with
+        an error the user reads there rather than here.
+
+        Cheap because the check runs before any generation: measured at two
+        milliseconds when the answer is no. When it is yes the reply is one token.
+        """
+        import json
+        import urllib.error
+        import urllib.request
+
+        probe = {
+            "model": "probe",
+            "messages": [{"role": "user", "content": "x"}],
+            "max_tokens": 1,
+            "tools": [{"type": "function",
+                       "function": {"name": "probe",
+                                    "parameters": {"type": "object", "properties": {}}}}],
+        }
+        request = urllib.request.Request(
+            f"{config.openai_base_url(port)}/chat/completions",
+            data=json.dumps(probe).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20):
+                return ""
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("detail")
+            except Exception:  # noqa: BLE001 - the status is the answer; the text is a bonus
+                detail = None
+            return str(detail) if detail else f"The service refused a request carrying tools ({exc.code})."
+        except Exception:  # noqa: BLE001 - unreachable is not a refusal; let the write proceed
+            return ""
 
     def _loaded_model_id(self, port: int) -> str | None:
         """What /v1/models reports, or None. Never raises: this is a convenience."""
