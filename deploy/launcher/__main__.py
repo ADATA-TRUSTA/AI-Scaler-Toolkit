@@ -81,6 +81,18 @@ SCREEN_FRACTION = (0.80, 0.85)
 # room for its own controls.
 MIN_WINDOW_SIZE = (520, 480)
 
+# The floor above is the compact shape's: one 480px column and its own frame. The
+# expanded shape is that column plus a chat panel, and the column does not reflow, so
+# every pixel below this comes out of the chat panel -- which has no minimum of its
+# own and simply gets narrower until its contents no longer fit in it.
+#
+# Not hypothetical. A window dragged narrow while expanded was remembered at 636, and
+# every later "Show chat" restored it: 480 for the column, and a 150px strip for the
+# chat panel, in which the message area had vanished and only the composer's
+# background was still visible. 480 for the column plus 360 for a panel that can hold
+# a line of conversation, plus the frame.
+EXPANDED_MIN_WIDTH = 880
+
 # Taken off the screen before a window is sized to it. A desktop keeps some of the
 # screen for itself -- a top bar, a dock, the window's own title bar -- and a window
 # sized to the full height opens with its lower edge under whatever is there. Width is
@@ -177,6 +189,18 @@ def size_key(compact: bool) -> str:
     return "compact_size" if compact else "expanded_size"
 
 
+def minimum_size(compact: bool) -> tuple[int, int]:
+    """The smallest this shape can be and still show what it is for.
+
+    Per shape, like the remembered size: the compact window is one column, and 520 is
+    enough for it. The expanded one is that column plus a chat panel, so its floor is
+    wider -- see EXPANDED_MIN_WIDTH.
+    """
+    if compact:
+        return MIN_WINDOW_SIZE
+    return (max(MIN_WINDOW_SIZE[0], EXPANDED_MIN_WIDTH), MIN_WINDOW_SIZE[1])
+
+
 def remembered_size(compact: bool) -> tuple[int, int] | None:
     """The size the user last dragged this shape to, if they ever did.
 
@@ -190,9 +214,14 @@ def remembered_size(compact: bool) -> tuple[int, int] | None:
         width, height = int(stored[0]), int(stored[1])
     except (TypeError, ValueError, IndexError):
         return None
+    floor = minimum_size(compact)
     if width < MIN_WINDOW_SIZE[0] or height < MIN_WINDOW_SIZE[1]:
         return None
-    return fit_to_screen((width, height))
+    # Raised rather than rejected: a width this shape cannot survive is the one part
+    # of their choice to overrule, and discarding the whole size would throw away a
+    # height they meant. The stored value is left alone -- the next drag replaces it,
+    # and a size we corrected is not a size they chose.
+    return fit_to_screen((max(width, floor[0]), max(height, floor[1])))
 
 
 def interface_size(compact: bool) -> tuple[int, int]:
@@ -497,16 +526,23 @@ class SettingsApi:
         """Point a component at this machine's model service.
 
         Only Hermes for now, and only because it takes an OpenAI-compatible endpoint --
-        which this backend exposes whatever engine is loaded. The model name is passed
-        when one is loaded and left out when none is: the endpoint is valid either way,
-        and gating the whole action on a loaded model would refuse a setting that is
-        correct before the first model is chosen.
+        which this backend exposes whatever engine is loaded.
+
+        Refused until a model is loaded. Writing the address alone looked harmless and
+        was not: Hermes keeps a default model beside the endpoint, so an endpoint
+        pointed here while its default still read upstage/solar-pro4:free -- Hermes's
+        own, which this service does not serve -- described a working setup that could
+        not answer a single message. There is also nothing to be gained by allowing it,
+        since the button's offer is this machine's model and there is not one yet.
         """
         if str(component_id) != "hermes":
             return {"ok": False, "error": "That component has nothing to point here."}
         port = self._launcher.service.port
-        ok, message = components.point_hermes_here(
-            config.openai_base_url(port), self._loaded_model_id(port))
+        model = self._loaded_model_id(port)
+        if not model:
+            return {"ok": False, "error": "Load a model first; there is nothing to "
+                                          "point Hermes at yet."}
+        ok, message = components.point_hermes_here(config.openai_base_url(port), model)
         return {"ok": ok, "error": "" if ok else message, "detail": message if ok else ""}
 
     def _loaded_model_id(self, port: int) -> str | None:

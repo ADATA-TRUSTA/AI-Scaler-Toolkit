@@ -488,11 +488,16 @@
             // The button says where it will point rather than "Configure", because the
             // thing it changes belongs to another application.
             (c.can_point_here && !c.busy
+              // Disabled until there is a model, because that is what the button
+              // offers. It used to write the address alone and say so, which left the
+              // other application describing a working connection to a model this one
+              // is not serving.
               ? '<span class="pair">' +
-                '<button data-point="' + escapeHtml(c.id) + '">Use this machine\'s model</button>' +
+                '<button data-point="' + escapeHtml(c.id) + '"' +
+                (servedModel ? "" : " disabled") + ">Use this machine's model</button>" +
                 '<span class="hint inline">' +
                 (servedModel ? "will use " + escapeHtml(servedModel)
-                             : "no model loaded yet — sets the address only") + "</span></span>"
+                             : "load a model here first") + "</span></span>"
               : "") +
             '<button class="link" data-page="' + escapeHtml(c.page) + '">Vendor page</button>' +
           "</div>" +

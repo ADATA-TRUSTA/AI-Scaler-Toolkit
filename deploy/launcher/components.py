@@ -114,10 +114,32 @@ def _user_environment(name: str) -> str | None:
     return None
 
 
+def _as_spelled(path: str) -> str:
+    """The path as the filesystem spells it.
+
+    shutil.which on Windows does not read the directory. It appends each PATHEXT entry
+    to the stem and asks whether that file exists, and PATHEXT is written in capitals,
+    so an ordinary hermes.exe came back as "hermes.EXE" -- which works everywhere and
+    is wrong on the card, where it sits beside a path found by listing a directory.
+
+    Only the spelling is corrected. realpath would also have fixed it and would have
+    followed links on the way, turning the command on PATH into wherever it points,
+    which is not the same answer to "where is Hermes".
+    """
+    entry = Path(path)
+    try:
+        for sibling in entry.parent.iterdir():
+            if sibling.name.lower() == entry.name.lower():
+                return str(sibling)
+    except OSError:
+        pass
+    return path
+
+
 def detect_hermes() -> str | None:
     found = shutil.which("hermes")
     if found:
-        return found
+        return _as_spelled(found)
 
     roots: list[Path] = []
     for candidate in (os.environ.get("HERMES_HOME"), _user_environment("HERMES_HOME")):
@@ -683,6 +705,24 @@ def explain_hermes(log_tail: str) -> str | None:
     return None
 
 
+def open_hermes() -> str | None:
+    """The windowed application, when it was built.
+
+    Detection finds the command line tool, because that is what proves Hermes is
+    installed and what a PATH lookup returns. Opening it is a different question: on
+    Windows the installer also builds a windowed application, and starting the command
+    line tool there gives a console window with a shell prompt in it -- which is what
+    the Open button did.
+
+    None when it is not there, and open_component then falls back to what detection
+    found. On Linux that is the only build the installer produces, so Hermes opens in
+    a terminal and says so on its card; the desktop application exists in its sources
+    but nothing builds it there.
+    """
+    desktop = _hermes_desktop_exe(_hermes_home())
+    return str(desktop) if desktop else None
+
+
 def describe_hermes() -> tuple[str, bool]:
     """Say whether the windowed application is there, not just the command line tool.
 
@@ -719,6 +759,10 @@ class Component:
     # windowed application are separate builds, and a card reading "Installed" beside
     # a missing desktop application is the kind of half-truth this file keeps fixing.
     describe: Callable[[], tuple[str, bool]] | None = None
+    # What Open should start, when that is not the file detection found. Returning
+    # None means "the same thing", which is the case for every component whose one
+    # build is both the proof it is installed and the thing you open.
+    open_target: Callable[[], str | None] | None = None
 
 
 CATALOGUE: tuple[Component, ...] = (
@@ -733,6 +777,7 @@ CATALOGUE: tuple[Component, ...] = (
         install=install_hermes,
         explain=explain_hermes,
         describe=describe_hermes,
+        open_target=open_hermes,
         # A command on Linux. Its source tree carries a windowed build, but the Linux
         # installer does not produce one -- checked on a real install: apps/desktop has
         # no release directory. Windows gets Hermes.exe and needs no terminal.
@@ -947,7 +992,9 @@ def open_component(component_id: str) -> tuple[bool, str]:
     located = component.detect()
     if not located:
         return False, f"{component.name} does not look installed."
-    program = Path(located)
+    # Detection answers "is it installed"; this answers "what does Open start". They
+    # are the same file for most components and not for Hermes -- see open_hermes.
+    program = Path((component.open_target and component.open_target()) or located)
 
     if config.IS_WINDOWS:
         try:
@@ -1032,9 +1079,18 @@ def _spawn(command: list[str]) -> tuple[bool, str]:
     return False, first[:200]
 
 
-# What Hermes ships with. Anything else in base_url is a deliberate choice by whoever
-# set it, and is not ours to overwrite.
-HERMES_STOCK_BASE_URLS = ("https://openrouter.ai/api/v1", "")
+# An endpoint of our own in Hermes's `providers:` map, rather than its built-in
+# "custom" slot. Writing to "custom" was wrong twice over: it is one shared slot, so
+# pointing Hermes here quietly overwrote whatever else somebody had put in it, and it
+# carries no name -- Hermes's endpoint editor showed "Custom / custom" with a default
+# model of upstage/solar-pro4:free, which is Hermes's own default and not something
+# this service serves. A named provider shows what it is and leaves "custom" alone.
+HERMES_PROVIDER_ID = "trusta-ast"
+HERMES_PROVIDER_NAME = "TRUSTA AST"
+
+# Providers Hermes ships selected. Finding one of these means nobody has chosen yet;
+# anything else is a decision, and is not ours to overwrite.
+HERMES_STOCK_PROVIDERS = ("openrouter", "custom")
 
 
 def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str]:
@@ -1053,17 +1109,27 @@ def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str]:
     if not program:
         return False, "Hermes does not look installed."
 
-    current = _hermes_config_get(program, "model.base_url")
-    if current is not None and current not in HERMES_STOCK_BASE_URLS and current != service_url:
+    active = _hermes_config_get(program, "model.provider")
+    if active not in (None, "", HERMES_PROVIDER_ID) and active not in HERMES_STOCK_PROVIDERS:
         return False, (
-            f"Hermes is already pointed at {current}, which someone chose. Leaving it "
-            f"alone. To change it by hand:\n"
-            f"  hermes config set model.provider custom\n"
-            f"  hermes config set model.base_url {service_url}")
+            f"Hermes is set to use the \"{active}\" provider, which somebody chose. "
+            f"Leaving it alone. To point it here by hand:\n"
+            f"  hermes config set providers.{HERMES_PROVIDER_ID}.base_url {service_url}\n"
+            f"  hermes config set model.provider {HERMES_PROVIDER_ID}")
 
-    settings = [("model.provider", "custom"), ("model.base_url", service_url)]
+    settings = [
+        (f"providers.{HERMES_PROVIDER_ID}.name", HERMES_PROVIDER_NAME),
+        (f"providers.{HERMES_PROVIDER_ID}.base_url", service_url),
+        # Hermes then asks this service what it is serving, so the list in its endpoint
+        # editor is whatever is loaded here at the time -- which is a better answer than
+        # any model name written now, and the reason a name is only written below when
+        # there is a real one to write.
+        (f"providers.{HERMES_PROVIDER_ID}.discover_models", "true"),
+        ("model.provider", HERMES_PROVIDER_ID),
+    ]
     if model:
-        settings.append(("model.default", model))
+        settings += [(f"providers.{HERMES_PROVIDER_ID}.model", model),
+                     ("model.default", model)]
     for key, value in settings:
         ok, detail = _hermes_config_set(program, key, value)
         if not ok:
