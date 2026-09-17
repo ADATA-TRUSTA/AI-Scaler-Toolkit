@@ -172,6 +172,9 @@
   .hint.inline { margin-top: 0; font-size: 12.5px; }
   .component .outcome { font-size: 13px; margin-top: 10px; }
   .component .outcome.ok { color: var(--ok); }
+  /* Not red. "Load a model first" and "Hermes is not installed" are the state of
+     things and something the reader can act on; the red is kept for a fault. */
+  .component .outcome.warn { color: var(--warn); }
   .component .outcome.err { color: var(--err); }
   /* Separated by a line rather than spacing: it is about a computer that is not this
      one, so it should not read as one more sentence about the card above it. */
@@ -604,7 +607,7 @@
               // the confirmation. Only a failure needs saying, because nothing else
               // would tell the user that a click did nothing.
               api.open_component(id).then(function (r) {
-                if (!r.ok) { say(id, r.error || "Could not open it."); }
+                if (!r.ok) { say(id, r.error || "Could not open it.", r.kind || "failed"); }
               });
             });
           });
@@ -615,7 +618,7 @@
               b.disabled = true;
               api.point_component_here(id).then(function (r) {
                 b.disabled = false;
-                say(id, r.ok ? r.detail : r.error);
+                say(id, r.ok ? r.detail : r.error, r.kind);
               });
             });
           });
@@ -668,11 +671,18 @@
 
     // One place a card speaks from, so Open and "use this machine" land where an
     // install's own outcome does rather than inventing a second kind of message.
-    function say(id, text) {
+    // Coloured by what kind of outcome it is, not by whether it succeeded. The two
+    // are not the same question: half of what arrives here is the component refusing
+    // for a reason the reader can do something about, and painting that the same red
+    // as a real fault says something broke when nothing did. Plain text was worse
+    // still -- it sat in the card reading as one more line of description.
+    var OUTCOME_CLASS = { done: "ok", blocked: "warn", failed: "err" };
+
+    function say(id, text, kind) {
       var outcome = el("outcome-" + id);
       if (!outcome) { return; }
       outcome.textContent = text || "";
-      outcome.className = "outcome";
+      outcome.className = "outcome " + (OUTCOME_CLASS[kind] || "");
     }
 
     function install(id) {

@@ -519,8 +519,8 @@ class SettingsApi:
         }
 
     def open_component(self, component_id: str) -> dict[str, Any]:
-        started, error = components.open_component(str(component_id))
-        return {"ok": started, "error": error}
+        started, error, kind = components.open_component(str(component_id))
+        return {"ok": started, "error": error, "kind": kind}
 
     def point_component_here(self, component_id: str) -> dict[str, Any]:
         """Point a component at this machine's model service.
@@ -536,18 +536,22 @@ class SettingsApi:
         since the button's offer is this machine's model and there is not one yet.
         """
         if str(component_id) != "hermes":
-            return {"ok": False, "error": "That component has nothing to point here."}
+            return {"ok": False, "error": "That component has nothing to point here.",
+                    "kind": components.FAILED}
         port = self._launcher.service.port
         model = self._loaded_model_id(port)
         if not model:
             return {"ok": False, "error": "Load a model first; there is nothing to "
-                                          "point Hermes at yet."}
+                                          "point Hermes at yet.",
+                    "kind": components.BLOCKED}
         refusal = self._tool_calling_refusal(port)
         if refusal:
             return {"ok": False, "error": f"Hermes sends tools with every request, and "
-                                          f"this service will not take them. {refusal}"}
-        ok, message = components.point_hermes_here(config.openai_base_url(port), model)
-        return {"ok": ok, "error": "" if ok else message, "detail": message if ok else ""}
+                                          f"this service will not take them. {refusal}",
+                    "kind": components.BLOCKED}
+        ok, message, kind = components.point_hermes_here(config.openai_base_url(port), model)
+        return {"ok": ok, "error": "" if ok else message,
+                "detail": message if ok else "", "kind": kind}
 
     def _tool_calling_refusal(self, port: int) -> str:
         """The service's own reason a request carrying tools would be refused, or "".

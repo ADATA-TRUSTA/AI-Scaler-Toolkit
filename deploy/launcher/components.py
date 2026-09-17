@@ -68,6 +68,14 @@ _INSTALL_TIMEOUT = 3600
 # enough not to be a pause the user notices.
 _START_GRACE_SECONDS = 2.5
 
+# How an outcome reads, so the page can colour it without knowing what it says. The
+# distinction that matters is the middle one: "load a model first" and "Hermes is not
+# installed" are the state of things, not faults, and painting them the same red as
+# "it would not start" tells the reader something broke when nothing did.
+DONE = "done"
+BLOCKED = "blocked"
+FAILED = "failed"
+
 
 # --------------------------------------------------------------------------- detect
 
@@ -977,7 +985,7 @@ def _write_entry(component: Component, program: Path) -> bool:
                                       comment=component.description, source=source)
 
 
-def open_component(component_id: str) -> tuple[bool, str]:
+def open_component(component_id: str) -> tuple[bool, str, str]:
     """Start an installed component. Returns (started, message).
 
     Through the desktop entry where there is one, rather than running the program
@@ -988,10 +996,10 @@ def open_component(component_id: str) -> tuple[bool, str]:
     """
     component = BY_ID.get(component_id)
     if component is None:
-        return False, "Unknown component."
+        return False, "Unknown component.", FAILED
     located = component.detect()
     if not located:
-        return False, f"{component.name} does not look installed."
+        return False, f"{component.name} does not look installed.", BLOCKED
     # Detection answers "is it installed"; this answers "what does Open start". They
     # are the same file for most components and not for Hermes -- see open_hermes.
     program = Path((component.open_target and component.open_target()) or located)
@@ -1000,8 +1008,8 @@ def open_component(component_id: str) -> tuple[bool, str]:
         try:
             os.startfile(program)  # noqa: S606 - the point is to open it as the shell would
         except OSError as exc:
-            return False, f"Could not open {component.name}: {exc}"
-        return True, ""
+            return False, f"Could not open {component.name}: {exc}", FAILED
+        return True, "", DONE
 
     entry = config.component_entry_target(component_id)
     # An entry outlives the thing it names. This one was written by a version of this
@@ -1023,7 +1031,7 @@ def open_component(component_id: str) -> tuple[bool, str]:
         except OSError as exc:
             log.info("gio launch failed for %s: %s", component_id, exc)
         else:
-            return True, ""
+            return True, "", DONE
 
     if component.terminal:
         # No desktop entry to defer to, so the terminal has to be found. Ordered by how
@@ -1038,15 +1046,15 @@ def open_component(component_id: str) -> tuple[bool, str]:
             command = [found, flag, str(program)] if flag else [found, str(program)]
             started, detail = _spawn(command)
             if started:
-                return True, ""
+                return True, "", DONE
             log.info("%s could not start %s: %s", name, component.name, detail)
         return False, (f"No terminal found to run {component.name} in. "
-                       f"Run it yourself with: {program}")
+                       f"Run it yourself with: {program}"), BLOCKED
 
     started, detail = _spawn([str(program)])
     if not started:
-        return False, f"{component.name} would not start. {detail}".strip()
-    return True, ""
+        return False, f"{component.name} would not start. {detail}".strip(), FAILED
+    return True, "", DONE
 
 
 def _spawn(command: list[str]) -> tuple[bool, str]:
@@ -1101,7 +1109,7 @@ HERMES_MODEL_ALIAS = "trusta-ast-default"
 HERMES_STOCK_PROVIDERS = ("openrouter", "custom")
 
 
-def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str]:
+def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str, str]:
     """Point an installed Hermes at this machine's model service.
 
     Through `hermes config set`, which is the vendor's own supported way to change it.
@@ -1115,7 +1123,7 @@ def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str]:
     """
     program = detect_hermes()
     if not program:
-        return False, "Hermes does not look installed."
+        return False, "Hermes does not look installed.", BLOCKED
 
     active = _hermes_config_get(program, "model.provider")
     if active not in (None, "", HERMES_PROVIDER_ID) and active not in HERMES_STOCK_PROVIDERS:
@@ -1123,7 +1131,7 @@ def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str]:
             f"Hermes is set to use the \"{active}\" provider, which somebody chose. "
             f"Leaving it alone. To point it here by hand:\n"
             f"  hermes config set providers.{HERMES_PROVIDER_ID}.base_url {service_url}\n"
-            f"  hermes config set model.provider {HERMES_PROVIDER_ID}")
+            f"  hermes config set model.provider {HERMES_PROVIDER_ID}", BLOCKED)
 
     settings = [
         (f"providers.{HERMES_PROVIDER_ID}.name", HERMES_PROVIDER_NAME),
@@ -1139,13 +1147,13 @@ def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str]:
     for key, value in settings:
         ok, detail = _hermes_config_set(program, key, value)
         if not ok:
-            return False, f"Could not set {key}: {detail}"
+            return False, f"Could not set {key}: {detail}", FAILED
 
     log.info("pointed Hermes at %s (model %s)", service_url, model or "unset")
     if model:
-        return True, f"Hermes now uses {model} on this machine."
+        return True, f"Hermes now uses {model} on this machine.", DONE
     return True, ("Hermes now uses this machine. Load a model here and it will be "
-                  "offered; until then Hermes has nothing to talk to.")
+                  "offered; until then Hermes has nothing to talk to."), DONE
 
 
 def _hermes_command(program: str) -> list[str]:
