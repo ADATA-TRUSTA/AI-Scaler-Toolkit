@@ -177,6 +177,17 @@
      one, so it should not read as one more sentence about the card above it. */
   .component .remote { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
   .component .remote .label { font-size: 13px; }
+  /* The same shape as a Settings row -- sentence on the left, switch on the right --
+     because that is what it is, moved to the card it belongs to. */
+  .component .remote-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  }
+  .component .remote-head > div:first-child { flex: 1; min-width: 0; }
+  /* Bounded, so a confirmation like "Open to this network" wraps under the switch
+     instead of taking the width away from the sentence that explains it. */
+  .component .remote-head .control { max-width: 108px; }
+  .component .remote-head .status { font-size: 12.5px; }
+  .component .remote > .hint { margin-top: 10px; }
   code {
     font-family: ui-monospace, Consolas, monospace; font-size: 12px;
     background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
@@ -242,28 +253,10 @@
         </div>
       </div>
 
-      <div class="row">
-        <div>
-          <div class="label">Let other computers on this network use it</div>
-          <!-- Said plainly, and before the switch rather than after it. There is no
-               password on this API: whoever can reach the port can use the loaded
-               model and load or unload it. Calling this "network mode" and leaving
-               that in a tooltip would be the kind of wording that gets someone's
-               machine used by a stranger. -->
-          <div class="hint">Off, the service answers only this computer. On, any
-            computer on the same network can use it — <strong>there is no password</strong>,
-            so anyone who can reach it can use the model you have loaded, and load or
-            unload others. Turn it on for a network you trust.</div>
-          <div class="hint" id="lan-details" hidden></div>
-        </div>
-        <div class="control">
-          <label class="switch">
-            <input type="checkbox" id="lan-access">
-            <span class="slider"></span>
-          </label>
-          <div class="status" id="lan-status"></div>
-        </div>
-      </div>
+      <!-- The switch that opens the service to the network lives on the Hermes card
+           under Components, not here: it exists to be turned on while setting Hermes
+           up on another computer, and it is useless without the two commands that go
+           with it. -->
 
       <ul class="facts" id="inference-ports"></ul>
       <p class="hint" id="inference-note"></p>
@@ -351,8 +344,6 @@
     el("tab-components").addEventListener("click", function () { showView("components"); });
 
     // --------------------------------------------------------------- settings
-    api.network_details().then(paintNetwork);
-
     api.get_state().then(function (s) {
       el("autostart").checked = s.autostart;
       el("port").value = s.service_port;
@@ -401,48 +392,6 @@
           box.checked = !box.checked;
           setStatus("port-status", r.error, "err");
         }
-      });
-    });
-
-    function paintNetwork(n) {
-      if (!n) { return; }
-      el("lan-access").checked = !!n.lan_access;
-      var box = el("lan-details");
-      if (n.lan_access && n.commands && n.commands.length) {
-        box.hidden = false;
-        // The address here, the instructions on the Hermes card. What to type on the
-        // other computer is a thing you do to Hermes, so it belongs where Hermes is
-        // rather than duplicated under a switch that is already long enough.
-        box.innerHTML = "Reachable at <code>" + escapeHtml(n.base_url) + "</code>. " +
-          "The Hermes card under Components says what to run on the other computer.";
-      } else if (n.lan_access) {
-        box.hidden = false;
-        // On, but this machine has no address another one could use -- loopback only,
-        // or no network at all. Saying so beats showing a URL that cannot work.
-        box.textContent = "It is on, but this computer has no network address other " +
-          "computers could reach.";
-      } else {
-        box.hidden = true;
-        box.textContent = "";
-      }
-    }
-
-    el("lan-access").addEventListener("change", function (e) {
-      var box = e.target;
-      box.disabled = true;
-      setStatus("lan-status", "Restarting the service…", "");
-      api.set_lan_access(box.checked).then(function (r) {
-        box.disabled = false;
-        if (!r.ok) {
-          box.checked = !box.checked;
-          setStatus("lan-status", r.error, "err");
-          return;
-        }
-        setStatus("lan-status", box.checked ? "Open to this network" : "This computer only", "ok");
-        paintNetwork(r);
-        // The Hermes card carries the commands this switch decides, so it is stale the
-        // moment the switch moves -- even though the switch is on the other tab.
-        refreshComponents();
       });
     });
 
@@ -559,28 +508,72 @@
     // What a component pointed at this machine would be given, kept beside the cards
     // so one can say it before the button is pressed rather than after.
     var servedModel = "";
-    // The same answer the Settings switch paints from, so the card cannot contradict it.
+    // What network_details last said. Read by the block below on every re-render, so
+    // the switch and the commands beneath it can never disagree.
     var netInfo = null;
 
-    // Three states, and the two that are not "here is what to type" matter more: a
-    // reader who is looking for how to connect another computer needs to be told that
-    // the switch is off, not shown nothing at all.
+    // The switch that opens the service to the network, and the two commands that are
+    // the only reason to turn it on. They were a Settings row and a card section; one
+    // without the other is a switch with no purpose stated and instructions that do
+    // not work, so they are one block here.
     function remoteHtml() {
       if (!netInfo) { return ""; }
       var body;
       if (!netInfo.lan_access) {
-        body = "Off. Turn on <em>Let other computers on this network use it</em> in " +
-          "Settings first.";
+        body = "";
       } else if (netInfo.commands && netInfo.commands.length) {
         body = "Run these on the other computer, where Hermes is installed:<br>" +
           netInfo.commands.map(function (c) {
             return "<code>" + escapeHtml(c) + "</code>";
           }).join("<br>");
       } else {
-        body = "On, but this computer has no network address others could reach.";
+        // On, but this machine has no address another one could use -- loopback only,
+        // or no network at all. Saying so beats showing a URL that cannot work.
+        body = "It is on, but this computer has no network address others could reach.";
       }
-      return '<div class="remote"><div class="label">Hermes on another computer</div>' +
-        '<div class="hint">' + body + "</div></div>";
+      return '' +
+        '<div class="remote">' +
+          '<div class="remote-head">' +
+            '<div><div class="label">Let another computer use this machine\'s model</div>' +
+            // Said plainly, and above the switch rather than below it. There is no
+            // password on this API: whoever can reach the port can use the loaded
+            // model and load or unload it. Calling this "network mode" and leaving
+            // that in a tooltip would be the kind of wording that gets someone's
+            // machine used by a stranger.
+            '<div class="hint">Off, the service answers only this computer. On, any ' +
+            'computer on the same network can use it — <strong>there is no password' +
+            '</strong>, so anyone who can reach it can use the model you have loaded, ' +
+            'and load or unload others. Turn it on for a network you trust.</div></div>' +
+            '<div class="control"><label class="switch">' +
+              '<input type="checkbox" id="lan-access"' +
+              (netInfo.lan_access ? " checked" : "") + ">" +
+              '<span class="slider"></span></label>' +
+              '<div class="status" id="lan-status"></div>' +
+            "</div>" +
+          "</div>" +
+          (body ? '<div class="hint">' + body + "</div>" : "") +
+        "</div>";
+    }
+
+    function toggleLan(e) {
+      var box = e.target;
+      box.disabled = true;
+      setStatus("lan-status", "Restarting the service…", "");
+      api.set_lan_access(box.checked).then(function (r) {
+        if (!r.ok) {
+          box.disabled = false;
+          box.checked = !box.checked;
+          setStatus("lan-status", r.error, "err");
+          return;
+        }
+        // The commands under the switch are exactly what the switch decides, so the
+        // block is redrawn -- which replaces the switch as well, and the confirmation
+        // has to be written onto the new one rather than the element that just went.
+        var on = box.checked;
+        refreshComponents().then(function () {
+          setStatus("lan-status", on ? "Open to this network" : "This computer only", "ok");
+        });
+      });
     }
 
     function refreshComponents() {
@@ -621,6 +614,11 @@
               });
             });
           });
+        // Re-wired on every render rather than once at load: the card it lives on is
+        // rebuilt from scratch each time, so the element the last listener was bound
+        // to is no longer in the page.
+        var lan = el("lan-access");
+        if (lan) { lan.addEventListener("change", toggleLan); }
         // A page opened while an install is already running picks it up rather than
         // showing a stale idle card.
         return api.component_progress().then(function (job) {
