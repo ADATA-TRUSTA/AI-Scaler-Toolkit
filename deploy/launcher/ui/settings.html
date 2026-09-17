@@ -196,6 +196,11 @@
     background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
     padding: 1px 5px; display: inline-block; margin-top: 3px; word-break: break-all;
   }
+  /* A command and its copy button. The button keeps its width so "Copied" does not
+     move the line it sits on. */
+  .cmd { display: flex; align-items: flex-start; gap: 8px; margin-top: 5px; }
+  .cmd code { flex: 1; min-width: 0; margin-top: 0; }
+  .cmd .copy { flex: none; padding: 2px 10px; font-size: 12px; min-width: 66px; }
 
   pre.log {
     margin: 12px 0 0; padding: 12px 14px; max-height: 220px; overflow: auto;
@@ -552,10 +557,16 @@
       if (!netInfo.lan_access) {
         body = "";
       } else if (netInfo.commands && netInfo.commands.length) {
-        body = "Run these on the other computer, where Hermes is installed:<br>" +
-          netInfo.commands.map(function (c) {
-            return "<code>" + escapeHtml(c) + "</code>";
-          }).join("<br>");
+        // One copy button per line rather than one for the block. They are separate
+        // commands and are re-run separately -- the first again after the address
+        // changes, the second after switching Hermes to something else -- and the
+        // first carries quoted JSON, which is the line most likely to arrive damaged
+        // if it is pasted in with others.
+        body = "Run these on the other computer, where Hermes is installed:" +
+          netInfo.commands.map(function (c, i) {
+            return '<div class="cmd"><code>' + escapeHtml(c) + "</code>" +
+              '<button class="copy" data-copy="' + i + '">Copy</button></div>';
+          }).join("");
       } else {
         // On, but this machine has no address another one could use -- loopback only,
         // or no network at all. Saying so beats showing a URL that cannot work.
@@ -583,6 +594,50 @@
           "</div>" +
           (body ? '<div class="hint">' + body + "</div>" : "") +
         "</div>";
+    }
+
+    // Two ways of copying, because this page runs inside two different embedded
+    // browsers. navigator.clipboard is the one to use and needs a secure context,
+    // which http://127.0.0.1 is; execCommand is deprecated everywhere and is still
+    // the one that works when the host webview has not granted clipboard access.
+    // Trying the good one first and falling back costs nothing and is the difference
+    // between a button that works on one platform and one that works on both.
+    function writeClipboard(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).catch(function () {
+          return legacyCopy(text);
+        });
+      }
+      return legacyCopy(text);
+    }
+
+    function legacyCopy(text) {
+      return new Promise(function (resolve, reject) {
+        var area = document.createElement("textarea");
+        area.value = text;
+        // Off-screen rather than hidden: a display:none element cannot be selected,
+        // and the selection is what execCommand copies.
+        area.style.position = "fixed";
+        area.style.left = "-9999px";
+        document.body.appendChild(area);
+        area.select();
+        var ok = false;
+        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+        document.body.removeChild(area);
+        return ok ? resolve() : reject(new Error("copy refused"));
+      });
+    }
+
+    function copyCommand(button, text) {
+      writeClipboard(text).then(function () {
+        button.textContent = "Copied";
+      }, function () {
+        // Said on the button, because a copy that silently did nothing leaves the
+        // user pasting whatever was in the clipboard before.
+        button.textContent = "Select it";
+      }).then(function () {
+        setTimeout(function () { button.textContent = "Copy"; }, 1600);
+      });
     }
 
     function toggleLan(e) {
@@ -649,6 +704,12 @@
         // to is no longer in the page.
         var lan = el("lan-access");
         if (lan) { lan.addEventListener("change", toggleLan); }
+        Array.prototype.forEach.call(
+          el("component-list").querySelectorAll("[data-copy]"), function (b) {
+            b.addEventListener("click", function () {
+              copyCommand(b, netInfo.commands[Number(b.getAttribute("data-copy"))]);
+            });
+          });
         // A page opened while an install is already running picks it up rather than
         // showing a stale idle card.
         return api.component_progress().then(function (job) {

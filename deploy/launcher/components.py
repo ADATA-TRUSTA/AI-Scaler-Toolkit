@@ -1109,6 +1109,64 @@ HERMES_MODEL_ALIAS = "trusta-ast-default"
 HERMES_STOCK_PROVIDERS = ("openrouter", "custom")
 
 
+def hermes_provider(service_url: str) -> dict[str, object]:
+    """The endpoint this application asks Hermes to keep, as Hermes stores it.
+
+    One definition, written twice over: once by the button, a key at a time through
+    `hermes config set`, and once into the commands the page hands out for a Hermes on
+    another computer. They were two hand-written lists and they drifted -- the button
+    moved to a named provider and the commands were left setting the old shared
+    "custom" slot, so the same card offered two different results depending on which
+    machine you were setting up.
+
+    discover_models is what keeps the endpoint honest: Hermes asks the service what it
+    is serving on every request, so the model below is a stable name for "whatever is
+    loaded there" rather than the id of whatever happened to be loaded when this was
+    written.
+    """
+    return {
+        "name": HERMES_PROVIDER_NAME,
+        "base_url": service_url,
+        "discover_models": True,
+        "model": HERMES_MODEL_ALIAS,
+    }
+
+
+def hermes_selection() -> list[tuple[str, str]]:
+    """The two keys that make the endpoint above the one Hermes actually uses.
+
+    model.default is not redundant with the provider's own model. Unset it and Hermes
+    sends an empty model field -- checked against this service, which logged
+    `"model": ""` -- so the provider's copy is what its endpoint editor shows, and this
+    is what goes out on the wire.
+    """
+    return [("model.provider", HERMES_PROVIDER_ID),
+            ("model.default", HERMES_MODEL_ALIAS)]
+
+
+def _as_config_value(value: object) -> str:
+    """`hermes config set` takes text. Its YAML reads true, not True."""
+    return str(value).lower() if isinstance(value, bool) else str(value)
+
+
+def hermes_commands(service_url: str) -> list[str]:
+    """The same endpoint, as commands to run on a Hermes somewhere else.
+
+    Two, not six: `hermes config set` takes one key and one value, but the value may
+    be a JSON object -- verified against it -- so the whole provider goes in one. The
+    selection cannot join it, because providers and model are separate branches of the
+    configuration.
+
+    Single-quoted because that is a literal string in both cmd-era PowerShell and in
+    bash, and the other computer may be either.
+    """
+    import json
+
+    provider = json.dumps(hermes_provider(service_url), separators=(",", ":"))
+    return [f"hermes config set providers.{HERMES_PROVIDER_ID} '{provider}'",
+            *(f"hermes config set {key} {value}" for key, value in hermes_selection())]
+
+
 def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str, str]:
     """Point an installed Hermes at this machine's model service.
 
@@ -1133,17 +1191,9 @@ def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str, s
             f"  hermes config set providers.{HERMES_PROVIDER_ID}.base_url {service_url}\n"
             f"  hermes config set model.provider {HERMES_PROVIDER_ID}", BLOCKED)
 
-    settings = [
-        (f"providers.{HERMES_PROVIDER_ID}.name", HERMES_PROVIDER_NAME),
-        (f"providers.{HERMES_PROVIDER_ID}.base_url", service_url),
-        # Hermes then asks this service what it is serving, so its endpoint editor
-        # lists whatever is loaded here at the time rather than what was loaded when
-        # this button was pressed.
-        (f"providers.{HERMES_PROVIDER_ID}.discover_models", "true"),
-        (f"providers.{HERMES_PROVIDER_ID}.model", HERMES_MODEL_ALIAS),
-        ("model.provider", HERMES_PROVIDER_ID),
-        ("model.default", HERMES_MODEL_ALIAS),
-    ]
+    settings = [(f"providers.{HERMES_PROVIDER_ID}.{key}", _as_config_value(value))
+                for key, value in hermes_provider(service_url).items()]
+    settings += hermes_selection()
     for key, value in settings:
         ok, detail = _hermes_config_set(program, key, value)
         if not ok:

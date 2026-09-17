@@ -512,10 +512,9 @@ class SettingsApi:
             # would block the one moment someone most wants to connect a tool -- while
             # setting the machine up, before any model is chosen.
             "model": self._loaded_model_id(port) or "",
-            "commands": (
-                ["hermes config set model.provider custom",
-                 f"hermes config set model.base_url {base}"] if base and enabled else []
-            ),
+            # Built from the same definition the button writes, so the two cannot
+            # describe different endpoints again -- see components.hermes_provider.
+            "commands": components.hermes_commands(base) if base and enabled else [],
         }
 
     def open_component(self, component_id: str) -> dict[str, Any]:
