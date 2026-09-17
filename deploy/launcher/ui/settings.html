@@ -346,6 +346,23 @@
     el("tab-settings").addEventListener("click", function () { showView("settings"); });
     el("tab-components").addEventListener("click", function () { showView("components"); });
 
+    // This is a second window, and everything on the Components tab describes a world
+    // outside it: what is installed, what is loaded, whether the service is open to
+    // the network. Nothing tells it when any of that changes -- the cards were drawn
+    // once on arrival and then left, so a model loaded in the main window afterwards
+    // was simply not there as far as this page was concerned. Coming back to the
+    // window is the moment to look again, and it costs one read of what is already in
+    // memory plus a two-millisecond call.
+    //
+    // Skipped while an install is running: that has its own poll, and rebuilding the
+    // cards under it would throw away the log the user is reading.
+    window.addEventListener("focus", function () {
+      if (poller) { return; }
+      if (el("tab-components").getAttribute("aria-selected") === "true") {
+        refreshComponents();
+      }
+    });
+
     // --------------------------------------------------------------- settings
     api.get_state().then(function (s) {
       el("autostart").checked = s.autostart;
@@ -498,8 +515,13 @@
               ? '<span class="pair">' +
                 '<button data-point="' + escapeHtml(c.id) + '"' +
                 (servedModel ? "" : " disabled") + ">Use this machine's model</button>" +
+                // Not the model's name. The endpoint this writes names the machine,
+                // not a model -- Hermes asks it what is loaded on every request --
+                // so a name here described a pinning that stopped happening when the
+                // alias went in, and went stale the moment a different model was
+                // loaded while this window sat open.
                 '<span class="hint inline">' +
-                (servedModel ? "will use " + escapeHtml(servedModel)
+                (servedModel ? "uses whatever is loaded here"
                              : "load a model here first") + "</span></span>"
               : "") +
             '<button class="link" data-page="' + escapeHtml(c.page) + '">Vendor page</button>' +
