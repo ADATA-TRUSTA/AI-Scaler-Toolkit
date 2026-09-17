@@ -8,6 +8,11 @@
     --faint: #98a0ae;
     --line: #e5e8ee;
     --card: #f7f8fa;
+    /* A control has to be a different surface from whatever it sits on, and these sit
+       on two: the page inside a section, a card inside a component. One value cannot
+       be both, so buttons get a surface of their own that reads as raised on either. */
+    --btn: #ffffff;
+    --btn-hover: #eef1f6;
     --accent: #2f6fed;
     --ok: #1a9a5f;
     --warn: #b26b00;
@@ -18,6 +23,7 @@
       --bg: #101215; --fg: #e9ebef; --muted: #98a0ae; --faint: #6b7280;
       --line: #262a31; --card: #181b20; --accent: #5b8dff; --ok: #3fbc82;
       --warn: #d69a3a; --err: #ef6b66;
+      --btn: #22262d; --btn-hover: #2b3039;
     }
     /* The brand wash is built for a white page; the dark theme keeps its own ground. */
     body { background: var(--bg) !important; }
@@ -46,8 +52,10 @@
   .tabs button {
     padding: 9px 14px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
     background: none; color: var(--muted); font: inherit; font-weight: 560; cursor: pointer;
+    box-shadow: none;
   }
-  .tabs button:hover { color: var(--fg); }
+  .tabs button:hover { background: none; color: var(--fg); }
+  .tabs button:active { transform: none; }
   .tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
 
   .row {
@@ -83,17 +91,33 @@
   .switch input:disabled + .slider { opacity: 0.5; cursor: default; }
 
   button {
-    padding: 8px 14px; border: 1px solid var(--line); border-radius: 7px;
-    background: var(--card); color: var(--fg); font: inherit; cursor: pointer;
+    padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--btn); color: var(--fg); cursor: pointer;
+    font: inherit; font-size: 13.5px; font-weight: 500;
+    /* A label is a phrase. Letting it break turns "Use this machine's model" into
+       three stacked lines the moment the window is narrow, which is what a row of
+       buttons looks like when it has been allowed to squeeze instead of wrap. */
+    white-space: nowrap;
+    box-shadow: 0 1px 1.5px rgba(16, 20, 28, 0.05);
+    transition: background 0.12s, border-color 0.12s;
   }
-  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:hover:not(:disabled) {
+    background: var(--btn-hover);
+    border-color: color-mix(in srgb, var(--muted) 45%, var(--line));
+  }
+  /* Pressed, rather than only hovered: on a touchpad the hover state is often never
+     seen, and this is the feedback that says the click landed. */
+  button:active:not(:disabled) { box-shadow: none; transform: translateY(1px); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.primary:hover:not(:disabled) { filter: brightness(1.08); }
-  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+  button:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
   button.link {
     border: 0; background: none; color: var(--accent); padding: 8px 4px;
+    box-shadow: none; font-weight: inherit;
     text-decoration: underline; text-underline-offset: 3px;
   }
+  button.link:hover:not(:disabled) { background: none; color: var(--accent); filter: brightness(1.1); }
 
   /* Read-only facts, laid out as a list rather than as rows that look adjustable. */
   .facts { margin: 0; padding: 0; list-style: none; }
@@ -132,8 +156,19 @@
     font-size: 12px; color: var(--faint); margin-top: 8px;
     font-family: ui-monospace, Consolas, monospace; word-break: break-all;
   }
-  .component-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
-  /* Sits with the button it describes, not under the card. */
+  /* Wraps rather than squeezes. Four controls and a sentence do not fit across a
+     narrow window, and a flex row that cannot wrap answers that by shrinking every
+     button until its label breaks over three lines. */
+  .component-actions {
+    display: flex; flex-wrap: wrap; align-items: center;
+    column-gap: 10px; row-gap: 8px; margin-top: 14px;
+  }
+  /* Last, and pushed away from the buttons: it goes somewhere else entirely, and
+     should not sit in the run of things that act on the component itself. */
+  .component-actions .link { margin-left: auto; }
+  /* Sits with the button it describes, not under the card. Wrapped as one item so
+     that when the row does wrap, the sentence goes wherever its button went. */
+  .component-actions .pair { display: inline-flex; align-items: center; gap: 10px; }
   .hint.inline { margin-top: 0; font-size: 12.5px; }
   .component .outcome { font-size: 13px; margin-top: 10px; }
   .component .outcome.ok { color: var(--ok); }
@@ -504,10 +539,11 @@
             // The button says where it will point rather than "Configure", because the
             // thing it changes belongs to another application.
             (c.can_point_here && !c.busy
-              ? '<button data-point="' + escapeHtml(c.id) + '">Use this machine\'s model</button>' +
+              ? '<span class="pair">' +
+                '<button data-point="' + escapeHtml(c.id) + '">Use this machine\'s model</button>' +
                 '<span class="hint inline">' +
                 (servedModel ? "will use " + escapeHtml(servedModel)
-                             : "no model loaded yet — sets the address only") + "</span>"
+                             : "no model loaded yet — sets the address only") + "</span></span>"
               : "") +
             '<button class="link" data-page="' + escapeHtml(c.page) + '">Vendor page</button>' +
           "</div>" +
