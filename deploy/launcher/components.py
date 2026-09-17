@@ -900,6 +900,38 @@ def start(component_id: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _entry_program(entry: Path) -> str:
+    """The program a desktop entry runs, without its arguments or quoting."""
+    try:
+        text = entry.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if not line.startswith("Exec="):
+            continue
+        rest = line[len("Exec="):].strip()
+        # We quote the path because it may contain spaces; a vendor's may not.
+        return rest[1:].split('"', 1)[0] if rest.startswith('"') else rest.split(" ", 1)[0]
+    return ""
+
+
+def _write_entry(component: Component, program: Path) -> bool:
+    """(Re)write a component's menu entry for whatever is runnable now.
+
+    The name and icon come from the AppImage even when the AppImage is not what runs:
+    _unpack_appimage puts its tree beside the file and names it after it, so the file
+    is found by reading back that convention rather than by remembering a second path.
+    """
+    source = None
+    if program.parent.name.endswith(".unpacked"):
+        candidate = program.parent.with_suffix(".AppImage")
+        if candidate.is_file():
+            source = candidate
+    return shortcuts.ensure_component(component.id, program, component.name,
+                                      terminal=component.terminal,
+                                      comment=component.description, source=source)
+
+
 def open_component(component_id: str) -> tuple[bool, str]:
     """Start an installed component. Returns (started, message).
 
@@ -925,6 +957,16 @@ def open_component(component_id: str) -> tuple[bool, str]:
         return True, ""
 
     entry = config.component_entry_target(component_id)
+    # An entry outlives the thing it names. This one was written by a version of this
+    # application that did not unpack AppImages, so it names the .AppImage -- which on
+    # a machine without FUSE is the one file that will not start, and the click does
+    # nothing. Rewriting it before use fixes the click and the menu at once; deferring
+    # to an entry we can see is wrong would be deferring for its own sake.
+    if entry.is_file() and _entry_program(entry) != str(program):
+        log.info("entry for %s names %r, not %s -- rewriting it",
+                 component_id, _entry_program(entry), program)
+        _write_entry(component, program)
+
     launcher_cmd = shutil.which("gio")
     if entry.is_file() and launcher_cmd:
         try:
