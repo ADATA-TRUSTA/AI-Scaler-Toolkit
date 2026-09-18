@@ -133,6 +133,8 @@
   .status.ok { color: var(--ok); }
   .status.warn { color: var(--warn); }
   .status.err { color: var(--err); }
+  /* A state that is simply the default and asks nothing of the reader. */
+  .status.muted { color: var(--muted); }
 
   /* Components */
   .component {
@@ -182,15 +184,24 @@
   .component .remote .label { font-size: 13px; }
   /* The same shape as a Settings row -- sentence on the left, switch on the right --
      because that is what it is, moved to the card it belongs to. */
+  /* Top-aligned, not centred. The right-hand column grows when a confirmation
+     appears under the switch, and centring re-centres the whole row against the new
+     height -- so turning the switch on moved the switch, which is the one thing on
+     the row that should not move when it is used. */
   .component .remote-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 24px;
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 24px;
   }
   .component .remote-head > div:first-child { flex: 1; min-width: 0; }
-  /* Bounded, so a confirmation like "Open to this network" wraps under the switch
-     instead of taking the width away from the sentence that explains it. */
-  .component .remote-head .control { max-width: 108px; }
-  .component .remote-head .status { font-size: 12.5px; }
-  .component .remote > .hint { margin-top: 10px; }
+  /* Everything the switch has to say, under it and across the whole card. It is one
+     area rather than two because it was two, and both were the wrong shape: a status
+     in a 108px column beside the switch, where each of its three sentences wrapped,
+     and a block of commands that only existed while the switch was on. */
+  .component .remote-result { margin-top: 12px; }
+  .component .remote-result .status {
+    text-align: left; margin-top: 0; font-size: 13px;
+  }
+  .component .remote-result .status:empty { display: none; }
+  .component .remote-result > .hint { margin-top: 6px; }
   code {
     font-family: ui-monospace, Consolas, monospace; font-size: 12px;
     background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
@@ -551,8 +562,26 @@
     // the only reason to turn it on. They were a Settings row and a card section; one
     // without the other is a switch with no purpose stated and instructions that do
     // not work, so they are one block here.
+    // What the switch is, as a line and a colour. Coloured by the state rather than by
+    // whether a click worked, for two reasons. Green would have congratulated the user
+    // for opening a port that this same card describes as having no password on it;
+    // amber is what the card already uses for something worth acting on, and being
+    // open is a condition that lasts until someone changes it. And a colour that came
+    // from the click made the same state look different depending on whether it had
+    // just been set or was simply how the window found things.
+    function lanState(open) {
+      return open ? { text: "Open to this network", cls: "warn" }
+                  : { text: "This computer only", cls: "muted" };
+    }
+
     function remoteHtml() {
       if (!netInfo) { return ""; }
+      // One place the switch reports from, holding both what it did and what to do
+      // next. They used to be two: a status wedged under the switch in a 108px column
+      // where every one of its three sentences wrapped to two lines, and a block of
+      // commands that existed only while the switch was on. So turning it on moved
+      // the switch, and turning it off left the gap where the commands had been.
+      // Down here there is a full line to write on and nothing above to push.
       var body;
       if (!netInfo.lan_access) {
         body = "";
@@ -575,7 +604,7 @@
       return '' +
         '<div class="remote">' +
           '<div class="remote-head">' +
-            '<div><div class="label">Let another computer use this machine\'s model</div>' +
+            '<div><div class="label">Let another computer use this machine&#39;s model</div>' +
             // Said plainly, and above the switch rather than below it. There is no
             // password on this API: whoever can reach the port can use the loaded
             // model and load or unload it. Calling this "network mode" and leaving
@@ -588,11 +617,15 @@
             '<div class="control"><label class="switch">' +
               '<input type="checkbox" id="lan-access"' +
               (netInfo.lan_access ? " checked" : "") + ">" +
-              '<span class="slider"></span></label>' +
-              '<div class="status" id="lan-status"></div>' +
-            "</div>" +
+              '<span class="slider"></span></label></div>' +
           "</div>" +
-          (body ? '<div class="hint">' + body + "</div>" : "") +
+          '<div class="remote-result">' +
+            // Never empty: off is a state worth naming, and an empty area here is
+            // where the commands used to be, which read as something missing.
+            '<div class="status ' + lanState(netInfo.lan_access).cls +
+            '" id="lan-status">' + lanState(netInfo.lan_access).text + "</div>" +
+            (body ? '<div class="hint">' + body + "</div>" : "") +
+          "</div>" +
         "</div>";
     }
 
@@ -643,7 +676,7 @@
     function toggleLan(e) {
       var box = e.target;
       box.disabled = true;
-      setStatus("lan-status", "Restarting the service…", "");
+      setStatus("lan-status", "Restarting the service…", "muted");
       api.set_lan_access(box.checked).then(function (r) {
         if (!r.ok) {
           box.disabled = false;
@@ -652,12 +685,11 @@
           return;
         }
         // The commands under the switch are exactly what the switch decides, so the
-        // block is redrawn -- which replaces the switch as well, and the confirmation
-        // has to be written onto the new one rather than the element that just went.
-        var on = box.checked;
-        refreshComponents().then(function () {
-          setStatus("lan-status", on ? "Open to this network" : "This computer only", "ok");
-        });
+        // block is redrawn -- which replaces the switch as well. The redraw already
+        // writes the state below it, from the same lanState, so there is nothing left
+        // to say here: a line written afterwards could only differ from the one the
+        // page would show if it were reopened, which is how the two came to disagree.
+        refreshComponents();
       });
     }
 
