@@ -525,11 +525,14 @@ class SettingsApi:
             # drawn. It made the tab arrive empty and fill in late. The page asks for
             # it through firewall_state, once, when somebody opens the section that
             # shows it.
+            #
+            # The commands themselves are not sent either. They were, back when the
+            # card printed them beside the buttons for the reader to check before
+            # agreeing to an administrator prompt; the section no longer does, and
+            # what Windows names in the prompt is the command itself. Three strings
+            # built on every draw that nothing read.
             "firewall": {
                 "supported": firewall.supported(),
-                "add": firewall.add_command(port),
-                "add_temporary": firewall.add_command(port, temporary=True),
-                "remove": firewall.remove_command(port),
                 "linux_hint": "" if firewall.supported() else firewall.linux_hint(port),
             },
         }
@@ -550,23 +553,26 @@ class SettingsApi:
         temporary = bool(temporary)
         ok, error = firewall.run_elevated(
             firewall.add_command(port, temporary=temporary), keep_open=temporary)
-        if not ok:
-            return {"ok": False, "error": error}
-        # Checked, not assumed. Start-Process reports whether it started a process,
-        # not whether that process did anything -- which is how a command that was
-        # being mangled on its way in reported success for a rule it never created.
-        # The temporary one is not checked: it is deliberately under another name and
-        # the window it opened is what says it is there.
+        # The temporary one is not looked for: it is deliberately under another name
+        # and the window it opened is what says it is there.
         if temporary:
-            return {"ok": True, "error": "", "has_rule": False}
-        present = firewall.has_rule(port)
-        if not present:
-            return {"ok": False, "has_rule": False,
-                    "error": "The rule was not added. Run the command yourself to see "
-                             "what Windows says about it."}
-        # Returned so the page can repaint from it. Asking again on the other side
-        # would be the same three and a half seconds for an answer already in hand.
-        return {"ok": True, "error": "", "has_rule": True}
+            return {"ok": ok, "error": error, "has_rule": False}
+        # Checked, not assumed -- and checked whether the launch called itself a
+        # success or not, because it is wrong in both directions. Start-Process
+        # reports whether it started a process, not whether that process did
+        # anything, which is how a command that was being mangled on its way in
+        # reported success for a rule it never created. And a prompt this side
+        # stopped waiting on may still have been answered afterwards. The firewall is
+        # the only thing that knows, so it is the only thing asked.
+        if firewall.has_rule(port):
+            # Returned so the page can repaint from it. Asking again on the other
+            # side would be the same three and a half seconds for an answer in hand.
+            return {"ok": True, "error": "", "has_rule": True}
+        if not ok:
+            return {"ok": False, "error": error, "has_rule": False}
+        return {"ok": False, "has_rule": False,
+                "error": "Windows ran the command without reporting a problem, but "
+                         "the rule is not there."}
 
     def firewall_remove(self) -> dict[str, Any]:
         port = self._launcher.service.port

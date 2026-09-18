@@ -21,10 +21,10 @@ prompt, on a click, for one command the user can read first.
 
 from __future__ import annotations
 
+import base64
+import re
 import shutil
 import subprocess
-import tempfile
-from pathlib import Path
 
 from . import applog, config
 
@@ -33,6 +33,14 @@ log = applog.get("firewall")
 # Long enough for a cold query against the firewall service, short enough that a
 # wedged one cannot hold the settings page open.
 _TIMEOUT = 25
+
+# The other side of the administrator prompt is a person, not a process. The permanent
+# rule is waited on, so this covers however long they take to read the prompt and
+# answer it -- and at the 25 seconds above it expired on anyone who paused, reported
+# Python's raw TimeoutExpired text as the explanation, and left them with a rule that
+# appeared a moment later anyway. Killing the wait does not take the prompt off the
+# screen, so a short timeout here buys nothing and costs the truth.
+_ELEVATION_TIMEOUT = 300
 
 # Distinct names, because they are removed on different terms: one when the window
 # that holds it is closed with Enter, one only when somebody asks.
@@ -72,10 +80,10 @@ def has_rule(port: int) -> bool:
 
 
 def add_command(port: int, *, temporary: bool = False) -> str:
-    """The command a button runs, which is also the command shown beside it.
+    """The command a button runs.
 
-    Shown as well as run, because a prompt asking for an administrator is easier to
-    agree to when the thing being agreed to is legible.
+    Legible on purpose, because the administrator prompt Windows raises names this
+    command and the reader is entitled to understand what they are agreeing to.
     """
     name = rule_name(port, temporary=temporary)
     add = (f'New-NetFirewallRule -DisplayName "{name}" -Direction Inbound '
@@ -96,28 +104,29 @@ def remove_command(port: int) -> str:
     return f'Remove-NetFirewallRule -DisplayName "{rule_name(port)}"'
 
 
-def _script_file(command: str) -> Path:
-    """Put the command in a file, because passing it as text does not survive.
+def _encoded(command: str) -> str:
+    """The command as -EncodedCommand takes it: base64 of UTF-16LE.
 
-    The command reaches the elevated shell through two parsers: this process builds a
-    -Command string for one PowerShell, which calls Start-Process, whose -ArgumentList
-    is re-split by Windows for another. The rule's name has spaces in it, so it is in
-    double quotes, and those quotes are what the second split ate: the elevated shell
-    received -DisplayName AI Scaler Toolkit 8571 and answered "a positional parameter
-    cannot be found that accepts argument 'Scaler'". Start-Process had launched
-    successfully, so nothing upstream noticed, and the button reported success over a
-    rule that was never created.
+    Not as text, and not as a file either. Both were tried and both were eaten in the
+    same place. The command reaches the elevated shell through two parsers: this
+    process builds a -Command string for one PowerShell, which calls Start-Process,
+    whose -ArgumentList is re-split by Windows for another. The rule's name has spaces
+    in it, so it is in double quotes, and the second split took those quotes -- the
+    elevated shell received -DisplayName AI Scaler Toolkit 8571 and answered "a
+    positional parameter cannot be found that accepts argument 'Scaler'".
 
-    A file has no quoting. -File takes a path, the path has no spaces, and what the
-    elevated shell reads is exactly what was written.
+    Writing the command to a .ps1 and passing -File moved the spaces rather than
+    removing them. Start-Process does not quote the elements of -ArgumentList, so a
+    temporary directory under a profile named "Ada Lovelace" splits at exactly the
+    same place. Measured: with a space anywhere in the path the script never runs,
+    and Start-Process still exits 0, which is the original fault back again on the
+    machines least likely to be the ones it was tested on.
+
+    Base64 is letters, digits and +/=. There is nothing in it for a split to take, no
+    file to leave behind in a temporary directory, and nothing on disk that could be
+    swapped between writing it and Windows running it as an administrator.
     """
-    directory = Path(tempfile.gettempdir())
-    handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 - closed below, kept by name
-        mode="w", suffix=".ps1", prefix="ai-scaler-firewall-", dir=directory,
-        delete=False, encoding="utf-8")
-    with handle:
-        handle.write(command + "\n")
-    return Path(handle.name)
+    return base64.b64encode(command.encode("utf-16-le")).decode("ascii")
 
 
 def run_elevated(command: str, *, keep_open: bool) -> tuple[bool, str]:
@@ -136,33 +145,29 @@ def run_elevated(command: str, *, keep_open: bool) -> tuple[bool, str]:
     if not supported():
         return False, "Only Windows has a firewall this can change."
 
-    # The temporary rule's script removes its own file; the permanent one is waited
-    # on, so this side can.
-    body = command if not keep_open else (
-        command + "\n" + 'Remove-Item -LiteralPath "$PSCommandPath" -Force\n')
-    script = _script_file(body)
-
     # -NoExit for the temporary rule, whose window is the rule's lifetime. The
     # permanent one is waited on and hidden: it takes milliseconds, and the caller
     # redraws from what the firewall says afterwards, which it cannot do before the
     # rule exists.
-    parts = ["'-NoProfile'", "'-ExecutionPolicy'", "'Bypass'"]
+    parts = ["'-NoProfile'"]
     if keep_open:
         parts.append("'-NoExit'")
-    parts += ["'-File'", _quote(str(script))]
+    parts += ["'-EncodedCommand'", _quote(_encoded(command))]
     launcher = ("Start-Process powershell -Verb RunAs "
                 + ("" if keep_open else "-WindowStyle Hidden -Wait ")
                 + "-ArgumentList " + ",".join(parts))
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", launcher],
-            capture_output=True, text=True, timeout=_TIMEOUT,
+            capture_output=True, text=True, timeout=_ELEVATION_TIMEOUT,
             creationflags=config.subprocess_flags())
+    except subprocess.TimeoutExpired:
+        # Said without claiming what became of the rule, because this side no longer
+        # knows: the prompt is still on screen and may yet be answered. The caller
+        # asks the firewall itself rather than believing this.
+        return False, "The administrator prompt went unanswered."
     except (OSError, subprocess.SubprocessError) as exc:
-        script.unlink(missing_ok=True)
         return False, str(exc)
-    if not keep_open:
-        script.unlink(missing_ok=True)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         if "canceled by the user" in detail.lower() or "已取消" in detail:
@@ -182,14 +187,26 @@ def linux_hint(port: int) -> str:
         state = _run(["firewall-cmd", "--state"])
         if state and "running" in state:
             ports = _run(["firewall-cmd", "--list-ports"]) or ""
-            if f"{port}/tcp" not in ports:
+            if not _mentions_port(ports, port):
                 return (f"sudo firewall-cmd --add-port={port}/tcp --permanent && "
                         "sudo firewall-cmd --reload")
     if shutil.which("ufw"):
         status = _run(["ufw", "status"])
-        if status and "inactive" not in status and str(port) not in status:
+        if status and "inactive" not in status and not _mentions_port(status, port):
             return f"sudo ufw allow {port}/tcp"
     return ""
+
+
+def _mentions_port(text: str, port: int) -> bool:
+    """Whether this listing already has a rule for this TCP port.
+
+    On its own boundaries, because a substring is not a port. ufw's listing was
+    searched for the bare digits, which an existing rule for 18571 or 85710 contains,
+    and firewalld's for "8571/tcp", which "18571/tcp" contains -- either one would
+    have withheld the hint from a machine that needed it. A bare number in ufw means
+    any protocol, so that counts; 8571/udp does not.
+    """
+    return re.search(rf"(?<!\d){port}(?:/tcp)?(?![\w/])", text) is not None
 
 
 def _quote(value: str) -> str:

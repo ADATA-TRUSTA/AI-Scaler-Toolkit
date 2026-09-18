@@ -937,12 +937,6 @@
               copyCommand(b, netInfo.commands[Number(b.getAttribute("data-copy"))]);
             });
           });
-        Array.prototype.forEach.call(
-          el("component-list").querySelectorAll("[data-copy-text]"), function (b) {
-            b.addEventListener("click", function () {
-              copyCommand(b, b.getAttribute("data-copy-text"));
-            });
-          });
         wireFirewall();
         // A page opened while an install is already running picks it up rather than
         // showing a stale idle card.
