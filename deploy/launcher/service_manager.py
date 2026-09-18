@@ -95,7 +95,7 @@ def _listening_pid_linux(port: int) -> int | None:
     return None
 
 
-def listening_pid(port: int, host: str = config.SERVICE_HOST) -> int | None:
+def listening_pid(port: int) -> int | None:
     """Which process is listening on this port, if any.
 
     Needed because a launcher can adopt a service it did not spawn, and then has no
@@ -115,10 +115,14 @@ def listening_pid(port: int, host: str = config.SERVICE_HOST) -> int | None:
                                 creationflags=config.subprocess_flags())
     except (OSError, subprocess.SubprocessError):
         return None
-    needle = f"{host}:{port}"
+    # Matched on the port alone, as the Linux path above already was. Matching the
+    # address too meant looking for 127.0.0.1:8571 and missing our own service the
+    # moment it was opened to the network, because netstat then reports 0.0.0.0:8571
+    # -- so an adopted service could not be found, and stopping it did nothing.
+    needle = f":{port}"
     for line in result.stdout.splitlines():
         parts = line.split()
-        if len(parts) >= 5 and parts[1] == needle and parts[3].upper() == "LISTENING":
+        if len(parts) >= 5 and parts[1].endswith(needle) and parts[3].upper() == "LISTENING":
             with contextlib.suppress(ValueError):
                 return int(parts[4])
     return None
@@ -385,7 +389,14 @@ class ServiceManager:
             # lost its .env, the backend fell back to the example's port 8000, and the
             # launcher waited on 8571 for a service that was running perfectly well
             # somewhere else.
-            "SERVICE_HOST": config.SERVICE_HOST,
+            #
+            # bind_host, not SERVICE_HOST. This used to pass the constant, which is
+            # 127.0.0.1 and always wins over the .env -- so the switch that opens the
+            # service to the network wrote SERVICE_HOST=0.0.0.0 into the file, the
+            # launcher logged "bound to 0.0.0.0", and the service went on listening on
+            # loopback alone. Nothing caught it because every test until now was from
+            # this machine, where loopback answers.
+            "SERVICE_HOST": config.bind_host(),
             "SERVICE_PORT": str(self.port),
         }
         merged = os.environ.copy()
