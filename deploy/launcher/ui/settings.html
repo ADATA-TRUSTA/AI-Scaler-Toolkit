@@ -647,7 +647,7 @@
     function paintFirewall() {
       var host = el("fw-block");
       if (!host) { return; }
-      host.innerHTML = firewallHtml();
+      host.innerHTML = fwInnerHtml();
       wireFirewall();
     }
 
@@ -660,16 +660,72 @@
         document.querySelectorAll("details.troubleshoot"), function (d) {
           d.addEventListener("toggle", function () {
             fwOpen = d.open;
-            // Asked once, the first time it is opened, and only then.
-            if (d.open && fwHasRule === null && netInfo && netInfo.firewall &&
-                netInfo.firewall.supported) {
-              api.firewall_state().then(function (r) {
-                fwHasRule = !!(r && r.has_rule);
-                paintFirewall();
-              });
-            }
+            // The same one ask, from the other direction: opened while the switch is
+            // on, rather than arriving on a tab while it is off.
+            if (d.open) { askFirewallOnce(); }
           });
         });
+    }
+
+    // Not folded away like the troubleshooting block, and not phrased as a question:
+    // the reader is not looking for this, which is exactly why it has to be in front
+    // of them.
+    function leftoverRuleHtml() {
+      var f = netInfo && netInfo.firewall;
+      if (!f || !f.supported) { return ""; }
+      // Asked, not remembered. A record of what this application added only knows
+      // about rules it added itself: one left by an older build, or added by hand, is
+      // exactly the rule nobody is tracking and therefore the one worth naming -- and
+      // a record would keep it invisible. So the firewall is asked instead, in the
+      // background, and the notice arrives a moment after the tab does. Nobody is
+      // waiting on it; it is news, not an answer to a question they asked.
+      if (fwHasRule === null) {
+        askFirewallOnce();
+        return "";
+      }
+      if (!fwHasRule) { return ""; }
+      return "The firewall rule this application added is still in place, so this " +
+        "port stays open to the network." + fwBlockHtml();
+    }
+
+    // Once per session, whichever state asks first. The answer takes three and a half
+    // seconds and does not change unless something here changes it, in which case the
+    // action that changed it says so.
+    var fwAsking = false;
+
+    function askFirewallOnce() {
+      if (fwAsking || fwHasRule !== null) { return; }
+      if (!netInfo || !netInfo.firewall || !netInfo.firewall.supported) { return; }
+      fwAsking = true;
+      api.firewall_state().then(function (r) {
+        fwAsking = false;
+        fwHasRule = !!(r && r.has_rule);
+        if (netInfo && netInfo.lan_access) {
+          // Asked because the section was opened, and it is showing "Checking…" until
+          // this lands -- so it is repainted either way.
+          paintFirewall();
+        } else if (fwHasRule) {
+          // Asked in the background, with nothing on screen waiting. Repainting on a
+          // "no" would rebuild the cards seconds after every visit, to change nothing.
+          refreshComponents();
+        }
+      });
+    }
+
+    function fwBlockHtml() {
+      return '<div id="fw-block">' + fwInnerHtml() + "</div>";
+    }
+
+    // What belongs inside that block, which is a different thing in each state: the
+    // troubleshooting section while the switch is on, and one button while it is off
+    // and a rule of ours is still standing.
+    function fwInnerHtml() {
+      if (netInfo && !netInfo.lan_access) {
+        return '<div class="component-actions">' +
+          '<button data-fw="remove">Remove the rule</button></div>' +
+          '<div class="status" id="fw-status"></div>';
+      }
+      return firewallHtml();
     }
 
     function remoteHtml() {
@@ -682,7 +738,12 @@
       // Down here there is a full line to write on and nothing above to push.
       var body;
       if (!netInfo.lan_access) {
-        body = "";
+        // Off, but a rule we added may still be open. It is not removed with the
+        // switch -- that would be an administrator prompt nobody asked for, every
+        // time the switch moved -- so it is named here instead, with the button that
+        // removes it. A rule left standing means whatever binds this port next is
+        // reachable from the network, which is not a thing to leave unsaid.
+        body = leftoverRuleHtml();
       } else if (netInfo.commands && netInfo.commands.length) {
         // One copy button per line rather than one for the block. They are separate
         // commands and are re-run separately -- the first again after the address
@@ -693,7 +754,7 @@
           netInfo.commands.map(function (c, i) {
             return '<div class="cmd"><code>' + escapeHtml(c) + "</code>" +
               '<button class="copy" data-copy="' + i + '">Copy</button></div>';
-          }).join("") + '<div id="fw-block">' + firewallHtml() + "</div>";
+          }).join("") + fwBlockHtml();
       } else {
         // On, but this machine has no address another one could use -- loopback only,
         // or no network at all. Saying so beats showing a URL that cannot work.
@@ -796,6 +857,13 @@
         // checked -- it does not report a rule it has not seen -- and asking here
         // would be another three and a half seconds for something already known.
         fwHasRule = !!r.has_rule;
+        if (netInfo && !netInfo.lan_access) {
+          // The whole notice has to go, not just the button inside it, so the card is
+          // rebuilt. Affordable again now that reading the network no longer waits on
+          // the firewall -- which is the only reason that read was ever expensive.
+          refreshComponents();
+          return;
+        }
         paintFirewall();
       });
     }

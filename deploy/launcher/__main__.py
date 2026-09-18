@@ -572,6 +572,11 @@ class SettingsApi:
         port = self._launcher.service.port
         ok, error = firewall.run_elevated(firewall.remove_command(port), keep_open=False)
         if not ok:
+            # Removing something that was not there is not a failure, and is the one
+            # way the record above corrects itself: somebody deleted the rule by hand,
+            # and this is where we find out.
+            if not firewall.has_rule(port):
+                return {"ok": True, "error": "", "has_rule": False}
             return {"ok": False, "error": error, "has_rule": True}
         if firewall.has_rule(port):
             return {"ok": False, "error": "The rule is still there.", "has_rule": True}
