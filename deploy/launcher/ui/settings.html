@@ -212,6 +212,14 @@
   .cmd { display: flex; align-items: flex-start; gap: 8px; margin-top: 5px; }
   .cmd code { flex: 1; min-width: 0; margin-top: 0; }
   .cmd .copy { flex: none; padding: 2px 10px; font-size: 12px; min-width: 66px; }
+  /* Closed by default: on most machines there is nothing to do here, and an open
+     block of administrator commands would read as a step rather than a remedy. */
+  .troubleshoot { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .troubleshoot summary {
+    cursor: pointer; font-size: 13px; color: var(--accent); width: fit-content;
+  }
+  .troubleshoot .component-actions { margin-top: 10px; }
+  .troubleshoot .status { text-align: left; margin-top: 8px; }
 
   pre.log {
     margin: 12px 0 0; padding: 12px 14px; max-height: 220px; overflow: auto;
@@ -570,8 +578,98 @@
     // from the click made the same state look different depending on whether it had
     // just been set or was simply how the window found things.
     function lanState(open) {
-      return open ? { text: "Open to this network", cls: "warn" }
-                  : { text: "This computer only", cls: "muted" };
+      if (!open) { return { text: "This computer only", cls: "muted" }; }
+      // Said, not enforced. The heading offers another computer this machine's model,
+      // and with nothing loaded there is no model to offer -- but the switch is a
+      // local, reversible bind, and refusing it would break the normal order of
+      // doing this: open the port, set the other computer up, load a model last. The
+      // button beside it is gated instead, because that one writes into another
+      // application's configuration, where half an answer is wrong in someone
+      // else's house.
+      return { text: servedModel ? "Open to this network"
+                                 : "Open to this network — no model loaded here yet",
+               cls: "warn" };
+    }
+
+    // Folded away, and opened by the question the reader would be asking. Most
+    // machines need nothing here -- Windows asks once, the first time a program
+    // listens, and remembers the answer -- so this is troubleshooting rather than a
+    // step, and a permanent block of administrator commands would read as a step.
+    // Whether the reader had this open, kept across redraws. Pressing a button in
+    // here redraws the card -- that is how the buttons know what to say next -- and
+    // without this the section folded shut under the hand that had just used it.
+    var fwOpen = false;
+
+    // Whether our rule is in place: null until somebody asks. Asking costs three and
+    // a half seconds -- measured, and the same whichever tool does the asking -- so it
+    // is not asked while drawing the tab, only when this section is opened.
+    var fwHasRule = null;
+
+    function firewallHtml() {
+      var f = netInfo && netInfo.firewall;
+      if (!f) { return ""; }
+      var open = fwOpen ? " open" : "";
+      if (!f.supported) {
+        // Linux, where most desktops run no firewall at all and the ones that do
+        // disagree about how. Nothing is offered unless one was found running.
+        return f.linux_hint
+          ? '<details class="troubleshoot"' + open + "><summary>Cannot connect?</summary>" +
+            '<div class="hint">A firewall is running on this computer. Run this here:' +
+            '</div><div class="cmd"><code>' + escapeHtml(f.linux_hint) +
+            "</code></div></details>"
+          : "";
+      }
+      var inner;
+      if (fwHasRule === null) {
+        inner = '<div class="hint">Checking…</div>';
+      } else if (fwHasRule) {
+        inner = '<div class="component-actions">' +
+          '<button data-fw="remove">Remove the rule</button></div>';
+      } else {
+        inner = '<div class="component-actions">' +
+          '<button data-fw="temporary">Allow while a window stays open</button>' +
+          '<button data-fw="permanent">Allow permanently</button></div>' +
+          // The one thing about these buttons that is not obvious from their labels,
+          // and the one that costs something if it is not known.
+          '<div class="hint">The temporary rule lasts as long as the window it opens. ' +
+          "Closing that window with the X leaves the rule behind.</div>";
+      }
+      return '<details class="troubleshoot"' + open + "><summary>Cannot connect?</summary>" +
+        '<div class="hint">A firewall on this computer is the usual reason. Windows ' +
+        "will ask for an administrator.</div>" + inner +
+        '<div class="status" id="fw-status"></div>' +
+        "</details>";
+    }
+
+    // Repaints this section alone. A firewall action used to redraw every card, which
+    // meant re-detecting every component and re-reading the network -- seconds of work
+    // to change two buttons.
+    function paintFirewall() {
+      var host = el("fw-block");
+      if (!host) { return; }
+      host.innerHTML = firewallHtml();
+      wireFirewall();
+    }
+
+    function wireFirewall() {
+      Array.prototype.forEach.call(
+        document.querySelectorAll("[data-fw]"), function (b) {
+          b.addEventListener("click", function () { firewallAction(b); });
+        });
+      Array.prototype.forEach.call(
+        document.querySelectorAll("details.troubleshoot"), function (d) {
+          d.addEventListener("toggle", function () {
+            fwOpen = d.open;
+            // Asked once, the first time it is opened, and only then.
+            if (d.open && fwHasRule === null && netInfo && netInfo.firewall &&
+                netInfo.firewall.supported) {
+              api.firewall_state().then(function (r) {
+                fwHasRule = !!(r && r.has_rule);
+                paintFirewall();
+              });
+            }
+          });
+        });
     }
 
     function remoteHtml() {
@@ -595,7 +693,7 @@
           netInfo.commands.map(function (c, i) {
             return '<div class="cmd"><code>' + escapeHtml(c) + "</code>" +
               '<button class="copy" data-copy="' + i + '">Copy</button></div>';
-          }).join("");
+          }).join("") + '<div id="fw-block">' + firewallHtml() + "</div>";
       } else {
         // On, but this machine has no address another one could use -- loopback only,
         // or no network at all. Saying so beats showing a URL that cannot work.
@@ -673,6 +771,35 @@
       });
     }
 
+    function firewallAction(button) {
+      var what = button.getAttribute("data-fw");
+      var all = button.parentElement.querySelectorAll("button");
+      Array.prototype.forEach.call(all, function (b) { b.disabled = true; });
+      setStatus("fw-status", "Waiting for Windows to ask…", "muted");
+      var call = what === "remove"
+        ? api.firewall_remove()
+        : api.firewall_allow(what === "temporary");
+      call.then(function (r) {
+        Array.prototype.forEach.call(all, function (b) { b.disabled = false; });
+        if (!r.ok) {
+          // A declined prompt is a decision, not a fault, and reads as one.
+          setStatus("fw-status", r.error, "warn");
+          return;
+        }
+        // The temporary rule is deliberately not looked for: it lives under its own
+        // name, and the window it opened is what says it is there.
+        if (what === "temporary") {
+          setStatus("fw-status", "Allowed while that window stays open.", "warn");
+          return;
+        }
+        // Taken from the answer rather than asked for again. The other side already
+        // checked -- it does not report a rule it has not seen -- and asking here
+        // would be another three and a half seconds for something already known.
+        fwHasRule = !!r.has_rule;
+        paintFirewall();
+      });
+    }
+
     function toggleLan(e) {
       var box = e.target;
       box.disabled = true;
@@ -742,6 +869,13 @@
               copyCommand(b, netInfo.commands[Number(b.getAttribute("data-copy"))]);
             });
           });
+        Array.prototype.forEach.call(
+          el("component-list").querySelectorAll("[data-copy-text]"), function (b) {
+            b.addEventListener("click", function () {
+              copyCommand(b, b.getAttribute("data-copy-text"));
+            });
+          });
+        wireFirewall();
         // A page opened while an install is already running picks it up rather than
         // showing a stale idle card.
         return api.component_progress().then(function (job) {

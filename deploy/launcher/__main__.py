@@ -30,6 +30,7 @@ from . import (
     components,
     config,
     env_file,
+    firewall,
     hardening,
     maintenance,
     preflight,
@@ -515,7 +516,66 @@ class SettingsApi:
             # Built from the same definition the button writes, so the two cannot
             # describe different endpoints again -- see components.hermes_provider.
             "commands": components.hermes_commands(base) if base and enabled else [],
+            # Only ever about the rule this application adds, never about whether the
+            # port can be reached -- nothing on this side can establish that. See
+            # launcher/firewall.py for the measurements behind that.
+            #
+            # Whether the rule exists is deliberately absent: asking costs three and a
+            # half seconds, measured, and this runs every time the Components tab is
+            # drawn. It made the tab arrive empty and fill in late. The page asks for
+            # it through firewall_state, once, when somebody opens the section that
+            # shows it.
+            "firewall": {
+                "supported": firewall.supported(),
+                "add": firewall.add_command(port),
+                "add_temporary": firewall.add_command(port, temporary=True),
+                "remove": firewall.remove_command(port),
+                "linux_hint": "" if firewall.supported() else firewall.linux_hint(port),
+            },
         }
+
+    def firewall_state(self) -> dict[str, Any]:
+        """Whether the rule this application adds is in place. Slow, so asked on demand."""
+        return {"has_rule": firewall.has_rule(self._launcher.service.port)}
+
+    def firewall_allow(self, temporary: bool = False) -> dict[str, Any]:
+        """Add the rule, through the system's own administrator prompt.
+
+        The only place this application asks for an administrator. Opening a port with
+        no password on it to the network is a privileged act the user asked for, and
+        the system prompt is the right thing to ask it with; nothing else here has
+        changed.
+        """
+        port = self._launcher.service.port
+        temporary = bool(temporary)
+        ok, error = firewall.run_elevated(
+            firewall.add_command(port, temporary=temporary), keep_open=temporary)
+        if not ok:
+            return {"ok": False, "error": error}
+        # Checked, not assumed. Start-Process reports whether it started a process,
+        # not whether that process did anything -- which is how a command that was
+        # being mangled on its way in reported success for a rule it never created.
+        # The temporary one is not checked: it is deliberately under another name and
+        # the window it opened is what says it is there.
+        if temporary:
+            return {"ok": True, "error": "", "has_rule": False}
+        present = firewall.has_rule(port)
+        if not present:
+            return {"ok": False, "has_rule": False,
+                    "error": "The rule was not added. Run the command yourself to see "
+                             "what Windows says about it."}
+        # Returned so the page can repaint from it. Asking again on the other side
+        # would be the same three and a half seconds for an answer already in hand.
+        return {"ok": True, "error": "", "has_rule": True}
+
+    def firewall_remove(self) -> dict[str, Any]:
+        port = self._launcher.service.port
+        ok, error = firewall.run_elevated(firewall.remove_command(port), keep_open=False)
+        if not ok:
+            return {"ok": False, "error": error, "has_rule": True}
+        if firewall.has_rule(port):
+            return {"ok": False, "error": "The rule is still there.", "has_rule": True}
+        return {"ok": True, "error": "", "has_rule": False}
 
     def open_component(self, component_id: str) -> dict[str, Any]:
         started, error, kind = components.open_component(str(component_id))
