@@ -1152,10 +1152,11 @@ def _as_config_value(value: object) -> str:
 def hermes_commands(service_url: str) -> list[str]:
     """The same endpoint, as commands to run on a Hermes somewhere else.
 
-    Two, not six: `hermes config set` takes one key and one value, but the value may
+    Three, not six: `hermes config set` takes one key and one value, but the value may
     be a JSON object -- verified against it -- so the whole provider goes in one. The
-    selection cannot join it, because providers and model are separate branches of the
-    configuration.
+    two selection keys cannot join it: providers and model are separate branches of the
+    configuration, and model.default is not redundant with the provider's own model --
+    unset it and Hermes sends an empty model field.
 
     Single-quoted because that is a literal string in both cmd-era PowerShell and in
     bash, and the other computer may be either.
@@ -1165,6 +1166,15 @@ def hermes_commands(service_url: str) -> list[str]:
     provider = json.dumps(hermes_provider(service_url), separators=(",", ":"))
     return [f"hermes config set providers.{HERMES_PROVIDER_ID} '{provider}'",
             *(f"hermes config set {key} {value}" for key, value in hermes_selection())]
+
+
+def _hermes_manual_steps(service_url: str) -> str:
+    """The commands to run when this declines to run them, as lines to read.
+
+    Built from hermes_commands, so what is offered by hand is what the button would
+    have done. Two hand-written copies of this drifted once already.
+    """
+    return "".join("\n  " + line for line in hermes_commands(service_url))
 
 
 def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str, str]:
@@ -1184,12 +1194,17 @@ def point_hermes_here(service_url: str, model: str | None) -> tuple[bool, str, s
         return False, "Hermes does not look installed.", BLOCKED
 
     active = _hermes_config_get(program, "model.provider")
+    if active is UNKNOWN:
+        # Not read, so not overwritten. Treating this as "nobody has chosen" is how
+        # a deliberate choice gets replaced by an application that could not even
+        # see it.
+        return False, ("Hermes is installed but its configuration could not be read, "
+                       "so it has been left alone. To set it by hand:" +
+                       _hermes_manual_steps(service_url)), BLOCKED
     if active not in (None, "", HERMES_PROVIDER_ID) and active not in HERMES_STOCK_PROVIDERS:
-        return False, (
-            f"Hermes is set to use the \"{active}\" provider, which somebody chose. "
-            f"Leaving it alone. To point it here by hand:\n"
-            f"  hermes config set providers.{HERMES_PROVIDER_ID}.base_url {service_url}\n"
-            f"  hermes config set model.provider {HERMES_PROVIDER_ID}", BLOCKED)
+        return False, (f"Hermes is set to use the \"{active}\" provider, which somebody "
+                       f"chose. Leaving it alone. To point it here by hand:"
+                       + _hermes_manual_steps(service_url)), BLOCKED
 
     settings = [(f"providers.{HERMES_PROVIDER_ID}.{key}", _as_config_value(value))
                 for key, value in hermes_provider(service_url).items()]
@@ -1210,15 +1225,27 @@ def _hermes_command(program: str) -> list[str]:
     return [program]
 
 
-def _hermes_config_get(program: str, key: str) -> str | None:
+# What _hermes_config_get returns when the question could not be put to Hermes at all,
+# as distinct from a key that is simply not set. They are not the same answer, and the
+# guard in point_hermes_here acts on the difference: not set means nobody has chosen,
+# unreadable means we do not know, and overwriting on "we do not know" is the one thing
+# that guard exists to prevent.
+UNKNOWN = object()
+
+
+def _hermes_config_get(program: str, key: str) -> str | None | object:
+    """The value, None when the key is not set, UNKNOWN when it could not be read."""
     try:
         result = subprocess.run(_hermes_command(program) + ["config", "get", key],
                                 capture_output=True, text=True, timeout=120,
                                 creationflags=config.subprocess_flags())
     except (OSError, subprocess.SubprocessError):
-        return None
+        return UNKNOWN
     if result.returncode != 0:
-        return None
+        # Hermes exits non-zero for an unset key and says so in as many words; any
+        # other non-zero exit happened before it could look.
+        said = (result.stdout + result.stderr).lower()
+        return None if "not set" in said else UNKNOWN
     return result.stdout.strip().splitlines()[-1].strip() if result.stdout.strip() else None
 
 

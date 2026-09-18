@@ -479,13 +479,30 @@ class SettingsApi:
         than describing the switch as "network mode".
         """
         enabled = bool(enabled)
+        previous = bool(state.get("lan_access"))
+        if enabled == previous:
+            return {"ok": True, **self.network_details()}
+
+        # Written first because bind_host reads them, and put back if the restart does
+        # not happen. A failure that leaves them written is not a failure: the page
+        # reverts its switch and says so, while the state file still says the port is
+        # open -- so the next repaint shows the switch back on, and the next start
+        # binds to the network with nobody having agreed to it. Nothing is "on" until
+        # a service is listening that way.
         state.set("lan_access", enabled)
         env_file.set_host(config.bind_host())
         try:
             self._launcher.service.restart()
         except Exception as exc:  # noqa: BLE001 - reported, not raised at the page
             log.exception("could not restart the service after changing the bind address")
-            return {"ok": False, "error": f"Could not restart the service: {exc}"}
+            state.set("lan_access", previous)
+            env_file.set_host(config.bind_host())
+            with contextlib.suppress(Exception):
+                # The old address is the one the user still believes is in force, so
+                # the service is put back on it rather than left wherever it stopped.
+                self._launcher.service.restart()
+            return {"ok": False, "error": f"Could not restart the service: {exc}",
+                    **self.network_details()}
         log.info("lan access %s; service bound to %s",
                  "enabled" if enabled else "disabled", config.bind_host())
         return {"ok": True, **self.network_details()}
@@ -658,10 +675,17 @@ class SettingsApi:
                 return ""
         except urllib.error.HTTPError as exc:
             try:
-                detail = json.loads(exc.read().decode("utf-8")).get("detail")
+                detail = str(json.loads(exc.read().decode("utf-8")).get("detail") or "")
             except Exception:  # noqa: BLE001 - the status is the answer; the text is a bonus
-                detail = None
-            return str(detail) if detail else f"The service refused a request carrying tools ({exc.code})."
+                detail = ""
+            # Only the refusal this asked about. Any other error means the request did
+            # not get far enough to answer the question: a dead inference server
+            # answers 500, and reporting that as "this service will not take tools"
+            # sends someone to change engines over an engine that has crashed.
+            if exc.code == 400 and "tool" in detail.lower():
+                return detail
+            log.info("tool-calling probe got HTTP %d: %s", exc.code, detail[:200])
+            return ""
         except Exception:  # noqa: BLE001 - unreachable is not a refusal; let the write proceed
             return ""
 

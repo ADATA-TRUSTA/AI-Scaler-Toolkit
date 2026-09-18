@@ -351,6 +351,11 @@
 
   function setStatus(id, text, kind) {
     var node = el(id);
+    // The cards are rebuilt from scratch, so a line written after an asynchronous call
+    // may be aimed at an element that has since been replaced or removed. Saying
+    // nothing is the right outcome there; throwing would take the rest of the
+    // callback with it.
+    if (!node) { return; }
     node.textContent = text || "";
     node.className = "status" + (kind ? " " + kind : "");
   }
@@ -697,6 +702,9 @@
       if (fwAsking || fwHasRule !== null) { return; }
       if (!netInfo || !netInfo.firewall || !netInfo.firewall.supported) { return; }
       fwAsking = true;
+      // A rejection has to clear fwAsking too, or nothing asks again for the rest of
+      // the session: the section would sit on "Checking…" for good, with no buttons
+      // and no way to retry short of reopening the window.
       api.firewall_state().then(function (r) {
         fwAsking = false;
         fwHasRule = !!(r && r.has_rule);
@@ -708,6 +716,13 @@
           // Asked in the background, with nothing on screen waiting. Repainting on a
           // "no" would rebuild the cards seconds after every visit, to change nothing.
           refreshComponents();
+        }
+      }, function () {
+        fwAsking = false;
+        // Left null on purpose: unknown is what it is, and the next time the section
+        // is opened it asks again rather than inventing an answer.
+        if (netInfo && netInfo.lan_access) {
+          setStatus("fw-status", "Could not read the firewall.", "warn");
         }
       });
     }
@@ -865,6 +880,11 @@
           return;
         }
         paintFirewall();
+      }, function () {
+        // Without this the buttons stay disabled for good: the handler that gives
+        // them back lives in the branch above, which a rejected call never reaches.
+        Array.prototype.forEach.call(all, function (b) { b.disabled = false; });
+        setStatus("fw-status", "Windows did not answer. Nothing was changed.", "warn");
       });
     }
 
@@ -944,6 +964,18 @@
           if (job) { paintJob(job); }
           if (job && job.running) { poll(); }
         });
+      }, function (e) {
+        // This is the only thing that ever fills this tab, so a rejection anywhere in
+        // it leaves an empty page and no account of why -- which reads as a load that
+        // never finished, and there is nothing to click to try again. Say so, and
+        // give them the something to click.
+        el("component-list").innerHTML =
+          '<div class="component"><div class="desc">Could not read what is installed. ' +
+          escapeHtml(String((e && e.message) || e || "")) +
+          '</div><div class="component-actions">' +
+          '<button data-retry="1">Try again</button></div></div>';
+        var again = el("component-list").querySelector("[data-retry]");
+        if (again) { again.addEventListener("click", refreshComponents); }
       });
     }
 
