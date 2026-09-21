@@ -1,0 +1,32 @@
+# Line endings, for editors rather than for git.
+#
+# .gitattributes already declares them, but it only governs the conversion git does on
+# checkout and commit -- it cannot stop an editor from saving a checked-out file with
+# different ones. And because `text=auto eol=lf` makes git normalise before it compares,
+# a file that has been rewritten as CRLF still reads as clean in `git status`: the
+# working tree is wrong and nothing says so.
+#
+# That is not hypothetical here. deploy/linux/build_appimage.sh sat in the working tree
+# with CRLF, invisible to git, and WSL refused to run it:
+#
+#   build_appimage.sh: line 18: $'\r': command not found
+#
+# To find one: `git ls-files --eol <path>`, and look for `i/lf w/crlf`.
+#
+# The rules below mirror .gitattributes deliberately. If you change one, change both.
+root = true
+
+[*]
+end_of_line = lf
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Same exception .gitattributes makes: these are read by Windows-only interpreters and
+# are committed with CRLF.
+[*.{bat,ps1}]
+end_of_line = crlf
+
+[*.md]
+# Two trailing spaces are a line break in Markdown, so stripping them changes the text.
+trim_trailing_whitespace = false
