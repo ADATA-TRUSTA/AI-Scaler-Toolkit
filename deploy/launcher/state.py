@@ -31,7 +31,6 @@ DEFAULTS: dict[str, Any] = {
     "autostart": True,
     # Which accelerator setup_env settled on, for display only.
     "accelerator": None,
-    "installed_version": None,
     "last_update_check": None,
     # True from the moment setup starts until it finishes. Finding it still set on a
     # later start means the previous attempt was interrupted -- a quit, a reboot, a

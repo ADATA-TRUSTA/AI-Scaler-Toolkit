@@ -304,6 +304,25 @@ def frontend_config() -> Path:
     return payload_dir() / "frontend" / "dist" / "config.json"
 
 
+def app_version() -> str | None:
+    """Which build this is, or None in a source checkout that was never packaged.
+
+    Read from the payload rather than kept in the state file. An update replaces the
+    payload, so the file beside the code is right by construction, where a stored copy
+    would have to be rewritten by whatever applied the update and would be wrong -- and
+    unnoticeably so -- if that ever failed halfway.
+
+    Nothing wrote the stored copy at all, which is how "Installed version unknown" came
+    to sit on the settings page of every build, and how the update check came to
+    compare the latest release against None.
+    """
+    try:
+        version = (payload_dir() / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return version or None
+
+
 def data_dir() -> Path:
     if IS_WINDOWS:
         return _win_local_appdata() / APP_NAME

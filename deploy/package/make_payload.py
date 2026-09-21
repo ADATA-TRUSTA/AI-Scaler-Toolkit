@@ -202,6 +202,14 @@ def main() -> int:
     parser.add_argument("--skip-source-check", action="store_true",
                         help="package the layout even if it no longer matches the source "
                              "repositories beside it")
+    # Stamped into the payload because nothing else tells the running application which
+    # build it is. The installer carried a version, but only into its own metadata, so
+    # the launcher answered "Installed version unknown" and the update check compared
+    # the latest release against None. A file in the payload is the one place both the
+    # Windows and the Linux build already produce and the launcher already reads from.
+    parser.add_argument("--version", default="",
+                        help="version this payload is, written to VERSION for the "
+                             "launcher to report and to compare releases against")
     args = parser.parse_args()
 
     source = Path(args.source).resolve()
@@ -221,6 +229,11 @@ def main() -> int:
     if payload.exists():
         clear_payload(payload)
     payload.mkdir(parents=True)
+
+    if args.version:
+        version = args.version.strip()
+        (payload / "VERSION").write_text(version + "\n", encoding="utf-8")
+        print(f"[payload] version: {version}")
 
     package, brand = BRAND_BY_PLATFORM[args.platform]
     src_dist = source / "frontend" / package

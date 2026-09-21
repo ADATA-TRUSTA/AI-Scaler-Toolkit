@@ -371,7 +371,7 @@ class SettingsApi:
         return {
             "autostart": autostart.is_enabled(),
             "service_port": stored["service_port"],
-            "installed_version": stored["installed_version"],
+            "installed_version": config.app_version(),
             "accelerator": stored["accelerator"],
             "last_setup": stored["last_setup"],
             "package_count": stored["package_count"],

@@ -39,7 +39,7 @@ def asset_suffix() -> str:
 
 
 def check(repo: str = github.DEFAULT_REPO) -> UpdateStatus:
-    current = state.get("installed_version")
+    current = config.app_version()
     try:
         release = github.latest(repo=repo, asset_suffix=asset_suffix())
     except github.NoReleases:

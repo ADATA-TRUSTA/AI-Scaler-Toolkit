@@ -185,7 +185,8 @@ build_payload() {
   # application icon with Pillow; a bare interpreter has no Pillow, so the build
   # stopped on ModuleNotFoundError before it reached anything interesting.
   uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/make_payload.py" \
-    --platform linux --source "$LAYOUT" --out "$BUILD_DIR/payload" --port "$SERVICE_PORT"
+    --platform linux --source "$LAYOUT" --out "$BUILD_DIR/payload" \
+    --port "$SERVICE_PORT" --version "$VERSION"
   export_requirements
   build_gi
   uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/assert_payload.py" \
