@@ -76,21 +76,27 @@ deliberate: the service holds loaded models and serves them to *other applicatio
 over its API, not only to this window. Closing a window here is not the same as
 finishing with the service.
 
-That makes Quit consequential, so two things guard it. Quitting asks first when
-`/health` reports a model loaded or a training run active -- only then, because a
-confirmation shown every time is one nobody reads. And the first time the window is
-closed, the application says where it went: on Windows 11 a new tray icon starts in
-the overflow behind the chevron, with no supported way to promote it, so an
-application that hides there without saying so has effectively vanished. Settings
-carries a Quit button for the same reason -- nothing essential should depend on
-finding an icon Windows chose to hide.
+That makes Quit consequential, and three guards were tried around it. Two are gone.
+
+Quitting asked first whenever `/health` reported a model loaded or a training run
+active. A model is loaded almost all of the time this is running, so the question was
+not the rare warning it was designed as -- it stood between the user and the one
+button whose meaning is not in doubt. Quit means quit.
+
+Closing the window announced where it had gone, and Settings carried a Quit button,
+both as insurance against a tray icon the user might not find -- on Windows 11 a new
+one starts in the overflow behind the chevron with no supported way to promote it.
+Both were the wrong answer: hiding to the tray is what every application with a tray
+icon does without explaining itself, and a second way to quit does not fix a first one
+being unreliable.
+
+What remains is one question, and it is not "are you sure": quitting while a component
+is installing warns that stopping now leaves something broken on disk. That installer
+is a child of this process reading from a pipe we own, so this process going away
+aborts it mid-write. Closing the settings window is safe -- the install runs here, not
+there -- so quitting is what asks.
 
 Checking for updates moved to Settings. It belongs where someone goes to look for it.
-
-Closing the window says nothing, and Settings has no Quit button. Both existed briefly
-as insurance against a tray icon the user might not find, and both were the wrong
-answer: hiding to the tray is what every application with a tray icon does without
-explaining itself, and a second way to quit does not fix a first one being unreliable.
 
 ## A login is not a request to install
 
@@ -122,11 +128,13 @@ interface and wears the TRUSTA mark on its executable, its tray icon, its shortc
 and its setup screen -- all four come from the same source, so they agree with each
 other and disagree with the frontend.
 
-Left as it is deliberately. Tying the icon to the platform is a two-line change, but
-there is no ADATA icon to tie it to: `deploy/assets` holds only TRUSTA artwork, and
-the one ADATA image in the repository is 348x348 in the root `assets` directory, which
-serves README headers and is not where application icons come from. Changing the code
-without the artwork would produce a build that fails its own icon assertion.
+Left as it is deliberately, and not because the build would stop us -- it would not.
+`SOURCES["adata"]` falls back to the 348x348 `adata-icon.png` in the root `assets`
+directory, which is large enough that every entry down to 16 is a downscale: the icon
+builds with all nine sizes, without the upscale warning, and the payload assertion
+passes. What is missing is not a file but a drawing. That image serves README headers,
+and nobody has decided what it should look like at 16 pixels, which is where the
+taskbar and the tray draw it.
 
 If ADATA icons arrive, put `adata-icon-1024.png` in `deploy/assets` and make
 `ICON_BRAND` follow the platform the way the frontend package already does.
