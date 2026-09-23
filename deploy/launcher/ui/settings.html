@@ -94,7 +94,7 @@
     padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px;
     background: var(--btn); color: var(--fg); cursor: pointer;
     font: inherit; font-size: 13.5px; font-weight: 500;
-    /* A label is a phrase. Letting it break turns "Use this machine's model" into
+    /* A label is a phrase. Letting it break turns "Config AST Endpoint" into
        three stacked lines the moment the window is narrow, which is what a row of
        buttons looks like when it has been allowed to squeeze instead of wrap. */
     white-space: nowrap;
@@ -529,13 +529,15 @@
           '<div class="component-actions">' + action +
             // Only once it is installed: an Open button on something that is not there
             // is a button that can only disappoint.
+            // "Open" and nothing more. It said "Open in terminal" for a command-line
+            // tool, which stopped being true for Hermes on Linux once the desktop
+            // application was built there; how a component starts is its business,
+            // and the card's detail line says what there is to open.
             (installed && !c.busy
-              ? '<button data-open="' + escapeHtml(c.id) + '">' +
-                (c.terminal ? "Open in terminal" : "Open") + "</button>"
+              ? '<button data-open="' + escapeHtml(c.id) + '">Open</button>'
               : "") +
-            // Hermes speaks to an OpenAI-compatible endpoint, and this backend is one.
-            // The button says where it will point rather than "Configure", because the
-            // thing it changes belongs to another application.
+            // Hermes speaks to an OpenAI-compatible endpoint, and this backend is one:
+            // the button writes this application's endpoint into Hermes's config.
             (c.can_point_here && !c.busy
               // Disabled until there is a model, because that is what the button
               // offers. It used to write the address alone and say so, which left the
@@ -543,7 +545,7 @@
               // is not serving.
               ? '<span class="pair">' +
                 '<button data-point="' + escapeHtml(c.id) + '"' +
-                (servedModel ? "" : " disabled") + ">Use this machine's model</button>" +
+                (servedModel ? "" : " disabled") + ">Config AST Endpoint</button>" +
                 // Not the model's name. The endpoint this writes names the machine,
                 // not a model -- Hermes asks it what is loaded on every request --
                 // so a name here described a pinning that stopped happening when the
