@@ -40,6 +40,7 @@ from . import (
     service_manager,
     shortcuts,
     single_instance,
+    starter_model,
     state,
     updater,
 )
@@ -1271,6 +1272,23 @@ class Launcher:
             )
 
             self.service.watch(self._service_lost)
+
+            # The starter model, before the interface, so the first time the window
+            # opens there is something in the list to load. Once per machine, and it
+            # never keeps the window closed -- see starter_model.py. Guarded anyway:
+            # this is a convenience, and nothing about it is worth failing startup for.
+            try:
+                note = starter_model.fetch(
+                    self.service.port,
+                    lambda detail, elapsed: self._set_step(
+                        "Downloading a starter model", None, detail, elapsed),
+                )
+            except Exception:
+                log.exception("the starter model step failed; carrying on without it")
+                note = None
+            if note:
+                self._set_step("Starter model", None, note, 0)
+                time.sleep(DONE_PAUSE_SECONDS * 2)
 
             if provisioned:
                 # Not a first run: there is nothing to celebrate and nobody waiting,

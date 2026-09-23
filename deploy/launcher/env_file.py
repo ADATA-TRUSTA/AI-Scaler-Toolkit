@@ -48,12 +48,23 @@ def desired(port: int) -> dict[str, str]:
     LLAMA_SERVER_BINARY is absent by design: setup_env resolves and writes it, and a
     guess here would either duplicate or contradict it.
     """
-    return {
+    keys = {
         "SERVICE_HOST": config.bind_host(),
         "SERVICE_PORT": str(port),
         "HF_HOME": str(config.hf_home()),
         "LOG_DIR": str(config.log_dir()),
     }
+    if not config.IS_WINDOWS:
+        # The directory that holds the environment, not the environment: the backend
+        # looks for vLLM's interpreter at <VLLM_SERVER_PROJECT_DIR>/.venv/bin/python,
+        # and defaults the directory to the backend project. This launcher moves the
+        # environment out of the project (UV_PROJECT_ENVIRONMENT), so the default found
+        # nothing, the fallback -- `uv run --no-project python` -- picked an interpreter
+        # without vLLM in it, and every vLLM load in an installed build failed with
+        # "No module named 'vllm'". Measured on the Linux VM, where vLLM was installed
+        # and importable from the environment this points at.
+        keys["VLLM_SERVER_PROJECT_DIR"] = str(config.venv_dir().parent)
+    return keys
 
 
 def ensure(port: int) -> list[str]:

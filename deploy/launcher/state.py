@@ -58,6 +58,10 @@ DEFAULTS: dict[str, Any] = {
     # to load and unload. That is a reasonable thing to want and not a reasonable
     # default, so it is a decision the user makes once, knowing what it means.
     "lan_access": False,
+    # The label of the starter model once it is registered here -- see
+    # starter_model.py. Set once and never cleared, so a model the user deletes stays
+    # deleted instead of coming back on the next start.
+    "starter_model": None,
 }
 
 
