@@ -43,8 +43,12 @@ class Starter:
     label: str
     # The one GGUF file to fetch, or None for the repository's full weights.
     filename: str | None
-    size: str
+    # What the download fetches, from the Hub's own file listing. Used until the
+    # backend's task reports its total, and for the log line before it does.
+    total_bytes: int
     engine: str
+    # What the setup window calls it, which has room for a name and not a repository.
+    display: str = "MiniCPM5-1B"
 
 
 # MiniCPM5-1B in the two forms the two default engines load. Small enough to fetch on
@@ -55,14 +59,18 @@ GGUF = Starter(
     model_id="openbmb/MiniCPM5-1B-GGUF",
     label="minicpm5-1b-gguf",
     filename="MiniCPM5-1B-Q4_K_M.gguf",
-    size="656 MB",
+    total_bytes=688_065_920,
     engine="llama_server",
 )
+# The whole repository, since vLLM needs the tokenizer and config beside the weights:
+# 2.17 GB, nearly all of it the one BF16 safetensors file. It was written down as 1.08
+# GB from a summary of the Hub's listing rather than the listing itself, and a first
+# install on the VM took three times as long as that figure said it would.
 WEIGHTS = Starter(
     model_id="openbmb/MiniCPM5-1B",
     label="minicpm5-1b",
     filename=None,
-    size="1.08 GB",
+    total_bytes=2_171_355_254,
     engine="vllm",
 )
 
@@ -117,17 +125,52 @@ def registered(port: int, starter: Starter) -> bool:
     return False
 
 
-def _describe(task: dict, starter: Starter) -> str:
-    """What the page shows while it waits: the backend's own words, and the size."""
-    words = (task.get("progress") or "").strip().rstrip(".")
-    return f"{starter.label}, {starter.size}" + (f" — {words}" if words else "")
+def _gb(value: int) -> str:
+    return f"{value / 1e9:.1f} GB"
 
 
-def fetch(port: int, on_update: Callable[[str, int], None]) -> str | None:
+def _downloaded(starter: Starter) -> int:
+    """Bytes of this repository in the Hugging Face cache, finished or not.
+
+    The backend's task says which file it is on and how much there is in all, but not
+    how much has arrived -- and one file is nearly all of it, so "file 7 of 11" sat
+    unchanged for the whole download. The cache is where the bytes land, including
+    the .incomplete file of the transfer in flight, and it is at a path that follows
+    from HF_HOME, which this launcher sets. Blobs only when there are blobs: the
+    snapshot directory holds links to them, and counting both would count twice.
+    """
+    repo = config.hf_home() / "hub" / ("models--" + starter.model_id.replace("/", "--"))
+    root = repo / "blobs" if (repo / "blobs").is_dir() else repo
+    total = 0
+    try:
+        for path in root.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+    except OSError:
+        pass
+    return total
+
+
+def _progress(task: dict, starter: Starter) -> tuple[str, float | None]:
+    """What the setup window shows while it waits: a short line and a fraction.
+
+    Short on purpose. The window is narrow, and the backend's own description names
+    the file it is fetching -- model-00000-of-00001.safetensors -- which is long and
+    tells a user nothing the size does not.
+    """
+    total = int(task.get("total_bytes") or starter.total_bytes)
+    done = min(_downloaded(starter), total)
+    if not done:
+        return f"{starter.display} · {_gb(total)}", None
+    return f"{starter.display} · {_gb(done)} of {_gb(total)}", done / total
+
+
+def fetch(port: int, on_update: Callable[[str, float | None, int], None]) -> str | None:
     """Make sure the starter model is registered. Returns a note for the user, or None.
 
-    on_update(detail, elapsed_seconds) is called while waiting. The note is set when
-    the interface opens without the model, saying why and what happens next.
+    on_update(detail, fraction, elapsed_seconds) is called while waiting; fraction is
+    None until there is something to measure. The note is set when the interface
+    opens without the model, saying why and what happens next.
     """
     if state.get("starter_model"):
         return None
@@ -139,7 +182,7 @@ def fetch(port: int, on_update: Callable[[str, int], None]) -> str | None:
             state.set("starter_model", starter.label)
             return None
         log.info("fetching the starter model %s (%s, for %s)",
-                 starter.model_id, starter.size, starter.engine)
+                 starter.model_id, _gb(starter.total_bytes), starter.engine)
         body = {"model_id": starter.model_id, "label": starter.label}
         if starter.filename:
             body["filename"] = starter.filename
@@ -173,7 +216,8 @@ def fetch(port: int, on_update: Callable[[str, int], None]) -> str | None:
             # One missed poll is not a failed download; the next one will say.
             log.info("polling the starter model download failed once: %s", exc)
             task = {}
-        on_update(_describe(task, starter), elapsed)
+        detail, fraction = _progress(task, starter)
+        on_update(detail, fraction, elapsed)
         if task.get("status") in _TERMINAL:
             break
         if elapsed >= _WAIT_LIMIT_SECONDS:

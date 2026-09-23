@@ -53,9 +53,14 @@
   .sub { margin: 2px 0 0; color: var(--muted); font-size: 13.5px; }
 
   /* The current step is the subject of the screen; everything else is context. */
+  /* One line, and the name keeps its shape. The detail gives way instead: it shrinks
+     and ends in an ellipsis. Before, the detail refused to wrap while the name was
+     free to, so a long detail squeezed "Downloading a starter model" into three
+     stacked lines and still ran off the edge of the window itself. */
   .step { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
-  .step-name { font-size: 17px; font-weight: 560; }
-  .step-detail { color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .step-name { font-size: 17px; font-weight: 560; white-space: nowrap; flex: none; }
+  .step-detail { color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums;
+                 white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
   .track {
     margin-top: 12px; height: 6px; border-radius: 99px;

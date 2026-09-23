@@ -1280,8 +1280,8 @@ class Launcher:
             try:
                 note = starter_model.fetch(
                     self.service.port,
-                    lambda detail, elapsed: self._set_step(
-                        "Downloading a starter model", None, detail, elapsed),
+                    lambda detail, fraction, elapsed: self._set_step(
+                        "Downloading a starter model", fraction, detail, elapsed),
                 )
             except Exception:
                 log.exception("the starter model step failed; carrying on without it")
