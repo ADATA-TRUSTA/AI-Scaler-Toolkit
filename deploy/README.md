@@ -170,6 +170,45 @@ Detection is looser than the install path on purpose: it finds copies this appli
 never installed, because telling someone to install what they already have is its own
 kind of wrong.
 
-`remedy.py` is a different thing and stays narrow. It installs WebView2, the Visual
-C++ runtime and git — the prerequisites *setup itself* cannot proceed without. The
-line is whose problem it is, not whether we are able to install it.
+### Hermes on Linux: the desktop application, and Chromium's sandbox
+
+The windowed Hermes is opt-in upstream on both platforms. Windows asked for it with
+`-IncludeDesktop`; Linux did not, so it got the command line tool and nothing to open.
+Linux now passes the same switch, `--include-desktop`, and success is judged by what
+is on disk, as on Windows.
+
+Open runs `hermes desktop --skip-build` rather than the built binary, because the
+binary alone cannot be started safely. Ubuntu 23.10 and later restrict unprivileged
+user namespaces, so Electron needs either a setuid-root `chrome-sandbox` or
+`--no-sandbox`, and aborts with neither. Hermes's own launcher decides: the namespace
+sandbox where the system allows it, the setuid helper through sudo where it can ask,
+`--no-sandbox` where it cannot. That is the vendor's call. Launching the binary
+ourselves would take it over and get it wrong on exactly the machines that matter.
+
+From this application sudo can never ask — there is no terminal — so on a restricted
+host the window opens without Chromium's sandbox, and the card says so and how to turn
+it on: run `hermes desktop` once in a terminal, with the user's own password. We do not
+ask for that password on their behalf. Doing it for them (a pkexec prompt installing
+an AppArmor profile, as some AI desktop installers do) was considered and declined: it
+would be a second place this application elevates, for someone else's program, leaving
+a root-owned file that uninstalling cannot remove. ComfyUI's vendor ships
+`--no-sandbox` unconditionally, so what this does is at worst that and usually better.
+
+Two consequences look wrong until you know them:
+
+- **The install prints an error and still succeeds.** The installer's last Linux step
+  is that sudo, and it fails the desktop stage when sudo cannot ask — after the build
+  is already on disk. The page adds a note beside the error saying so.
+- **The card needs the launcher's output to know.** Open writes it to
+  `logs/hermes-desktop.log`, with `PYTHONUNBUFFERED=1`: `hermes desktop` waits on
+  Electron, and a buffered launcher writes nothing until the window is closed.
+
+Hermes writes its own `hermes.desktop` the first time it is opened, so this
+application writes no menu entry for it once the desktop build exists — two "Hermes"
+entries that do different things would be worse than one.
+
+`remedy.py` is a different thing and stays narrow. It installs WebView2 — the one
+prerequisite *setup itself* cannot proceed without. The line is whose problem it is,
+not whether we are able to install it. (It once installed the Visual C++ runtime and
+git as well; both went, the first because the payload now carries it and the second
+because nothing needs git any more, and each was a UAC prompt.)

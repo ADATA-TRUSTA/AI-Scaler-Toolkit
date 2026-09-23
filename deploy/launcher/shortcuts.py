@@ -309,6 +309,30 @@ def remove() -> None:
     _refresh_menu()
 
 
+def remove_component(component_id: str) -> None:
+    """Take one component's menu entry, and its icon, back out of the menu.
+
+    For when the component has come to provide its own. Hermes on Linux is the case: a
+    build with the desktop application writes a hermes.desktop of its own, and ours --
+    which opens the command line tool in a terminal -- would sit beside it as a second
+    "Hermes" that does something different.
+    """
+    if config.IS_WINDOWS:
+        return
+    removed = False
+    for path in (config.component_entry_target(component_id),
+                 config.component_icon_target(component_id)):
+        try:
+            if path.exists():
+                path.unlink()
+                removed = True
+        except OSError as exc:
+            log.warning("could not remove %s: %s", path, exc)
+    if removed:
+        log.info("removed the menu entry for %s", component_id)
+        _refresh_menu()
+
+
 def _component_entries() -> list[Path]:
     """Every menu entry this application wrote for a component, and their icons.
 

@@ -155,12 +155,23 @@ def detect_hermes() -> str | None:
             root = Path(candidate)
             if root not in roots:
                 roots.append(root)
-    # The two places it installs itself: its historical default, and outside AppData,
-    # where it has to go on machines that veto directory renames under AppData.
+    # The two places it installs itself on Windows: its historical default, and outside
+    # AppData, where it has to go on machines that veto directory renames under AppData.
     roots += [_local_appdata() / "hermes", Path.home() / "hermes"]
 
     for root in roots:
         hit = _first_existing(root / "bin" / "hermes.exe", root / "bin" / "hermes")
+        if hit:
+            return str(hit)
+
+    # Linux, when ~/.local/bin is not on this process's PATH -- a launcher started by
+    # the desktop inherits whatever the session had, which is not always the shell's.
+    # The installer puts the command there as a shim, and the program itself inside
+    # ~/.hermes, which is its default home on Linux and appears in none of the roots
+    # above.
+    if not config.IS_WINDOWS:
+        hit = _first_existing(Path.home() / ".local" / "bin" / "hermes",
+                              Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "hermes")
         if hit:
             return str(hit)
     return None
@@ -444,10 +455,30 @@ def _download(url: str, target: Path, out: Progress) -> bool:
 
 
 def _hermes_desktop_exe(root: Path) -> Path | None:
-    """The windowed application, which is a separate build from the command line tool."""
+    """The windowed application, which is a separate build from the command line tool.
+
+    electron-builder writes it to release/<platform>-unpacked/, named after the product.
+    The known names are tried first; after them, any *-unpacked directory, so that a
+    target this list does not name -- another architecture, a renamed platform folder
+    -- is still found rather than reported as never built.
+    """
     release = root / "hermes-agent" / "apps" / "desktop" / "release"
-    return _first_existing(release / "win-unpacked" / "Hermes.exe",
-                           release / "win-arm64-unpacked" / "Hermes.exe")
+    known = _first_existing(release / "win-unpacked" / "Hermes.exe",
+                            release / "win-arm64-unpacked" / "Hermes.exe",
+                            release / "linux-unpacked" / "Hermes",
+                            release / "linux-arm64-unpacked" / "Hermes")
+    if known:
+        return known
+    name = "Hermes.exe" if config.IS_WINDOWS else "Hermes"
+    try:
+        folders = sorted(release.glob("*-unpacked"))
+    except OSError:
+        return None
+    for folder in folders:
+        candidate = folder / name
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _hermes_home() -> Path:
@@ -457,16 +488,30 @@ def _hermes_home() -> Path:
     captured when this application started, and an install that moved Hermes since
     then updated the persistent variable, which running processes never see. Taking it
     at face value pointed at the previous location, which is how this was found.
+
+    A home is recognised by hermes-agent/, the checkout itself. Recognising it by a
+    bin/ directory as well was wrong on Linux: there the command on PATH is a shim in
+    ~/.local/bin, so "two levels up from the command" is ~/.local -- which has a bin/,
+    passed, and sent every later question to a directory with no Hermes in it.
     """
     located = detect_hermes()
+    candidates: list[Path] = []
     if located:
-        home = Path(located).parent.parent
-        if (home / "hermes-agent").is_dir() or (home / "bin").is_dir():
+        candidates.append(Path(located).parent.parent)
+        # The program the Linux shim runs: ~/.hermes/hermes-agent/venv/bin/hermes.
+        candidates.append(Path(located).parent.parent.parent.parent)
+    for value in (_user_environment("HERMES_HOME"), os.environ.get("HERMES_HOME")):
+        if value:
+            candidates.append(Path(value))
+    candidates += [Path.home() / ".hermes", _local_appdata() / "hermes", Path.home() / "hermes"]
+    for home in candidates:
+        if (home / "hermes-agent").is_dir():
             return home
-    for candidate in (_user_environment("HERMES_HOME"), os.environ.get("HERMES_HOME")):
-        if candidate:
-            return Path(candidate)
-    return _local_appdata() / "hermes"
+    for value in (_user_environment("HERMES_HOME"), os.environ.get("HERMES_HOME")):
+        if value:
+            return Path(value)
+    # Nothing installed: each platform's own default, not Windows' on both.
+    return _local_appdata() / "hermes" if config.IS_WINDOWS else Path.home() / ".hermes"
 
 
 def _default_install_home() -> Path:
@@ -533,23 +578,71 @@ def _ps_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _install_hermes_linux(out: Progress) -> bool:
+    """The vendor's script with --include-desktop, as Windows passes -IncludeDesktop.
+
+    The desktop application is opt-in upstream on both platforms, and this used to ask
+    for it on Windows only -- so Linux got the command line tool and nothing to open,
+    while the source tree for the windowed build sat in apps/desktop unbuilt. The
+    switch is the vendor's own, and its build stage carries its own stall timeout and
+    mirror fallback for the Electron download, which is more than a second build step
+    of ours would.
+
+    From a file rather than piped into bash, for the same reason as on Windows: a pipe
+    cannot pass the switch. `bash -s -- --include-desktop` could, but a file also gives
+    a real path to report errors against.
+    """
+    script = Path(tempfile.gettempdir()) / "hermes-install.sh"
+    if not _download(HERMES_SH, script, out):
+        return False
+    out.note("Installing the command line tool and building the desktop application. "
+             "The desktop build is a separate step and takes several minutes.")
+    code = _stream(["bash", str(script), "--include-desktop"], out, "install-hermes.log")
+    if code != 0:
+        out.note(f"The installer exited with code {code}.")
+
+    # Judged by what is on disk, as on Windows, and for the same reason: which half
+    # was built is what decides what the card and the Open button can offer.
+    located = detect_hermes()
+    desktop = _hermes_desktop_exe(_hermes_home())
+    if desktop is not None:
+        # Hermes writes a hermes.desktop of its own the first time it is opened, so an
+        # entry of ours would be a second "Hermes" in the menu opening a terminal. One
+        # from an earlier version of this application, which could only offer the
+        # terminal, goes too.
+        shortcuts.remove_component("hermes")
+        out.note(f"Desktop application built: {desktop}")
+        # The installer's last step on Linux is sudo, to make Chromium's sandbox helper
+        # setuid root, and it fails the whole desktop stage when sudo cannot ask for a
+        # password -- which it cannot here, with no terminal. The build is already on
+        # disk by then and runs without the helper, so the failure it prints above
+        # reads as far worse than it is. Said plainly, beside it.
+        if "Cannot configure Electron sandbox helper" in "\n".join(out.tail(200)):
+            out.note("The installer could not set up Chromium's sandbox helper, which "
+                     "needs your password, and there is no terminal here to ask for it. "
+                     "That is the error above, and it does not stop the application: "
+                     "Hermes opens without the sandbox, and its card says how to turn "
+                     "the sandbox on.")
+        return True
+    if located is None:
+        out.note("Hermes did not install.")
+        return False
+    # The command line tool is there and the window is not. Still worth a menu entry,
+    # since it is the one thing that runs: its own installer says to reload the shell,
+    # which is a per-terminal fix and no help to anyone looking for it in a menu, and
+    # the entry names the absolute path because a desktop does not read .bashrc.
+    if shortcuts.ensure_component("hermes", Path(located), "Hermes Agent", terminal=True,
+                                  comment="Self-improving AI agent by Nous Research"):
+        out.note("Added the command line tool to the applications menu; it opens in a "
+                 "terminal.")
+    out.note("The command line tool installed, but the desktop application was not "
+             "built. Its output is above; installing again retries the build.")
+    return False
+
+
 def install_hermes(out: Progress) -> bool:
     if sys.platform != "win32":
-        code = _stream(["bash", "-c", f"curl -fsSL {HERMES_SH} | bash"], out,
-                       "install-hermes.log")
-        if code != 0:
-            out.note(f"The installer exited with code {code}.")
-            return False
-        # Its own installer says to reload the shell, which is a per-terminal fix and
-        # no help to anyone looking for it in a menu. The entry names the absolute path
-        # for the same reason: a desktop does not read .bashrc, so "hermes" alone would
-        # not resolve there even after the shell was reloaded.
-        located = detect_hermes()
-        if located and shortcuts.ensure_component(
-                "hermes", Path(located), "Hermes Agent", terminal=True,
-                comment="Self-improving AI agent by Nous Research"):
-            out.note("Added it to the applications menu; it opens in a terminal.")
-        return True
+        return _install_hermes_linux(out)
 
     script = Path(tempfile.gettempdir()) / "hermes-install.ps1"
     if not _download(HERMES_PS1, script, out):
@@ -714,7 +807,7 @@ def explain_hermes(log_tail: str) -> str | None:
 
 
 def open_hermes() -> str | None:
-    """The windowed application, when it was built.
+    """The windowed application, when it was built. Windows only.
 
     Detection finds the command line tool, because that is what proves Hermes is
     installed and what a PATH lookup returns. Opening it is a different question: on
@@ -723,12 +816,55 @@ def open_hermes() -> str | None:
     the Open button did.
 
     None when it is not there, and open_component then falls back to what detection
-    found. On Linux that is the only build the installer produces, so Hermes opens in
-    a terminal and says so on its card; the desktop application exists in its sources
-    but nothing builds it there.
+    found. On Linux the built application is never opened by its path -- see
+    hermes_open_command for why that is not safe there.
     """
+    if not config.IS_WINDOWS:
+        return None
     desktop = _hermes_desktop_exe(_hermes_home())
     return str(desktop) if desktop else None
+
+
+# Where the last launch of the desktop application wrote its output. Read back by the
+# card, because it is the only place that says whether the window came up sandboxed.
+HERMES_DESKTOP_LOG = "hermes-desktop.log"
+
+# What Hermes's launcher prints when it has to start Electron unsandboxed. Its own
+# words, matched as they are: rewording them upstream would lose the note on the card,
+# which is the right way for that to fail -- quietly, and only the note.
+_HERMES_NO_SANDBOX = "Falling back to --no-sandbox"
+
+
+def hermes_open_command() -> list[str] | None:
+    """Linux: `hermes desktop --skip-build`, not the built binary.
+
+    Starting the binary directly skips the part of Hermes's launcher that decides how
+    Chromium is sandboxed, and on Ubuntu 23.10 and later that decision is not optional:
+    unprivileged user namespaces are restricted, so Electron needs either a setuid-root
+    chrome-sandbox or --no-sandbox, and without either it aborts on start. The launcher
+    uses the sandbox when it can, sets up the setuid helper with sudo when it can ask,
+    and falls back to --no-sandbox when it cannot -- which is the case from here, with
+    no terminal for sudo to ask in. That policy is the vendor's to make; running the
+    binary ourselves would take it over and get it wrong on exactly those machines.
+
+    --skip-build because Open should open. Its menu entry runs `hermes desktop` and
+    rebuilds when the sources have changed; Hermes's own update runs --build-only for
+    that, so the release directory is kept current without a click that sits for three
+    minutes before a window appears.
+    """
+    if config.IS_WINDOWS or _hermes_desktop_exe(_hermes_home()) is None:
+        return None
+    cli = detect_hermes()
+    return [cli, "desktop", "--skip-build"] if cli else None
+
+
+def _hermes_ran_unsandboxed() -> bool:
+    try:
+        text = (config.log_dir() / HERMES_DESKTOP_LOG).read_text(encoding="utf-8",
+                                                                errors="replace")
+    except OSError:
+        return False
+    return _HERMES_NO_SANDBOX in text
 
 
 def describe_hermes() -> tuple[str, bool]:
@@ -736,11 +872,19 @@ def describe_hermes() -> tuple[str, bool]:
 
     Returns (text, settled) -- settled False marks something the reader should act on,
     so the page can colour it without knowing what any of it means.
+
+    Running without the sandbox is settled: the window works, and turning the sandbox
+    on is the user's call, made with their own password in their own terminal. This
+    application does not ask for it on their behalf -- nothing it installs does.
     """
-    if _hermes_desktop_exe(_hermes_home()) is not None:
-        return "Desktop application built.", True
-    return ("Command line tool only — the desktop application is not built. "
-            "Reinstall to build it.", False)
+    if _hermes_desktop_exe(_hermes_home()) is None:
+        return ("Command line tool only — the desktop application is not built. "
+                "Reinstall to build it.", False)
+    if not config.IS_WINDOWS and _hermes_ran_unsandboxed():
+        return ("Desktop application built. On this system it runs without Chromium's "
+                "sandbox; to turn the sandbox on, run `hermes desktop` once in a "
+                "terminal — it asks for your password.", True)
+    return "Desktop application built.", True
 
 
 @dataclass(frozen=True)
@@ -771,6 +915,12 @@ class Component:
     # None means "the same thing", which is the case for every component whose one
     # build is both the proof it is installed and the thing you open.
     open_target: Callable[[], str | None] | None = None
+    # A command to run for Open, taking precedence over the file and its menu entry,
+    # for a component whose own launcher has to be the one to start it. Returning None
+    # means "no such command here", and Open carries on as it would without one.
+    open_command: Callable[[], list[str] | None] | None = None
+    # Where that command's output goes, relative to the log directory.
+    open_log: str = ""
 
 
 CATALOGUE: tuple[Component, ...] = (
@@ -778,17 +928,19 @@ CATALOGUE: tuple[Component, ...] = (
         id="hermes",
         name="Hermes Agent",
         description="Self-improving AI agent by Nous Research.",
-        note="Installs into your user profile. Takes a few minutes: it provisions a "
-             "Python environment of its own.",
+        note="Installs into your user profile. Takes several minutes: it provisions a "
+             "Python environment of its own, then builds the desktop application.",
         page=HERMES_PAGE,
         detect=detect_hermes,
         install=install_hermes,
         explain=explain_hermes,
         describe=describe_hermes,
         open_target=open_hermes,
-        # A command on Linux. Its source tree carries a windowed build, but the Linux
-        # installer does not produce one -- checked on a real install: apps/desktop has
-        # no release directory. Windows gets Hermes.exe and needs no terminal.
+        open_command=hermes_open_command,
+        open_log=HERMES_DESKTOP_LOG,
+        # Only for the fallback: on Linux, when the desktop application did not build,
+        # what is left to open is the command line tool, and that needs a terminal.
+        # With the desktop build present, open_command starts it and this is not used.
         terminal=not config.IS_WINDOWS,
     ),
     Component(
@@ -1011,6 +1163,23 @@ def open_component(component_id: str) -> tuple[bool, str, str]:
             return False, f"Could not open {component.name}: {exc}", FAILED
         return True, "", DONE
 
+    command = component.open_command() if component.open_command else None
+    if command:
+        log_file = config.log_dir() / (component.open_log or f"{component_id}-open.log")
+        log.info("opening %s with %s (output to %s)", component_id, " ".join(command), log_file)
+        # Unbuffered, because the log is read while the program is still running. A
+        # Python launcher writing to a file buffers its output in blocks and, when it
+        # waits on the application it started -- as `hermes desktop` waits on Electron
+        # -- nothing it printed reaches the file until the window is closed. Measured:
+        # the line saying Hermes had fallen back to --no-sandbox was missing from the
+        # log of a window that was running with --no-sandbox.
+        started, detail = _spawn(command, log_to=log_file,
+                                 env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        if started:
+            return True, "", DONE
+        log.info("%s would not start: %s", component.name, detail)
+        return False, f"{component.name} would not start. {detail}".strip(), FAILED
+
     entry = config.component_entry_target(component_id)
     # An entry outlives the thing it names. This one was written by a version of this
     # application that did not unpack AppImages, so it names the .AppImage -- which on
@@ -1057,7 +1226,8 @@ def open_component(component_id: str) -> tuple[bool, str, str]:
     return True, "", DONE
 
 
-def _spawn(command: list[str]) -> tuple[bool, str]:
+def _spawn(command: list[str], log_to: Path | None = None,
+           env: dict[str, str] | None = None) -> tuple[bool, str]:
     """Start something and find out whether it stayed started.
 
     Popen not raising means the file could be executed, which is a much weaker claim
@@ -1066,25 +1236,59 @@ def _spawn(command: list[str]) -> tuple[bool, str]:
     button that does nothing and says nothing. Measured on the VM, where exactly that
     happened.
 
-    So it is given a moment to fail. Still running afterwards is what success looks
-    like for an application; exiting in that time is a failure worth repeating back,
-    with whatever it said on the way out.
+    So it is given a moment to fail. Still running afterwards is success. So is
+    exiting cleanly in that time, which is what a launcher that hands off does: GNOME
+    Terminal asks its server for a window and exits 0 at once. Counting that as a
+    failure is how opening Hermes on the VM went -- each terminal in turn opened a
+    window, was reported as "could not start" with nothing after the colon, because it
+    had printed nothing, and the next one was tried, until the list ran out and the
+    page said no terminal could be found beside the windows it had opened.
+
+    log_to sends the program's output to a file instead of a pipe. A pipe is only safe
+    for as long as someone reads it, and nobody does once this returns: a chatty
+    program -- Electron logs plenty -- fills it and blocks on its next write.
     """
+    sink = None
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, errors="replace", start_new_session=True,
-                                   creationflags=config.subprocess_flags())
+        if log_to is not None:
+            log_to.parent.mkdir(parents=True, exist_ok=True)
+            sink = log_to.open("w", encoding="utf-8", errors="replace")
+        process = subprocess.Popen(
+            command,
+            stdout=sink if sink is not None else subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, errors="replace",
+            start_new_session=True, env=env, creationflags=config.subprocess_flags())
     except OSError as exc:
+        if sink is not None:
+            sink.close()
         return False, str(exc)
     try:
-        process.wait(timeout=_START_GRACE_SECONDS)
+        code = process.wait(timeout=_START_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
+        return True, ""
+    finally:
+        # The child has its own copy of the descriptor; ours is not needed either way.
+        if sink is not None:
+            sink.close()
+    if code == 0:
         return True, ""
     output = ""
     with contextlib.suppress(Exception):
-        output = (process.stdout.read() or "").strip() if process.stdout else ""
-    first = next((line for line in output.splitlines() if line.strip()), "")
-    return False, first[:200]
+        if log_to is not None:
+            output = log_to.read_text(encoding="utf-8", errors="replace").strip()
+        elif process.stdout:
+            output = (process.stdout.read() or "").strip()
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return False, f"It exited with code {code}."
+    # The first line that reads as a failure, else the first line. Neither end alone
+    # works: an AppImage without FUSE says what is wrong first and "for more
+    # information" last, while Hermes's launcher announces what it is about to do
+    # before the line marked ✗ that says why it could not.
+    failure = next((line for line in lines
+                    if line.startswith("✗") or "error" in line.lower() or "fail" in line.lower()),
+                   lines[0])
+    return False, failure[:200]
 
 
 # An endpoint of our own in Hermes's `providers:` map, rather than its built-in
