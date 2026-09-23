@@ -356,6 +356,29 @@ def venv_dir() -> Path:
     return data_dir() / "service" / ".venv"
 
 
+def wheel_cuda_home() -> Path | None:
+    """The CUDA toolkit the cuda extra installs as pip packages, or None.
+
+    vLLM compiles kernels on first use -- flashinfer's sampling kernels, among others
+    -- and finds nvcc through CUDA_HOME, defaulting to /usr/local/cuda. This product
+    installs no system toolkit and needs none: the extra pins nvidia-cuda-nvcc and
+    friends, and setup_env already builds against them by pointing CUDA_HOME here. The
+    service was never told, so on a machine with only a driver -- most of them -- every
+    vLLM load stopped at "Could not find nvcc and default cuda_home='/usr/local/cuda'
+    doesn't exist". Measured on the Linux VM.
+
+    Found by where nvcc is, the way setup_env finds it: the directory name carries the
+    CUDA major (nvidia/cu13), which a rebuilt environment may change.
+    """
+    if IS_WINDOWS:
+        return None
+    try:
+        nvcc = next(venv_dir().glob("lib/python*/site-packages/nvidia/*/bin/nvcc"), None)
+    except OSError:
+        return None
+    return nvcc.parent.parent if nvcc is not None else None
+
+
 def hf_home() -> Path:
     """Model cache. Left in the conventional location so it is shared with any other
     Hugging Face tooling the user already has, and so uninstalling can offer to keep

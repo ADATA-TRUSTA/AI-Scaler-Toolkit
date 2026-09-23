@@ -402,6 +402,18 @@ class ServiceManager:
         merged = os.environ.copy()
         merged.update({k: v for k, v in env.items() if v})
 
+        # The pip-installed CUDA toolkit, for vLLM's first-use kernel compilation --
+        # see config.wheel_cuda_home. In the environment rather than the .env: it is
+        # worked out from the disk on every start, so a rebuilt environment with a
+        # different CUDA major cannot leave a stale path behind, which a key written
+        # once and never rewritten would. A CUDA_HOME someone set, in either place,
+        # wins.
+        cuda_home = config.wheel_cuda_home()
+        if cuda_home is not None and not merged.get("CUDA_HOME"):
+            merged["CUDA_HOME"] = str(cuda_home)
+            merged["PATH"] = str(cuda_home / "bin") + os.pathsep + merged.get("PATH", "")
+            log.info("CUDA_HOME=%s (the toolkit the cuda extra installed)", cuda_home)
+
         # Its output goes to a file, not to nowhere. Discarding it meant a service that
         # failed to start left no explanation at all.
         config.log_dir().mkdir(parents=True, exist_ok=True)
