@@ -263,13 +263,25 @@ def interface_size(compact: bool) -> tuple[int, int]:
 DONE_PAUSE_SECONDS = 2.2
 
 # Injected into every page the window loads, so the interface can tell the window to
-# change shape without knowing anything about how the window is implemented.
+# change shape, and open this application's settings, without knowing anything about
+# how the window is implemented.
+#
+# The event goes last. These are installed on the window's loaded event, which is after
+# the interface has rendered: a hook the page only ever calls can be looked up when it
+# is called, but the settings button decides whether to be drawn at all, so it has to be
+# told when the hook arrives. A browser never sends it, and never shows the button.
 HOST_HOOK = """
 window.__hostViewChange = function (compact) {
   if (window.pywebview && window.pywebview.api && window.pywebview.api.set_compact) {
     window.pywebview.api.set_compact(!!compact);
   }
 };
+window.__hostOpenSettings = function () {
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.open_settings) {
+    window.pywebview.api.open_settings();
+  }
+};
+window.dispatchEvent(new Event("hostready"));
 """
 
 log = applog.get("main")
@@ -357,6 +369,14 @@ class WindowApi:
     def set_compact(self, compact: bool) -> None:
         """The interface hid or showed its chat panel; match the window to it."""
         self._launcher.set_compact(compact)
+
+    def open_settings(self) -> None:
+        """The interface's settings button: the same window as the tray's Settings.
+
+        One window, not a second copy of it: open_settings raises the one already
+        open rather than stacking another, whichever of the two asked.
+        """
+        self._launcher.open_settings()
 
 
 class SettingsApi:
