@@ -360,6 +360,34 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phas
     return accelerator
 
 
+# What setup's tools print when the network is what failed -- uv, curl.exe, the
+# PowerShell cmdlets and Python's urllib, in their own words. Matched in the output of
+# a failed run, so a connection lost halfway through setup is told as that rather than
+# as a wall of log; the check before setup covers the machine that was never online.
+_NETWORK_MARKERS = (
+    "failed to download",
+    "request failed after",
+    "error sending request",
+    "dns error",
+    "failed to lookup address",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "could not resolve host",
+    "the remote name could not be resolved",
+    "no such host is known",
+    "network is unreachable",
+    "connection timed out",
+    "the operation has timed out",
+    "connection refused",
+    "connection reset",
+)
+
+
+def looks_like_network_failure(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _NETWORK_MARKERS)
+
+
 def is_provisioned() -> bool:
     """Trust the recorded flag, but only alongside the artefacts it claims exist."""
     if not state.get("provisioned"):

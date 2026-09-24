@@ -29,6 +29,7 @@ from . import (
     browser,
     components,
     config,
+    connectivity,
     env_file,
     firewall,
     hardening,
@@ -364,8 +365,19 @@ class WindowApi:
         self._launcher.reload_window()
 
     def close_unsupported(self) -> None:
-        """Exit, for the screen that says this machine cannot run it."""
+        """Exit, for the screen that says this machine cannot run it -- or cannot
+        finish setting it up."""
         self._launcher.quit()
+
+    def open_log(self) -> None:
+        """The setup log, in whatever this desktop opens a text file with.
+
+        Off the bridge's thread, since a desktop's opener can take its time; and not
+        through _open_url_async, whose fallback tells the user where the interface is
+        running, which is not what they asked for here."""
+        uri = (config.log_dir() / "provision.log").as_uri()
+        threading.Thread(target=browser.open_url, args=(uri,), name="open-log",
+                         daemon=True).start()
 
     def set_compact(self, compact: bool) -> None:
         """The interface hid or showed its chat panel; match the window to it."""
@@ -1077,7 +1089,7 @@ class Launcher:
             log.info("repair: finished")
         except Exception as exc:
             log.exception("repair failed")
-            self._js(f"window.showError({_js_string(str(exc))})")
+            self._present_bootstrap_failure(exc, setting_up=True)
 
     def _service_lost(self, detail: str) -> None:
         """The backend went away after it had started.
@@ -1089,7 +1101,8 @@ class Launcher:
         log.warning("service lost: %s", detail)
         message = (
             f"The backend service stopped ({detail}).\n\n"
-            "Use “Restart backend” in the tray menu to bring it back. "
+            "Close this window, then choose Open window from the tray icon to start "
+            "it again. "
             f"What it printed before stopping is in {config.log_dir() / 'service.log'}."
         )
         self._js(f"window.showError({_js_string(message)})")
@@ -1157,6 +1170,46 @@ class Launcher:
             f"{'true' if self._unsupported else 'false'})"
         )
 
+    def _present_failure(self, title: str, message: str, log_text: str = "",
+                         can_open_log: bool = False) -> None:
+        """Say that this cannot go on, in words, and make closing the window exit.
+
+        Exit, not hide: after a failed setup there is no service for the tray to keep,
+        and a window that hides itself to the tray looks like one that is still at it.
+        """
+        self._unsupported = True
+        self._js("window.showFailure(" + ", ".join((
+            _js_string(title), _js_string(message), _js_string(log_text),
+            "true" if can_open_log else "false")) + ")")
+
+    def _present_bootstrap_failure(self, exc: Exception, setting_up: bool) -> None:
+        """Route a failure to the words that fit it.
+
+        The exception's text is the log's tail, which is the right thing to keep and
+        the wrong thing to lead with: a lost connection read as a GitHub URL and
+        "Request failed after 3 retries".
+        """
+        text = str(exc)
+        first, _, rest = text.partition("\n")
+        detail = rest.strip() or first
+        if setting_up and provision.looks_like_network_failure(text):
+            self._present_failure(
+                "Setup could not download what it needs",
+                "The internet connection dropped, or a firewall or proxy blocked a "
+                "download. Nothing finished is lost: the next start carries on from "
+                "where this one stopped. Check the connection, then open AI Scaler "
+                "Toolkit again.",
+                detail, can_open_log=True)
+        elif setting_up:
+            self._present_failure(
+                "Setup did not finish",
+                "What it printed last is below, and all of it is in the setup log. "
+                "The next start carries on from where this one stopped.",
+                detail, can_open_log=True)
+        else:
+            self._present_failure("AI Scaler Toolkit could not start", first,
+                                  rest.strip())
+
     def _choose_port(self, requested: int, suggested: int) -> int:
         """Ask rather than move quietly.
 
@@ -1206,6 +1259,15 @@ class Launcher:
             started_at = time.monotonic()
 
             if not provisioned:
+                # Before anything is downloaded, and before setup counts as started:
+                # a machine with no connection is told so in a sentence and closes,
+                # rather than failing eight seconds in with uv's log on screen.
+                self._set_step("Checking the internet connection", None, "", 0)
+                reach = connectivity.check()
+                if not reach.ok:
+                    self._present_failure(*connectivity.explain(reach))
+                    return
+
                 # A previous attempt that started and never finished. Nothing is lost
                 # -- setup_env installs only what is missing, so the finished parts go
                 # past in seconds -- but silence about it is what makes a resumed run
@@ -1327,7 +1389,7 @@ class Launcher:
             log.info("bootstrap: setup was cancelled by quitting")
         except Exception as exc:
             log.exception("bootstrap failed")
-            self._js(f"window.showError({_js_string(str(exc))})")
+            self._present_bootstrap_failure(exc, setting_up=not provision.is_provisioned())
 
     # ------------------------------------------------------------------ tray
 

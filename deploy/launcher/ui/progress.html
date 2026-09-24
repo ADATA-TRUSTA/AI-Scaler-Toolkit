@@ -117,6 +117,25 @@
            border: 1px solid #d9534f; color: #d9534f; font-size: 13.5px;
            white-space: pre-wrap; max-height: 240px; overflow: auto; user-select: text; }
   #error.show { display: block; }
+
+  /* Setup that cannot go on. Everything that reads as still working is stopped --
+     the bar, the timers, "you can leave this running" -- because a failure eight
+     seconds in went on looking like a setup in progress for as long as the window
+     stayed open. What is left says what happened in words, shows the log only when
+     the log is the explanation, and offers the one way out. */
+  .track.failed { background: color-mix(in srgb, #d9534f 18%, transparent); }
+  .track.failed .fill { width: 0; animation: none; }
+  #failure { display: none; margin-top: 18px; }
+  #failure.show { display: block; }
+  #failure-message { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; }
+  #failure-log { margin: 12px 0 0; padding: 12px 14px; border-radius: 9px;
+                 border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+                 color: var(--muted); font: 12px/1.5 ui-monospace, Consolas, monospace;
+                 white-space: pre-wrap; max-height: 180px; overflow: auto; user-select: text; }
+  #failure .actions { display: flex; gap: 10px; }
+  #failure .actions button { margin-top: 18px; }
+  button.secondary { background: transparent; color: var(--fg);
+                     border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent); }
 </style>
 
 <main>
@@ -169,6 +188,15 @@
   </div>
 
   <div id="error"></div>
+
+  <div id="failure">
+    <p id="failure-message"></p>
+    <pre id="failure-log" hidden></pre>
+    <div class="actions">
+      <button type="button" id="close-app">Close</button>
+      <button type="button" class="secondary" id="open-log" hidden>Open log</button>
+    </div>
+  </div>
 </main>
 
 <script>
@@ -202,11 +230,44 @@
     return m > 0 ? m + "m " + (s < 10 ? "0" : "") + s + "s" : s + "s";
   }
 
+  // Set once setup has failed: nothing on the page may go on counting after that.
+  var stopped = false;
+
   setInterval(function () {
     var el = document.getElementById("total-elapsed");
-    if (document.getElementById("done").classList.contains("show")) { return; }
+    if (stopped || document.getElementById("done").classList.contains("show")) { return; }
     el.textContent = clock(Math.floor((Date.now() - startedAt) / 1000)) + " elapsed";
   }, 1000);
+
+  function hostCall(name) {
+    if (window.pywebview && window.pywebview.api && window.pywebview.api[name]) {
+      window.pywebview.api[name]();
+    }
+  }
+
+  // Setup that cannot go on: the title in place of the step, a message in words, the
+  // log only when it is the explanation, and Close -- which exits, because nothing
+  // is left running that the tray could offer.
+  window.showFailure = function (title, message, logText, canOpenLog) {
+    stopped = true;
+    document.getElementById("step-name").textContent = title || "Setup stopped";
+    document.getElementById("step-detail").textContent = "";
+    document.getElementById("elapsed").textContent = "";
+    document.getElementById("total-elapsed").textContent = "";
+    var track = document.getElementById("track");
+    track.classList.remove("indeterminate");
+    track.classList.add("failed");
+    document.getElementById("note").hidden = true;
+    document.getElementById("failure-message").textContent = message || "";
+    var logEl = document.getElementById("failure-log");
+    logEl.textContent = logText || "";
+    logEl.hidden = !logText;
+    document.getElementById("open-log").hidden = !canOpenLog;
+    document.getElementById("failure").classList.add("show");
+  };
+
+  document.getElementById("close-app").onclick = function () { hostCall("close_unsupported"); };
+  document.getElementById("open-log").onclick = function () { hostCall("open_log"); };
 
   window.setPhases = function (items) {
     // Being given steps is what makes this a setup screen rather than a splash.
