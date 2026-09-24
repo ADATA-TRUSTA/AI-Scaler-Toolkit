@@ -135,12 +135,16 @@ def terminate_pid(pid: int) -> bool:
         # the backend spawned (llama-server, vLLM) go with it rather than being
         # reparented and left holding the GPU.
         #
-        # Never to our own group, which would take this launcher with it. That is not
-        # hypothetical: a service started by a previous launcher from the same shell
-        # inherits that group, and the launcher started next in it shares it.
+        # Only when the service leads that group, which a service this launcher
+        # spawned does (start_new_session). Otherwise the group is whoever started
+        # the launcher's, and it is not ours to signal: a service from a launcher
+        # that autostarted at login shares gnome-session's group, and signalling it
+        # took the whole desktop session down with it -- the user logged out, seen on
+        # the Linux test VM when an upgrade restarted a service an older launcher had
+        # started. That service gets the signal alone, and stops its own engines.
         try:
             group: int | None = os.getpgid(pid)
-            if group == os.getpgid(0):
+            if group != pid or group == os.getpgid(0):
                 group = None
         except OSError:
             group = None
@@ -332,6 +336,9 @@ class ServiceManager:
             stdout=self._log_handle,
             stderr=subprocess.STDOUT,
             creationflags=config.subprocess_flags(),
+            # Its own process group, so that terminate_pid can stop it together with
+            # the engines it spawns and nothing else -- see there.
+            start_new_session=not config.IS_WINDOWS,
         )
 
     def status(self) -> PortStatus:
