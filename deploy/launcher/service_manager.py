@@ -340,6 +340,7 @@ class ServiceManager:
             # the engines it spawns and nothing else -- see there.
             start_new_session=not config.IS_WINDOWS,
         )
+        state.set("service_version", config.app_version())
 
     def status(self) -> PortStatus:
         return probe(self.port)

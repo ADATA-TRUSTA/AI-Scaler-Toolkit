@@ -54,10 +54,11 @@ SetupIconFile={#PayloadDir}\app.ico
 ; rolls back -- so installing an update while the application was running did nothing
 ; at all, and under /VERYSILENT it did nothing silently.
 ;
-; force closes it rather than asking. The backend is a separate process and survives,
-; which is the wanted outcome twice over: models stay loaded for whatever else is
-; using them, and the newly installed launcher adopts the running service on its next
-; start rather than waiting for a port it cannot have.
+; force closes it rather than asking. Closed this way the launcher shuts down as on
+; Quit, stopping a backend it started; one it had adopted from an earlier launcher is
+; not its to stop and keeps running. The next launcher restarts that one if an older
+; version started it (service_version in the launcher's state), so an update always
+; ends with the new backend running and never the old one.
 CloseApplications=force
 ; Setup does not relaunch it. A launcher that reappears by itself after an install the
 ; user ran from Explorer is a surprise; the shortcut is right there.
@@ -218,13 +219,120 @@ end;
 
 const
   RequiredGB = 10;
+  UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{8B1C5E42-3D7A-4C19-9F2B-6A5E4D3C1B70}_is1';
+
+var
+  // The version already installed, or '' on a first install.
+  PreviousVersion: String;
+
+function InstalledVersion(): String;
+begin
+  // HKCU is where a per-user install registers itself. HKLM only in case an install
+  // was ever made elevated, which would register there instead.
+  if not RegQueryStringValue(HKCU, UninstallKey, 'DisplayVersion', Result) then
+    if not RegQueryStringValue(HKLM, UninstallKey, 'DisplayVersion', Result) then
+      Result := '';
+end;
+
+// The next dotted number from S, removed from S along with its dot. A part that is
+// not a number counts as 0, so "0.4.13-rc1" compares as 0.4.13 and never throws.
+function NextVersionPart(var S: String): Integer;
+var
+  Dot: Integer;
+  Part: String;
+begin
+  Dot := Pos('.', S);
+  if Dot = 0 then
+  begin
+    Part := S;
+    S := '';
+  end
+  else
+  begin
+    Part := Copy(S, 1, Dot - 1);
+    Delete(S, 1, Dot);
+  end;
+  Dot := Pos('-', Part);
+  if Dot > 0 then
+    Part := Copy(Part, 1, Dot - 1);
+  Result := StrToIntDef(Trim(Part), 0);
+end;
+
+// Negative when A is older than B, 0 when the same, positive when newer.
+function CompareVersions(A, B: String): Integer;
+var
+  PartA, PartB: Integer;
+begin
+  Result := 0;
+  while (Result = 0) and ((A <> '') or (B <> '')) do
+  begin
+    PartA := NextVersionPart(A);
+    PartB := NextVersionPart(B);
+    Result := PartA - PartB;
+  end;
+end;
+
+// Installing over an existing install replaces the program files and nothing else:
+// the environment, the models and the settings live outside the program directory
+// and stay. It used to happen without a word -- the same version reinstalled, an
+// older one downgraded -- so each case is now said once, before anything changes.
+//
+// Silent installs (the updater, CI) ask nothing: the same or a newer version goes
+// ahead, and an older one stops, because nothing unattended should downgrade.
+function ConfirmOverExistingInstall(): Boolean;
+var
+  Order: Integer;
+  Kept: String;
+begin
+  Result := True;
+  PreviousVersion := InstalledVersion();
+  if PreviousVersion = '' then
+    Exit;
+
+  Order := CompareVersions('{#AppVersion}', PreviousVersion);
+  Log('installed version ' + PreviousVersion + ', this setup {#AppVersion}');
+  if WizardSilent then
+  begin
+    Result := Order >= 0;
+    if not Result then
+      Log('not downgrading in a silent install; stopping');
+    Exit;
+  end;
+
+  Kept := 'Your models, settings and the downloaded GPU runtime are kept.';
+  if Order = 0 then
+    Result := MsgBox(
+      'AI Scaler Toolkit {#AppVersion} is already installed.' + #13#10#13#10 +
+      'Reinstall its program files? ' + Kept,
+      mbConfirmation, MB_YESNO) = IDYES
+  else if Order > 0 then
+    Result := MsgBox(
+      'AI Scaler Toolkit will be updated from ' + PreviousVersion +
+      ' to {#AppVersion}.' + #13#10#13#10 + Kept,
+      mbInformation, MB_OKCANCEL) = IDOK
+  else
+    Result := MsgBox(
+      'A newer version of AI Scaler Toolkit (' + PreviousVersion +
+      ') is already installed.' + #13#10#13#10 +
+      'Replace it with the older {#AppVersion}? Keep the newer one unless you ' +
+      'know you need this version.',
+      mbError, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  // The license was accepted when it was first installed.
+  Result := (PageID = wpLicense) and (PreviousVersion <> '');
+end;
 
 function InitializeSetup(): Boolean;
 var
   FreeBytes, TotalBytes: Int64;
   FreeGB: Integer;
 begin
-  Result := True;
+  Result := ConfirmOverExistingInstall();
+  if not Result then
+    Exit;
   // Setup itself is small; what needs room is the first launch. Saying so before
   // the install is more useful than failing partway through a download.
   //

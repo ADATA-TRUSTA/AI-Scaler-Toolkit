@@ -62,6 +62,10 @@ DEFAULTS: dict[str, Any] = {
     # starter_model.py. Set once and never cleared, so a model the user deletes stays
     # deleted instead of coming back on the next start.
     "starter_model": None,
+    # The application version that started the running service. A service outlives
+    # the launcher and is adopted by the next one; after an update that would be the
+    # old backend going on under a new application, so a mismatch restarts it.
+    "service_version": None,
 }
 
 

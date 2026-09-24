@@ -1254,9 +1254,19 @@ class Launcher:
             # while /health goes on answering "healthy" -- a backend that reports
             # itself fine and cannot load a model. Replacing it is also simply
             # correct: an upgrade should leave the new backend running, not the old.
-            if config.payload_was_refreshed() and self.service.status() == "ours":
-                log.info("the payload was replaced under a running service; "
-                         "restarting it on the new one")
+            # By version as well: the payload counts as refreshed only in the first
+            # run after an upgrade, and a run that ends before getting here -- closed
+            # during startup, or closed by the next installer -- left the following
+            # one adopting the old backend. The version it was started by does not
+            # forget.
+            started_by = state.get("service_version")
+            if ((config.payload_was_refreshed() or started_by != config.app_version())
+                    and self.service.status() == "ours"):
+                log.info("the running service was started by %s (this is %s)%s; "
+                         "restarting it on the new one", started_by or "an older launcher",
+                         config.app_version(),
+                         ", and the payload was replaced under it"
+                         if config.payload_was_refreshed() else "")
                 self._set_step("Restarting the service", None,
                                "the update replaced it", 0)
                 with contextlib.suppress(Exception):
