@@ -36,6 +36,13 @@ LAUNCHER_PYTHON="${LAUNCHER_PYTHON:-3.12}"
 # to build from a layout elsewhere was to overwrite the repository's own.
 LAYOUT="${TRUSTA_LAYOUT:-$REPO_ROOT}"
 
+# OpenPGP key to embed a signature with, by fingerprint. Unset builds an unsigned
+# AppImage, which is what a developer without the release key gets. Signing happens
+# here and not afterwards because appimagetool can only sign while it writes the file.
+# Whatever gpg needs to reach the key (GNUPGHOME, an open token session) is the
+# caller's business; nothing about the release key lives in this repository.
+SIGN_KEY="${SIGN_KEY:-}"
+
 BUILD_DIR="$REPO_ROOT/build/appimage"
 APPDIR="$BUILD_DIR/AppDir"
 OUT_DIR="$REPO_ROOT/dist-unsigned"
@@ -234,11 +241,24 @@ main() {
   # byte-for-byte the same either way.
   export APPIMAGE_EXTRACT_AND_RUN=1
 
+  local sign_args=()
+  if [[ -n "$SIGN_KEY" ]]; then
+    require gpg
+    sign_args=(--sign --sign-key "$SIGN_KEY")
+  fi
+
   local target="$OUT_DIR/${APP_ID}-${VERSION}-x86_64.AppImage"
-  log "packaging -> $target"
-  ARCH=x86_64 "$tool" "$APPDIR" "$target"
+  log "packaging -> $target${SIGN_KEY:+ (signed with $SIGN_KEY)}"
+  ARCH=x86_64 "$tool" "${sign_args[@]}" "$APPDIR" "$target"
   [[ -f "$target" ]] || die "appimagetool reported success but produced no file"
   chmod +x "$target"
+  # A signing failure inside appimagetool is not always fatal to it, so the signature
+  # is checked for rather than assumed. Without APPIMAGE_EXTRACT_AND_RUN, which is set
+  # above for appimagetool's sake: with it, the runtime hands --appimage-signature to
+  # the launcher as an ordinary argument instead of answering it, and prints nothing.
+  if [[ -n "$SIGN_KEY" ]] && [[ -z "$(env -u APPIMAGE_EXTRACT_AND_RUN "$target" --appimage-signature 2>/dev/null | tr -d '\0[:space:]')" ]]; then
+    die "SIGN_KEY is set but $target carries no signature"
+  fi
   log "done: $(du -h "$target" | cut -f1) $target"
 }
 

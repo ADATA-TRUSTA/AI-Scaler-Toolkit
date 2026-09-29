@@ -75,14 +75,20 @@ def find_iscc() -> Path | None:
     return local if local.is_file() else None
 
 
-def compile_installer(iscc: Path, script: Path, payload: Path, version: str, out_dir: Path) -> Path:
+def compile_installer(iscc: Path, script: Path, payload: Path, version: str, out_dir: Path,
+                      sign_command: str | None = None) -> Path:
     command = [
         str(iscc),
         f"/DPayloadDir={payload}",
         f"/DAppVersion={version}",
         f"/O{out_dir}",
-        str(script),
     ]
+    if sign_command:
+        # Inno runs this for Setup.exe and for the uninstaller it embeds, with $f
+        # replaced by the file to sign. The name is arbitrary; the script only
+        # needs the two to agree.
+        command += ["/DSignToolName=release", f"/Srelease={sign_command}"]
+    command.append(str(script))
     print(f"[installer] {' '.join(command)}")
 
     for attempt in range(1, ATTEMPTS + 1):
@@ -110,6 +116,9 @@ def main() -> int:
     parser.add_argument("--out", default=str(DEPLOY_DIR / "build" / "installer"),
                         help="where to put the built installer")
     parser.add_argument("--script", default=str(DEPLOY_DIR / "windows" / "installer.iss"))
+    parser.add_argument("--sign-command",
+                        help="command Inno runs to sign Setup.exe and the uninstaller, with $f "
+                             "for the file; omitted, nothing is signed")
     args = parser.parse_args()
 
     iscc = find_iscc()
@@ -132,7 +141,7 @@ def main() -> int:
     out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    built = compile_installer(iscc, script, payload, args.version, out_dir)
+    built = compile_installer(iscc, script, payload, args.version, out_dir, args.sign_command)
     print(f"[installer] built {built} ({built.stat().st_size / 1024 / 1024:.1f} MB)")
     return 0
 

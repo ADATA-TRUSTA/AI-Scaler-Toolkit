@@ -65,6 +65,16 @@ CloseApplications=force
 RestartApplications=no
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#LauncherExe}
+; unins000.exe is written by Inno at compile time, from inside this script, so no
+; signing step outside it can reach it; left alone it is the one unsigned program we
+; install, and removing the application meets an "unknown publisher" prompt. Signing
+; it needs a sign tool, which only the release build has: it passes
+; /DSignToolName=<name> together with /S<name>=<command>. Without them the build is
+; unsigned throughout, as a developer's should be.
+#ifdef SignToolName
+SignTool={#SignToolName}
+SignedUninstaller=yes
+#endif
 ; The installer carries only the base. The GPU runtime is fetched on first launch, so
 ; this stays a small download instead of a 6 GB one.
 AppComments=GPU runtime is downloaded on first launch, not bundled.
