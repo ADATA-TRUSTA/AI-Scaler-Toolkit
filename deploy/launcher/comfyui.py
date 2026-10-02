@@ -568,20 +568,69 @@ def busy() -> bool:
     return bool(queue.get("queue_running") or queue.get("queue_pending"))
 
 
-def _launch_command(device: Device) -> tuple[list[str], dict[str, str]]:
-    command = [str(env_python(device.backend)), "main.py",
-               "--listen", HOST, "--port", str(PORT), "--disable-auto-launch"]
-    env = {**os.environ, "PYTHONUNBUFFERED": "1", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+def _device_args(device: Device) -> tuple[list[str], dict[str, str]]:
+    """What puts ComfyUI on this device: its arguments, and the environment for them.
+
+    Separate from the host and port because it is also what selected.json hands the
+    skills, which launch ComfyUI themselves on a port and with a reserve of their own.
+    """
+    env = {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
     if device.backend == "cuda":
-        command += ["--cuda-device", str(device.index)]
-    elif device.backend == "xpu":
+        return ["--cuda-device", str(device.index)], env
+    if device.backend == "xpu":
         # ComfyUI's --cuda-device does not reach Level Zero; this does. Only set when
         # it narrows something, so a single-GPU machine runs with stock settings.
         if sum(1 for d in devices() if d.backend == "xpu") > 1:
             env["ONEAPI_DEVICE_SELECTOR"] = f"level_zero:{device.index}"
-    else:
-        command.append("--cpu")
-    return command, env
+        return [], env
+    return ["--cpu"], env
+
+
+def _launch_command(device: Device) -> tuple[list[str], dict[str, str]]:
+    args, device_env = _device_args(device)
+    command = [str(env_python(device.backend)), "main.py",
+               "--listen", HOST, "--port", str(PORT), "--disable-auto-launch", *args]
+    return command, {**os.environ, "PYTHONUNBUFFERED": "1", **device_env}
+
+
+def selection_path() -> Path:
+    return home() / "selected.json"
+
+
+def write_selection(device: Device) -> None:
+    """Tell the image and video skills which device was picked, and how to use it.
+
+    They launch ComfyUI themselves -- the --reserve-vram that protects the hosted LLM
+    only exists if they do -- so they need what this card knows: which environment's
+    Python, which arguments put it on the chosen card, and which card to measure.
+    Without it they guess, and guessed wrong: they started ComfyUI on the NVIDIA card
+    after Intel had been picked here, and measured the NVIDIA card while ComfyUI ran
+    on Intel.
+
+    Written beside the install, replaced whole so a reader never sees half of it.
+    """
+    args, env = _device_args(device)
+    payload = {
+        "schema": 1,
+        "comfy_home": str(home()),
+        "comfy_root": str(source_dir()),
+        "python": str(env_python(device.backend)),
+        "device": device.id,
+        "backend": device.backend,
+        "vendor": device.vendor,
+        "index": device.index,
+        "name": device.name,
+        "args": args,
+        "env": env,
+        "written": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    target = selection_path()
+    partial = target.with_suffix(".json.partial")
+    try:
+        partial.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        partial.replace(target)
+    except OSError:
+        log.exception("could not write %s", target)
 
 
 def stop(timeout: float = 15) -> None:
@@ -633,6 +682,7 @@ def launch(device: Device) -> tuple[bool, str]:
         with _proc_lock:
             _process, _running_device = process, device
         state.set("comfyui_device", device.id)
+        write_selection(device)
         return True, ""
     tail = _log_tail()
     return False, f"ComfyUI exited at once (code {code})." + (f"\n{tail}" if tail else "")
