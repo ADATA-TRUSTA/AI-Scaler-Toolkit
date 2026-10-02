@@ -750,8 +750,11 @@ class SettingsApi:
             comfyui.devices(refresh=True)
         return comfyui.describe()
 
-    def comfyui_start(self, device_id: str, force: bool = False) -> dict[str, Any]:
-        ok, message, kind = components.run_comfyui(str(device_id), force=bool(force))
+    def comfyui_start(self, device_id: str, force: bool = False,
+                      take_over: bool = False) -> dict[str, Any]:
+        """take_over replaces another ComfyUI on the port; the page asks before it."""
+        ok, message, kind = components.run_comfyui(str(device_id), force=bool(force),
+                                                   take_over=bool(take_over))
         return {"ok": ok, "installing": message == "installing",
                 "error": "" if ok else message, "kind": kind,
                 # Refused because a queue is running, which the page may override.

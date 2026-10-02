@@ -260,6 +260,16 @@
   .comfy-status.warn { color: var(--warn); }
   .comfy-status.err { color: var(--err); }
   .comfy-status a { color: var(--accent); cursor: pointer; }
+  .stage-bar { display: flex; gap: 4px; margin-top: 8px; }
+  .stage-bar span {
+    flex: 1; height: 6px; border-radius: 99px;
+    background: color-mix(in srgb, var(--faint) 30%, transparent);
+  }
+  .stage-bar span.done { background: var(--accent); }
+  .stage-bar span.now { background: color-mix(in srgb, var(--accent) 45%, transparent);
+    animation: stage-pulse 1.2s ease-in-out infinite; }
+  @keyframes stage-pulse { 50% { opacity: 0.45; } }
+  @media (prefers-reduced-motion: reduce) { .stage-bar span.now { animation: none; } }
 
   pre.log {
     margin: 12px 0 0; padding: 12px 14px; max-height: 220px; overflow: auto;
@@ -677,6 +687,11 @@
     // What the main button says is what pressing it will do, so it changes with the
     // row: start, switch (a restart onto another card), or install first.
     function startLabel(d, st) {
+      // Another ComfyUI on the port is replaced the same way ours is on a switch: a
+      // restart, asked about first. It used to grey the button out with "close it
+      // first", which read as a button that had stopped working.
+      if (st.phase === "foreign") { return d.installed ? "Restart on this card"
+                                                       : "Install and restart"; }
       var running = st.phase === "running" || st.phase === "starting";
       if (!d.installed) { return running ? "Install and switch" : "Install and start"; }
       if (running && st.device_id === d.id) { return "Restart"; }
@@ -690,12 +705,24 @@
           " at " + escapeHtml(st.url) + (comfy.busy ? " — working on a queue" : "") + "</div>";
       }
       if (st.phase === "starting") {
+        // One segment per thing ComfyUI does on its way up, filled as its log says
+        // each one happened. Not a timer: start-up takes twenty seconds on one card
+        // and seventy on another, and a bar driven by a guess lies on one of them.
+        var total = st.stages || 1;
+        var segs = "";
+        for (var i = 0; i < total; i++) {
+          segs += '<span class="' + (i < st.stage ? "done" : i === st.stage ? "now" : "") +
+                  '"></span>';
+        }
         return '<div class="comfy-status">Starting on ' + escapeHtml(st.device_name) +
-          "… this takes about twenty seconds.</div>";
+          ": " + escapeHtml(st.stage_label || "Starting") + "… (" + (st.stage + 1) +
+          " of " + total + ")</div>" +
+          '<div class="stage-bar" role="progressbar" aria-valuemin="0" aria-valuemax="' +
+          total + '" aria-valuenow="' + st.stage + '">' + segs + "</div>";
       }
       if (st.phase === "foreign") {
         return '<div class="comfy-status warn">Another ComfyUI is already using ' +
-          escapeHtml(st.url) + ". Close it to start this one.</div>";
+          escapeHtml(st.url) + ". Restarting closes it and starts this one.</div>";
       }
       return '<div class="comfy-status">Not running.</div>';
     }
@@ -722,7 +749,7 @@
         actions = '<button disabled>Installing…</button>';
       } else {
         actions = '<button class="' + (sameAsRunning ? "" : "primary") + '" id="comfy-start"' +
-          ((!chosen || !chosen.usable || otherJob || st.phase === "foreign") ? " disabled" : "") +
+          ((!chosen || !chosen.usable || otherJob) ? " disabled" : "") +
           ">" + escapeHtml(chosen ? startLabel(chosen, st) : "Start") + "</button>";
       }
       if (running && !installing) { actions += '<button id="comfy-stop">Stop</button>'; }
@@ -810,18 +837,28 @@
       }, 1500);
     }
 
-    function comfyStart(force) {
+    function comfyStart(force, takeOver) {
+      var foreign = comfy && comfy.status.phase === "foreign";
+      if (foreign && !takeOver) {
+        // Not ours, so asked about by name: it may be the image skills' own server,
+        // and closing it stops whatever it is doing.
+        if (!window.confirm("Another ComfyUI is running at " + comfy.status.url +
+                            ". Close it and start ComfyUI on the selected card?")) {
+          return;
+        }
+        takeOver = true;
+      }
       var button = el("comfy-start");
       if (button) { button.disabled = true; }
       say("comfyui", "", "");
-      api.comfyui_start(comfySelected, !!force).then(function (r) {
+      api.comfyui_start(comfySelected, !!force, !!takeOver).then(function (r) {
         if (!r.ok) {
           if (r.busy) {
             // Not refused for good: switching now throws away what is rendering, and
             // that is the user's call to make with the facts in front of them.
             if (window.confirm(r.error + "\n\nSwitch anyway? What it is working on " +
                                "will be lost.")) {
-              comfyStart(true);
+              comfyStart(true, takeOver);
               return;
             }
           }

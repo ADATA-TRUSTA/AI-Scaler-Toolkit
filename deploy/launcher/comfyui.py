@@ -538,6 +538,34 @@ def _log_tail(lines: int = 12) -> str:
     return ""
 
 
+# What ComfyUI prints as it comes up, in order, and what each one means it has done.
+# Read back from its log to draw the start-up bar: there is no progress to ask for,
+# but these lines appear on every start, so each step on the bar is a thing that has
+# actually happened rather than a guess at elapsed time. That guess said "about
+# twenty seconds", which was true on the NVIDIA card and is seventy on the Intel one.
+START_STAGES = (
+    ("", "Starting Python"),
+    ("Total VRAM", "Loading PyTorch"),
+    ("Device:", "Setting up the device"),
+    ("Import times for custom nodes", "Loading custom nodes"),
+    ("Starting server", "Starting the server"),
+)
+
+
+def _start_stage() -> int:
+    """How many of START_STAGES are done, by the markers in the log so far."""
+    try:
+        text = log_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    done = 0
+    for marker, _label in START_STAGES[1:]:
+        if marker not in text:
+            break
+        done += 1
+    return done
+
+
 def status() -> dict:
     """What is on the port, and whether it is the one this application started."""
     ours = _ours_alive()
@@ -551,12 +579,18 @@ def status() -> dict:
         phase = "foreign"   # something else answers as ComfyUI: Desktop, a portable copy
     else:
         phase = "stopped"
+    stage = _start_stage() if phase == "starting" else 0
     return {
         "phase": phase,
         "url": url(),
         "device_id": device.id if device else "",
         "device_name": device.name if device else "",
         "log": str(log_path()),
+        # The stage in progress (0-based) and how many there are; the bar is full
+        # once the port answers, which is the one sign of being ready.
+        "stage": stage,
+        "stages": len(START_STAGES),
+        "stage_label": START_STAGES[stage][1] if phase == "starting" else "",
     }
 
 
@@ -649,9 +683,71 @@ def stop(timeout: float = 15) -> None:
             process.wait(timeout=5)
 
 
-def launch(device: Device) -> tuple[bool, str]:
+def _port_listener() -> int | None:
+    """The process listening on ComfyUI's port, by asking the system's own table."""
+    if config.IS_WINDOWS:
+        out = _run(["netstat", "-ano", "-p", "tcp"]) or ""
+        for line in out.splitlines():
+            parts = line.split()
+            if (len(parts) >= 5 and parts[0] == "TCP" and parts[1].endswith(f":{PORT}")
+                    and parts[3] == "LISTENING" and parts[4].isdigit()):
+                return int(parts[4])
+        return None
+    out = _run(["ss", "-ltnpH", f"sport = :{PORT}"]) or ""
+    match = re.search(r"pid=(\d+)", out)
+    return int(match.group(1)) if match else None
+
+
+def take_over_port(timeout: float = 20) -> tuple[bool, str]:
+    """Close the other ComfyUI on our port, so this card's can start there.
+
+    Only after the user agreed, and only when what answers there is ComfyUI: the
+    check is that /system_stats responds, so a different program that happens to
+    hold the port is never touched. The usual occupant is the one the image skills
+    started for themselves -- the same program on the same port -- which is why
+    a card that could only say "close it first" read as a button that was stuck.
+
+    The whole tree goes: a venv's python.exe is a launcher that runs the real
+    interpreter as its child, and stopping only one of the two leaves the other.
+    """
+    if _get("/system_stats") is None:
+        return True, ""
+    pid = _port_listener()
+    if pid is None:
+        return False, f"Could not tell which program is using port {PORT}."
+    log.info("closing the other ComfyUI on port %s (pid %s)", PORT, pid)
+    try:
+        if config.IS_WINDOWS:
+            parent = None
+            out = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                        f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}')"
+                        ".ParentProcessId"])
+            with contextlib.suppress(TypeError, ValueError):
+                parent = int((out or "").strip())
+            # The parent is the venv launcher when it is a python.exe of ours; kill
+            # from there so neither half is left. Anything else, only the listener.
+            parent_cmd = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                               f"(Get-CimInstance Win32_Process -Filter 'ProcessId={parent}')"
+                               ".ExecutablePath"]) if parent else ""
+            target = parent if parent_cmd and "python" in parent_cmd.lower() else pid
+            subprocess.run(["taskkill", "/PID", str(target), "/T", "/F"], capture_output=True,
+                           timeout=30, creationflags=config.subprocess_flags())
+        else:
+            os.kill(pid, 15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Could not close the other ComfyUI: {exc}"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _port_listener() is None:
+            return True, ""
+        time.sleep(0.5)
+    return False, f"The other ComfyUI did not let go of port {PORT}."
+
+
+def launch(device: Device, take_over: bool = False) -> tuple[bool, str]:
     """Start ComfyUI on this device, replacing a copy of ours on another one.
 
+    take_over also replaces another ComfyUI on the port; the page asks first.
     Returns (started, error). Started means the process stayed up for its first
     seconds; the page then watches status() until the port answers.
     """
@@ -659,8 +755,12 @@ def launch(device: Device) -> tuple[bool, str]:
     if not env_ready(device.backend) or not source_installed():
         return False, "That device's environment is not installed yet."
     if not _ours_alive() and _get("/system_stats") is not None:
-        return False, (f"Another ComfyUI is already using {url()}. "
-                       "Close it to start this one.")
+        if not take_over:
+            return False, (f"Another ComfyUI is already using {url()}. "
+                           "Close it to start this one.")
+        closed, error = take_over_port()
+        if not closed:
+            return False, error
     stop()
 
     command, env = _launch_command(device)

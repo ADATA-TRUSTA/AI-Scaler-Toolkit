@@ -529,7 +529,8 @@ def install_comfyui(out: Progress) -> bool:
     return comfyui.install(comfyui.default_device(comfyui.devices()), out)
 
 
-def run_comfyui(device_id: str, force: bool = False) -> tuple[bool, str, str]:
+def run_comfyui(device_id: str, force: bool = False,
+                take_over: bool = False) -> tuple[bool, str, str]:
     """Start ComfyUI on a device, installing what that device needs first.
 
     Returns (ok, message, kind). When something has to be installed this starts a job
@@ -547,7 +548,7 @@ def run_comfyui(device_id: str, force: bool = False) -> tuple[bool, str, str]:
                        "or stop it first."), BLOCKED
 
     if comfyui.source_installed() and comfyui.env_ready(device.backend):
-        started, error = comfyui.launch(device)
+        started, error = comfyui.launch(device, take_over=take_over)
         return (True, "", DONE) if started else (False, error, FAILED)
 
     def work(out: Progress) -> bool:
@@ -558,7 +559,7 @@ def run_comfyui(device_id: str, force: bool = False) -> tuple[bool, str, str]:
         with contextlib.suppress(Exception):
             shortcuts.remove_component("comfyui")
         out.note(f"Starting ComfyUI on {device.name}.")
-        started, error = comfyui.launch(device)
+        started, error = comfyui.launch(device, take_over=take_over)
         if not started:
             out.note(error)
         return started
