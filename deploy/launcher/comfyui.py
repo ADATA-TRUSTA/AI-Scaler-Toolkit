@@ -610,8 +610,8 @@ def launch(device: Device) -> tuple[bool, str]:
     if not env_ready(device.backend) or not source_installed():
         return False, "That device's environment is not installed yet."
     if not _ours_alive() and _get("/system_stats") is not None:
-        return False, (f"Something else is already serving ComfyUI on port {PORT} -- "
-                       "Comfy Desktop, perhaps. Close it first.")
+        return False, (f"Another ComfyUI is already using {url()}. "
+                       "Close it to start this one.")
     stop()
 
     command, env = _launch_command(device)
