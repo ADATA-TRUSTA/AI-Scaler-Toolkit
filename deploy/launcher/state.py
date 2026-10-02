@@ -66,6 +66,9 @@ DEFAULTS: dict[str, Any] = {
     # the launcher and is adopted by the next one; after an update that would be the
     # old backend going on under a new application, so a mismatch restarts it.
     "service_version": None,
+    # The device ComfyUI last ran on ("cuda:0", "xpu:0", "cpu"), so its card opens on
+    # the choice that was made rather than on the detected default every time.
+    "comfyui_device": None,
 }
 
 

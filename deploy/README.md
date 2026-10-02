@@ -158,13 +158,52 @@ So they are installed, and the three costs are paid deliberately:
 
 - Output is streamed to the page, because an install that takes minutes and says
   nothing is indistinguishable from one that has hung.
-- Both are per-user by design — Hermes into `%LOCALAPPDATA%\hermes`, ComfyUI through
-  electron-builder's per-user NSIS target — so neither raises a UAC prompt. That
-  matters: this application installs without elevation and would look broken if a
-  component demanded it.
-- Neither installer is ours. On failure the page shows the installer's own output and
-  keeps the vendor's page one click away. `_explain_failure` translates the two
+- Both are per-user by design — Hermes into `%LOCALAPPDATA%\hermes`, ComfyUI into this
+  application's own data directory — so neither raises a UAC prompt. That matters:
+  this application installs without elevation and would look broken if a component
+  demanded it.
+- Hermes's installer is not ours. On failure the page shows the installer's own output
+  and keeps the vendor's page one click away. `_explain_failure` translates the two
   failures we know the shape of; everything else is reported as what it is.
+
+### ComfyUI: no desktop shell, and the user picks the card
+
+ComfyUI used to arrive as Comfy Desktop. It no longer does, for two reasons:
+
+- **Desktop owns the process.** It is started from Desktop's own window with Desktop's
+  arguments, and the image and video skills that sit beside this application need to
+  start it themselves: the guarantee they rely on, `--reserve-vram` sized at launch to
+  whatever the hosted LLM holds, only exists if they are the ones launching it. With
+  Desktop already on port 8188 they connected to it and inherited no protection.
+- **Desktop picks the PyTorch build by a fixed vendor order** — NVIDIA, then AMD, then
+  Intel — so a machine with an NVIDIA card and an Intel GPU had no say in which ran it.
+
+`launcher/comfyui.py` keeps ComfyUI itself and nothing around it, under
+`<data dir>/components/comfyui/`:
+
+- `ComfyUI/` — the source of the latest release, from its archive. Not a git clone:
+  nothing else here needs git, and one optional component should not make it a
+  prerequisite. Models, custom nodes and outputs live here, shared by every build.
+- `envs/cuda`, `envs/xpu`, `envs/cpu` — one environment per PyTorch build, created the
+  first time a device of that kind is started rather than all up front: each is
+  gigabytes, and most machines only ever use one. They pin the backend's own torch
+  versions, so uv's cache can serve what the backend already downloaded.
+
+An environment is marked usable only after it has multiplied two matrices on its
+device, under a timeout. torch reporting the device as available is not evidence —
+an Intel runtime that does not match its driver passes that and fails, or hangs, on
+the first kernel.
+
+The card lists every card the machine has — NVIDIA from `nvidia-smi`, so its index is
+the `--cuda-device` ComfyUI is given (launches set `CUDA_DEVICE_ORDER=PCI_BUS_ID` to
+make that true), everything else from the system's adapter list — and the CPU last,
+marked as not recommended: it is the way out when no card works, not an option anyone
+should pick for real work. AMD is listed and disabled; there is no ROCm build here.
+
+Switching between two cards of the same kind is an argument; switching kinds is
+another environment. Either way it is a restart, so Start refuses while a queue is
+running unless the user confirms. ComfyUI runs as this application's child on
+`127.0.0.1:8188` and is stopped when the application quits.
 
 Detection is looser than the install path on purpose: it finds copies this application
 never installed, because telling someone to install what they already have is its own
@@ -191,8 +230,9 @@ it on: run `hermes desktop` once in a terminal, with the user's own password. We
 ask for that password on their behalf. Doing it for them (a pkexec prompt installing
 an AppArmor profile, as some AI desktop installers do) was considered and declined: it
 would be a second place this application elevates, for someone else's program, leaving
-a root-owned file that uninstalling cannot remove. ComfyUI's vendor ships
-`--no-sandbox` unconditionally, so what this does is at worst that and usually better.
+a root-owned file that uninstalling cannot remove. Comfy Desktop, which this used to
+install, ships `--no-sandbox` unconditionally, so what this does is at worst that and
+usually better.
 
 Two consequences look wrong until you know them:
 

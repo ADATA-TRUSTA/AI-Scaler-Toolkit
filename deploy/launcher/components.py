@@ -12,11 +12,12 @@ So we run them, and we pay those three costs deliberately:
 - Output is streamed to the page, because an install that takes minutes and says
   nothing is indistinguishable from one that has hung.
 - Both installs are per-user by design (Hermes into %LOCALAPPDATA%\\hermes, ComfyUI
-  through electron-builder's per-user NSIS target), so neither needs an administrator.
+  into this application's own data directory), so neither needs an administrator.
   That is not a detail: this application installs without elevation and would look
   broken if a component demanded it.
-- We do not control either installer. When one fails we say what failed and leave the
+- We do not control Hermes's installer. When it fails we say what failed and leave the
   vendor's own page one click away, rather than pretending the failure is ours to fix.
+  ComfyUI is installed by this application itself -- see comfyui.py for why.
 
 Detection is deliberately looser than the install path: it looks for whatever is
 actually on the machine, including copies this application never installed, because
@@ -40,24 +41,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import applog, config, shortcuts
+from . import applog, comfyui, config, shortcuts
 
 log = applog.get("components")
 
 HERMES_PS1 = "https://hermes-agent.nousresearch.com/install.ps1"
 HERMES_SH = "https://hermes-agent.nousresearch.com/install.sh"
 HERMES_PAGE = "https://github.com/nousresearch/hermes-agent"
-
-# The vendor's conventional download paths. They redirect to the current build, so they
-# do not go stale the way a pinned release asset would.
-#
-# The AppImage on Linux, not the .deb: a .deb is a system-wide install and needs root,
-# and this application installs without elevation -- offering a component that asks for
-# a password would be the one place it did. The AppImage is a file in the user's own
-# directory, which is the same bargain everything else here makes.
-COMFY_WINDOWS = "https://download.comfy.org/windows/nsis/x64"
-COMFY_LINUX = "https://download.comfy.org/linux/appimage/x64"
-COMFY_PAGE = "https://comfy.org/download/"
 
 _MAX_LINES = 400
 _INSTALL_TIMEOUT = 3600
@@ -177,163 +167,6 @@ def detect_hermes() -> str | None:
     return None
 
 
-def _program_in(folder: Path) -> Path | None:
-    """The application executable in an install folder, if there is one.
-
-    Not a fixed filename. A real install put its program at "Comfy Desktop.exe" while
-    every guess in circulation -- including the one this file shipped with -- said
-    "ComfyUI.exe", so the install worked and the page reported it missing. What is
-    reliable is the shape of the folder: one program, plus an uninstaller named after
-    it.
-    """
-    try:
-        executables = [p for p in folder.glob("*.exe")
-                       if not p.name.lower().startswith(("uninstall", "unins"))]
-    except OSError:
-        return None
-    if not executables:
-        return None
-    # Deterministic when a folder holds more than one: the shortest name is the
-    # application, the longer ones are its helpers.
-    return min(executables, key=lambda p: (len(p.name), p.name))
-
-
-def detect_comfyui() -> str | None:
-    """Find the install folder by name, then ask the folder what it contains."""
-    roots = [_local_appdata() / "Programs"]
-    if os.environ.get("PROGRAMFILES"):
-        roots.append(Path(os.environ["PROGRAMFILES"]))
-    for root in roots:
-        try:
-            entries = list(root.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            if "comfy" not in entry.name.lower() or not entry.is_dir():
-                continue
-            program = _program_in(entry)
-            if program:
-                return str(program)
-
-    found = shutil.which("comfyui") or shutil.which("ComfyUI")
-    if found:
-        return found
-
-    # Where the AppImage below is put, plus the places someone who installed it
-    # themselves is likely to have put it. Detection stays looser than the install path
-    # on purpose: telling someone to install what they already have is its own wrong.
-    # The unpacked tree first: when it exists this machine could not mount an AppImage,
-    # so the file beside it is the one thing that will not start.
-    hit = _first_existing(
-        comfy_runner(),
-        comfy_appimage(),
-        Path.home() / "Applications" / "ComfyUI.AppImage",
-        Path.home() / ".local/bin/ComfyUI",
-        Path("/opt/ComfyUI/ComfyUI"),
-    )
-    return str(hit) if hit else None
-
-
-def comfy_unpacked() -> Path:
-    """Where an AppImage is unpacked to when this machine cannot mount one.
-
-    Beside the file it came from, named after it, so the pair is obviously one thing
-    and the uninstaller that removes the components directory removes both.
-    """
-    return comfy_appimage().with_name("ComfyUI.unpacked")
-
-
-def comfy_runner() -> Path:
-    """The file to run once it has been unpacked -- see _write_runner for why not AppRun."""
-    return comfy_unpacked() / "run"
-
-
-def _write_runner(tree: Path) -> None:
-    """Put a two-line script beside AppRun that sets APPDIR before calling it.
-
-    AppRun is written to be started by the AppImage runtime, which exports APPDIR.
-    Started directly it tries to work the value out itself, and ComfyUI's does it with
-
-        while [[ "$path" != "" && ! -e "$path/$1" ]]; do path=${path%/*}; done
-
-    -- it looks for a file named after the first argument. With no arguments that stops
-    immediately and is right; with any argument it walks up to the root, leaves APPDIR
-    empty, and the next line runs "/comfyui-desktop-2", which does not exist. Their own
-    desktop entry passes --no-sandbox, so the failing case is the normal one.
-
-    Fixing their AppRun would be editing someone else's program; this sets the variable
-    the runtime would have set and calls it unchanged.
-    """
-    runner = tree / "run"
-    runner.write_text(
-        "#!/bin/sh\n"
-        "# Written by this application when it unpacked the AppImage. It supplies the\n"
-        "# one variable the AppImage runtime would have set, and changes nothing else.\n"
-        'HERE="$(dirname "$(readlink -f "$0")")"\n'
-        'APPDIR="$HERE" exec "$HERE/AppRun" "$@"\n',
-        encoding="utf-8",
-    )
-    runner.chmod(0o755)
-
-
-def _unpack_appimage(program: Path, out: Progress) -> bool:
-    """Extract an AppImage so it can run without FUSE.
-
-    Ubuntu 24.04 ships fuse3 and not libfuse2, and an AppImage of this generation wants
-    libfuse2 -- so on a current desktop the file downloads, installs, and refuses to
-    start. Installing libfuse2 fixes it and costs a password, which is the one thing
-    this application has been built not to ask for; choosing the AppImage over the .deb
-    was that same decision, and it would be undone by asking for root to run it.
-
-    --appimage-extract needs no FUSE: the runtime reads its own squashfs. So the
-    fallback is to unpack once, keep the tree, and run it from there. It costs disk --
-    a few hundred megabytes more than the compressed file -- and no permission at all.
-    """
-    destination = comfy_unpacked()
-    work = destination.with_name(destination.name + ".partial")
-    shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True, exist_ok=True)
-    try:
-        result = subprocess.run([str(program), "--appimage-extract"], cwd=work,
-                                capture_output=True, text=True, timeout=600)
-    except (OSError, subprocess.SubprocessError) as exc:
-        out.note(f"Unpacking failed: {exc}")
-        shutil.rmtree(work, ignore_errors=True)
-        return False
-    extracted = work / "squashfs-root"
-    if result.returncode != 0 or not (extracted / "AppRun").is_file():
-        out.note("Unpacking produced nothing runnable.")
-        shutil.rmtree(work, ignore_errors=True)
-        return False
-    # Moved into place only once it is complete, so an interrupted unpack cannot leave
-    # a half tree that detection would report as installed.
-    shutil.rmtree(destination, ignore_errors=True)
-    try:
-        extracted.replace(destination)
-    except OSError as exc:
-        out.note(f"Could not put the unpacked application in place: {exc}")
-        shutil.rmtree(work, ignore_errors=True)
-        return False
-    shutil.rmtree(work, ignore_errors=True)
-    try:
-        (destination / "AppRun").chmod(0o755)
-        _write_runner(destination)
-    except OSError as exc:
-        out.note(f"Unpacked, but could not make it runnable: {exc}")
-        return False
-    log.info("unpacked %s to %s", program.name, destination)
-    return True
-
-
-def comfy_appimage() -> Path:
-    """Where the Linux build is installed to.
-
-    An AppImage is a single file, so "installing" it is putting it somewhere sensible
-    and making it executable. Beside this application's own data, which is per-user and
-    goes with it when it is uninstalled."""
-    return config.data_dir() / "components" / "ComfyUI.AppImage"
-
-
 # -------------------------------------------------------------------------- install
 
 class Progress:
@@ -432,8 +265,8 @@ def _stream(command: list[str], out: Progress, log_name: str) -> int:
     return process.returncode if process.returncode is not None else 1
 
 
-def _download(url: str, target: Path, out: Progress) -> bool:
-    out.note("Downloading the installer.")
+def _download(url: str, target: Path, out: Progress, what: str = "the installer") -> bool:
+    out.note(f"Downloading {what}.")
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "AI-Scaler-Toolkit"})
         with urllib.request.urlopen(request, timeout=120) as response, target.open("wb") as handle:
@@ -692,93 +525,47 @@ def install_hermes(out: Progress) -> bool:
 
 
 def install_comfyui(out: Progress) -> bool:
-    if sys.platform != "win32":
-        return _install_comfyui_linux(out)
-    target = Path(tempfile.gettempdir()) / "ComfyUI-Setup.exe"
-    if not _download(COMFY_WINDOWS, target, out):
-        return False
-    out.note("Running ComfyUI's own installer. It installs for you alone, so it will "
-             "not ask for an administrator.")
-    code = _stream([str(target), "/S"], out, "install-comfyui.log")
-    if code != 0:
-        out.note(f"The installer exited with code {code}.")
-        return False
-    out.note("Installed. The first time you open ComfyUI it downloads its own copy of "
-             "PyTorch, around 2.5 GB, separate from this application's.")
-    return True
+    """Install for the card that would be picked by default -- see comfyui.py."""
+    return comfyui.install(comfyui.default_device(comfyui.devices()), out)
 
 
-def _install_comfyui_linux(out: Progress) -> bool:
-    """Put the AppImage in place and make it runnable.
+def run_comfyui(device_id: str, force: bool = False) -> tuple[bool, str, str]:
+    """Start ComfyUI on a device, installing what that device needs first.
 
-    There is nothing to run: an AppImage is the application. This used to say the
-    vendor published no Linux build, which was true when it was written and is not now
-    -- they ship an AppImage and a .deb alongside the Windows and macOS builds.
-
-    Downloaded to a temporary name and moved into place only once it has arrived, so an
-    interrupted download does not leave something that looks installed and is not.
+    Returns (ok, message, kind). When something has to be installed this starts a job
+    and returns at once; the page follows it the way it follows any install, and the
+    job starts ComfyUI as its last step.
     """
-    target = comfy_appimage()
-    partial = target.with_suffix(".partial")
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        out.note(f"Could not create {target.parent}: {exc}")
-        return False
+    device = comfyui.find_device(device_id)
+    if device is None:
+        return False, "That device is no longer on this computer.", FAILED
+    if not device.usable:
+        return False, device.note or f"{device.name} cannot run ComfyUI.", BLOCKED
+    if not force and comfyui.busy():
+        # A switch is a restart, and a restart throws away whatever it was rendering.
+        return False, ("ComfyUI is still working on a queue. Wait for it to finish, "
+                       "or stop it first."), BLOCKED
 
-    if not _download(COMFY_LINUX, partial, out):
-        partial.unlink(missing_ok=True)
-        return False
+    if comfyui.source_installed() and comfyui.env_ready(device.backend):
+        started, error = comfyui.launch(device)
+        return (True, "", DONE) if started else (False, error, FAILED)
 
-    # An AppImage starts with an ELF header. Checked because the download endpoint is a
-    # redirect to the vendor's CDN, and an error page saved to disk is still a file
-    # that arrived successfully -- it would sit there as an unrunnable "install".
-    try:
-        with partial.open("rb") as handle:
-            if handle.read(4) != b"\x7fELF":
-                out.note("What downloaded is not a Linux application. The vendor's "
-                         "download page is linked below.")
-                partial.unlink(missing_ok=True)
-                return False
-        partial.chmod(0o755)
-        partial.replace(target)
-    except OSError as exc:
-        out.note(f"Could not install it to {target}: {exc}")
-        partial.unlink(missing_ok=True)
-        return False
+    def work(out: Progress) -> bool:
+        if not comfyui.install(device, out):
+            return False
+        # The menu entry an earlier version wrote for Comfy Desktop on Linux names a
+        # program this application no longer installs.
+        with contextlib.suppress(Exception):
+            shortcuts.remove_component("comfyui")
+        out.note(f"Starting ComfyUI on {device.name}.")
+        started, error = comfyui.launch(device)
+        if not started:
+            out.note(error)
+        return started
 
-    out.note(f"Installed to {target}.")
-
-    # Asked now, not left for the user to discover. An AppImage needs FUSE, and without
-    # it this one prints "AppImages require FUSE to run" and exits -- so a machine that
-    # lacks it gets 220 MB that cannot start, and finds out by clicking Open and
-    # watching nothing happen. Measured on a stock Ubuntu 24.04 desktop, which does not
-    # ship libfuse2.
-    started, detail = _spawn([str(target), "--version"])
-    if not started and "fuse" in detail.lower():
-        out.note("This system has no FUSE, which an AppImage normally needs. Unpacking "
-                 "it instead, which needs nothing.")
-        if _unpack_appimage(target, out):
-            out.note("Unpacked. It starts the same way; nothing else is needed.")
-        else:
-            out.note("Could not unpack it either. Installing FUSE would fix it:")
-            out.note("  sudo apt install libfuse2")
-
-    # An AppImage integrates with nothing by itself: without this it is a file in a
-    # directory, absent from the menu and the dock, and the only way to start it is to
-    # go and find it. The components' own Windows installers write Start Menu entries;
-    # this is the same thing on the platform where it is the installer's job.
-    # The entry names whichever of the two actually runs here. Pointing it at the
-    # AppImage on a machine that unpacked it because the AppImage will not run would be
-    # a menu entry that does nothing -- the exact failure the unpacking avoided.
-    runnable = Path(detect_comfyui() or target)
-    if shortcuts.ensure_component("comfyui", runnable, "ComfyUI", source=target):
-        out.note("Added it to the applications menu.")
-    else:
-        out.note(f"It is not in the applications menu; start it from {runnable}.")
-    out.note("The first time you open ComfyUI it downloads its own copy of PyTorch, "
-             "around 2.5 GB, separate from this application's.")
-    return True
+    started, error = start("comfyui", work=work,
+                           done=f"ComfyUI is installed and starting on {device.name}.")
+    return (True, "installing", DONE) if started else (False, error, BLOCKED)
 
 
 # ------------------------------------------------------------------------ catalogue
@@ -946,12 +733,13 @@ CATALOGUE: tuple[Component, ...] = (
     Component(
         id="comfyui",
         name="ComfyUI",
-        description="Node-based generative AI workflows, the official desktop build.",
-        note="A 180 MB download on Windows, 220 MB on Linux. On first launch it "
-             "fetches its own PyTorch, about 2.5 GB and separate from this "
-             "application's, so budget the disk twice.",
-        page=COMFY_PAGE,
-        detect=detect_comfyui,
+        description="Node-based generative AI workflows, run here without a window of "
+                    "its own and opened in the browser.",
+        note="Pick the card it runs on below. Each kind of card gets its own PyTorch, "
+             "downloaded the first time that card is started: about 2.3 GB for NVIDIA, "
+             "1.8 GB for Intel. Changing cards restarts ComfyUI.",
+        page=comfyui.PAGE,
+        detect=comfyui.detect,
         install=install_comfyui,
     ),
 )
@@ -1063,8 +851,14 @@ def _explain_failure(component: Component, lines: list[str]) -> str:
             "output; the vendor's page has the manual instructions.")
 
 
-def start(component_id: str) -> tuple[bool, str]:
-    """Begin an install. Returns (started, error)."""
+def start(component_id: str, work: Callable[[Progress], bool] | None = None,
+          done: str = "") -> tuple[bool, str]:
+    """Begin an install. Returns (started, error).
+
+    `work` replaces the component's own install for this run, and `done` what success
+    says -- ComfyUI's Start installs whatever its card is missing and then starts it,
+    which is one job to watch rather than two.
+    """
     global _job
     component = BY_ID.get(component_id)
     if component is None:
@@ -1083,7 +877,7 @@ def start(component_id: str) -> tuple[bool, str]:
 
     def worker() -> None:
         try:
-            ok = component.install(out)
+            ok = (work or component.install)(out)
         except Exception as exc:
             log.exception("installing %s failed", component_id)
             out.note(f"Unexpected error: {exc}")
@@ -1096,7 +890,7 @@ def start(component_id: str) -> tuple[bool, str]:
             ok = False
 
         job.ok = ok
-        job.message = (f"{component.name} is installed." if ok
+        job.message = ((done or f"{component.name} is installed.") if ok
                        else _explain_failure(component, job.installer_lines()))
         job.running = False
         log.info("component %s finished ok=%s at %s", component_id, ok, located or "-")
@@ -1121,20 +915,10 @@ def _entry_program(entry: Path) -> str:
 
 
 def _write_entry(component: Component, program: Path) -> bool:
-    """(Re)write a component's menu entry for whatever is runnable now.
-
-    The name and icon come from the AppImage even when the AppImage is not what runs:
-    _unpack_appimage puts its tree beside the file and names it after it, so the file
-    is found by reading back that convention rather than by remembering a second path.
-    """
-    source = None
-    if program.parent.name.endswith(".unpacked"):
-        candidate = program.parent.with_suffix(".AppImage")
-        if candidate.is_file():
-            source = candidate
+    """(Re)write a component's menu entry for whatever is runnable now."""
     return shortcuts.ensure_component(component.id, program, component.name,
                                       terminal=component.terminal,
-                                      comment=component.description, source=source)
+                                      comment=component.description)
 
 
 def open_component(component_id: str) -> tuple[bool, str, str]:
@@ -1181,11 +965,10 @@ def open_component(component_id: str) -> tuple[bool, str, str]:
         return False, f"{component.name} would not start. {detail}".strip(), FAILED
 
     entry = config.component_entry_target(component_id)
-    # An entry outlives the thing it names. This one was written by a version of this
-    # application that did not unpack AppImages, so it names the .AppImage -- which on
-    # a machine without FUSE is the one file that will not start, and the click does
-    # nothing. Rewriting it before use fixes the click and the menu at once; deferring
-    # to an entry we can see is wrong would be deferring for its own sake.
+    # An entry outlives the thing it names: one written by an earlier version of this
+    # application can name a program that is no longer what starts the component.
+    # Rewriting it before use fixes the click and the menu at once; deferring to an
+    # entry we can see is wrong would be deferring for its own sake.
     if entry.is_file() and _entry_program(entry) != str(program):
         log.info("entry for %s names %r, not %s -- rewriting it",
                  component_id, _entry_program(entry), program)
@@ -1499,5 +1282,8 @@ def listing() -> list[dict]:
             # on -- both are this file's business.
             "terminal": component.terminal,
             "can_point_here": component.id == "hermes" and located is not None,
+            # ComfyUI's card is a device picker with Start and Stop rather than an
+            # Install button; its contents come from comfyui_state.
+            "picker": component.id == "comfyui",
         })
     return out

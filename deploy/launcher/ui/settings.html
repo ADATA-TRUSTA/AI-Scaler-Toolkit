@@ -221,6 +221,46 @@
   .troubleshoot .component-actions { margin-top: 10px; }
   .troubleshoot .status { text-align: left; margin-top: 8px; }
 
+  /* ComfyUI's device picker. A list of rows rather than a dropdown: what decides the
+     choice -- which are ready, which download first, which cannot run at all -- has
+     to be visible for every option at once, and a dropdown shows one. */
+  .devices { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .device {
+    display: flex; align-items: flex-start; gap: 12px; padding: 11px 14px;
+    border: 1px solid var(--line); border-radius: 9px; background: var(--btn);
+    cursor: pointer;
+  }
+  .device:hover { border-color: color-mix(in srgb, var(--muted) 45%, var(--line)); }
+  .device.selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent) inset;
+  }
+  .device.disabled { cursor: default; opacity: 0.6; }
+  .device.disabled:hover { border-color: var(--line); }
+  .device input { margin: 4px 0 0; accent-color: var(--accent); flex: none; }
+  .device-main { flex: 1; min-width: 0; }
+  .device-name { font-weight: 560; font-size: 14px; }
+  .device-meta { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .device-note { color: var(--warn); font-size: 12.5px; margin-top: 4px; }
+  .device-state {
+    flex: none; font-size: 12px; color: var(--muted); padding-top: 2px; text-align: right;
+  }
+  .device-state.ready { color: var(--ok); }
+  .device-state.running { color: var(--accent); font-weight: 600; }
+  .tag {
+    display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 99px;
+    font-size: 11px; font-weight: 600; vertical-align: 1px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
+  }
+  .tag.warn { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+  /* The CPU is a way out, not a peer of the cards, so it sits apart from them. */
+  .device.fallback { margin-top: 6px; border-style: dashed; }
+  .comfy-status { font-size: 13px; margin-top: 12px; color: var(--muted); }
+  .comfy-status.ok { color: var(--ok); }
+  .comfy-status.warn { color: var(--warn); }
+  .comfy-status.err { color: var(--err); }
+  .comfy-status a { color: var(--accent); cursor: pointer; }
+
   pre.log {
     margin: 12px 0 0; padding: 12px 14px; max-height: 220px; overflow: auto;
     background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
@@ -503,6 +543,7 @@
     var poller = null;
 
     function cardHtml(c) {
+      if (c.picker) { return comfyCardHtml(c); }
       var installed = c.installed;
       var action;
       if (!c.available) {
@@ -564,6 +605,237 @@
           '<div class="outcome" id="outcome-' + escapeHtml(c.id) + '"></div>' +
           '<pre class="log" id="log-' + escapeHtml(c.id) + '" hidden></pre>' +
         "</div>";
+    }
+
+    // ----------------------------------------------------------- ComfyUI card
+    // The card is drawn in two steps: the frame with the rest of the list, then its
+    // body once comfyui_state answers. Finding the cards takes a second -- PowerShell
+    // and nvidia-smi -- and the other cards should not wait on it.
+    var comfy = null;          // what comfyui_state last said
+    var comfyCard = null;      // the listing entry, for the install job's state
+    var comfySelected = "";    // the row picked here, kept across redraws
+    var comfyWatch = null;     // polls while ComfyUI is starting
+
+    function comfyCardHtml(c) {
+      comfyCard = c;
+      return '' +
+        '<div class="component" id="card-' + escapeHtml(c.id) + '">' +
+          '<div class="component-head">' +
+            '<span class="component-name">' + escapeHtml(c.name) + "</span>" +
+            '<span class="badge ' + (c.installed ? "on" : "off") + '" id="comfy-badge">' +
+              (c.installed ? "Installed" : "Not installed") + "</span>" +
+          "</div>" +
+          '<div class="desc">' + escapeHtml(c.description) + "</div>" +
+          '<div class="note">' + escapeHtml(c.note) + "</div>" +
+          '<div id="comfy-body"><div class="comfy-status">Looking for graphics cards…</div></div>' +
+          '<div class="outcome" id="outcome-' + escapeHtml(c.id) + '"></div>' +
+          '<pre class="log" id="log-' + escapeHtml(c.id) + '" hidden></pre>' +
+        "</div>";
+    }
+
+    function gb(mb) { return (Math.round(mb / 102.4) / 10) + " GB"; }
+
+    function deviceMeta(d) {
+      var parts = [];
+      if (d.backend_label && d.vendor !== "cpu") { parts.push(d.backend_label); }
+      if (d.memory_mb) { parts.push(gb(d.memory_mb)); }
+      else if (d.vendor === "intel") { parts.push("shares system memory"); }
+      if (d.driver) { parts.push("driver " + d.driver); }
+      return parts.join(" · ");
+    }
+
+    function deviceState(d, st) {
+      if (st.device_id === d.id && st.phase === "running") { return ["Running", "running"]; }
+      if (st.device_id === d.id && st.phase === "starting") { return ["Starting…", "running"]; }
+      if (!d.usable) { return ["Unavailable", ""]; }
+      if (d.installed) { return ["Ready", "ready"]; }
+      return ["~" + d.download_gb + " GB download", ""];
+    }
+
+    function deviceRowHtml(d, st, locked) {
+      var state = deviceState(d, st);
+      var selected = d.id === comfySelected;
+      var disabled = !d.usable || locked;
+      var tag = "";
+      if (d.id === comfy.recommended && d.vendor !== "cpu") {
+        tag = '<span class="tag">Recommended</span>';
+      }
+      if (d.vendor === "cpu") { tag = '<span class="tag warn">Not recommended</span>'; }
+      return '<label class="device' + (selected ? " selected" : "") +
+          (disabled ? " disabled" : "") + (d.vendor === "cpu" ? " fallback" : "") + '">' +
+        '<input type="radio" name="comfy-device" value="' + escapeHtml(d.id) + '"' +
+          (selected ? " checked" : "") + (disabled ? " disabled" : "") + ">" +
+        '<div class="device-main">' +
+          '<div class="device-name">' + escapeHtml(d.name) + tag + "</div>" +
+          '<div class="device-meta">' + escapeHtml(deviceMeta(d)) + "</div>" +
+          (d.note ? '<div class="device-note">' + escapeHtml(d.note) + "</div>" : "") +
+        "</div>" +
+        '<span class="device-state ' + state[1] + '">' + escapeHtml(state[0]) + "</span>" +
+      "</label>";
+    }
+
+    // What the main button says is what pressing it will do, so it changes with the
+    // row: start, switch (a restart onto another card), or install first.
+    function startLabel(d, st) {
+      var running = st.phase === "running" || st.phase === "starting";
+      if (!d.installed) { return running ? "Install and switch" : "Install and start"; }
+      if (running && st.device_id === d.id) { return "Restart"; }
+      if (running) { return "Switch to this card"; }
+      return "Start";
+    }
+
+    function comfyStatusHtml(st) {
+      if (st.phase === "running") {
+        return '<div class="comfy-status ok">Running on ' + escapeHtml(st.device_name) +
+          " at " + escapeHtml(st.url) + (comfy.busy ? " — working on a queue" : "") + "</div>";
+      }
+      if (st.phase === "starting") {
+        return '<div class="comfy-status">Starting on ' + escapeHtml(st.device_name) +
+          "… this takes about twenty seconds.</div>";
+      }
+      if (st.phase === "foreign") {
+        return '<div class="comfy-status warn">Another ComfyUI is already using ' +
+          escapeHtml(st.url) + " — Comfy Desktop, perhaps. Close it to start this one.</div>";
+      }
+      return '<div class="comfy-status">Not running.</div>';
+    }
+
+    function paintComfy() {
+      var body = el("comfy-body");
+      if (!body || !comfy) { return; }
+      var st = comfy.status;
+      var installing = !!(comfyCard && comfyCard.busy);
+      var otherJob = !!(comfyCard && comfyCard.blocked);
+      var locked = installing || otherJob;
+      var ids = comfy.devices.map(function (d) { return d.id; });
+      if (ids.indexOf(comfySelected) < 0) {
+        comfySelected = st.device_id || comfy.default;
+      }
+      var chosen = comfy.devices.filter(function (d) { return d.id === comfySelected; })[0];
+      var cards = comfy.devices.filter(function (d) { return d.vendor !== "cpu"; });
+      var cpu = comfy.devices.filter(function (d) { return d.vendor === "cpu"; });
+      var running = st.phase === "running" || st.phase === "starting";
+      var sameAsRunning = running && st.device_id === comfySelected;
+
+      var actions = "";
+      if (installing) {
+        actions = '<button disabled>Installing…</button>';
+      } else {
+        actions = '<button class="' + (sameAsRunning ? "" : "primary") + '" id="comfy-start"' +
+          ((!chosen || !chosen.usable || otherJob || st.phase === "foreign") ? " disabled" : "") +
+          ">" + escapeHtml(chosen ? startLabel(chosen, st) : "Start") + "</button>";
+      }
+      if (running && !installing) { actions += '<button id="comfy-stop">Stop</button>'; }
+      if (st.phase === "running") { actions += '<button id="comfy-open">Open in browser</button>'; }
+      actions += '<button class="link" id="comfy-rescan">Rescan cards</button>' +
+                 '<button class="link" data-page="' + escapeHtml(comfyCard.page) +
+                 '" style="margin-left: 0">ComfyUI on GitHub</button>';
+
+      var hint = "";
+      if (chosen && !chosen.installed && chosen.usable && !installing) {
+        hint = '<div class="hint">' + escapeHtml(chosen.backend_label) + " is not set up " +
+          "yet: starting downloads about " + chosen.download_gb + " GB first, once.</div>";
+      }
+
+      body.innerHTML =
+        '<div class="devices" role="radiogroup" aria-label="Device">' +
+          cards.map(function (d) { return deviceRowHtml(d, st, locked); }).join("") +
+          cpu.map(function (d) { return deviceRowHtml(d, st, locked); }).join("") +
+        "</div>" + hint +
+        '<div class="component-actions">' + actions + "</div>" +
+        comfyStatusHtml(st) +
+        (comfy.version ? '<div class="where">ComfyUI ' + escapeHtml(comfy.version) + "</div>" : "");
+
+      Array.prototype.forEach.call(body.querySelectorAll('input[name="comfy-device"]'),
+        function (r) {
+          r.addEventListener("change", function () { comfySelected = r.value; paintComfy(); });
+        });
+      var start = el("comfy-start");
+      if (start) { start.addEventListener("click", function () { comfyStart(false); }); }
+      var stop = el("comfy-stop");
+      if (stop) {
+        stop.addEventListener("click", function () {
+          stop.disabled = true;
+          api.comfyui_stop().then(function () { loadComfy(false); });
+        });
+      }
+      var open = el("comfy-open");
+      if (open) { open.addEventListener("click", function () { api.comfyui_open(); }); }
+      el("comfy-rescan").addEventListener("click", function () {
+        el("comfy-rescan").disabled = true;
+        loadComfy(true);
+      });
+      var page = body.querySelector("[data-page]");
+      if (page) {
+        page.addEventListener("click", function () { api.open_url(page.getAttribute("data-page")); });
+      }
+      watchComfy(st.phase === "starting");
+    }
+
+    function loadComfy(refresh) {
+      return api.comfyui_state(!!refresh).then(function (s) {
+        comfy = s;
+        paintComfy();
+      }, function (e) {
+        var body = el("comfy-body");
+        if (body) {
+          body.innerHTML = '<div class="comfy-status err">Could not look for graphics ' +
+            "cards. " + escapeHtml(String((e && e.message) || e || "")) + "</div>";
+        }
+      });
+    }
+
+    // While it starts, ask again until the port answers or the process has gone --
+    // the second is how a crash on start shows up, and the log says why.
+    function watchComfy(on) {
+      if (!on) {
+        if (comfyWatch) { clearInterval(comfyWatch); comfyWatch = null; }
+        return;
+      }
+      if (comfyWatch) { return; }
+      comfyWatch = setInterval(function () {
+        api.comfyui_state(false).then(function (s) {
+          var was = comfy && comfy.status.phase;
+          comfy = s;
+          if (s.status.phase !== "starting") {
+            clearInterval(comfyWatch);
+            comfyWatch = null;
+            if (was === "starting" && s.status.phase === "stopped") {
+              say("comfyui", "ComfyUI stopped while starting. Its output is in " +
+                  s.status.log, "failed");
+            }
+          }
+          paintComfy();
+        });
+      }, 1500);
+    }
+
+    function comfyStart(force) {
+      var button = el("comfy-start");
+      if (button) { button.disabled = true; }
+      say("comfyui", "", "");
+      api.comfyui_start(comfySelected, !!force).then(function (r) {
+        if (!r.ok) {
+          if (r.busy) {
+            // Not refused for good: switching now throws away what is rendering, and
+            // that is the user's call to make with the facts in front of them.
+            if (window.confirm(r.error + "\n\nSwitch anyway? What it is working on " +
+                               "will be lost.")) {
+              comfyStart(true);
+              return;
+            }
+          }
+          say("comfyui", r.error, r.kind);
+          loadComfy(false);
+          return;
+        }
+        if (r.installing) {
+          // An install job, followed like any other; it starts ComfyUI as its last step.
+          refreshComponents().then(poll);
+          return;
+        }
+        loadComfy(false);
+      });
     }
 
     // What a component pointed at this machine would be given, kept beside the cards
@@ -960,6 +1232,7 @@
             });
           });
         wireFirewall();
+        if (el("comfy-body")) { loadComfy(false); }
         // A page opened while an install is already running picks it up rather than
         // showing a stale idle card.
         return api.component_progress().then(function (job) {

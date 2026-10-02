@@ -27,6 +27,7 @@ from . import (
     autostart,
     brand,
     browser,
+    comfyui,
     components,
     config,
     connectivity,
@@ -738,6 +739,30 @@ class SettingsApi:
     def install_component(self, component_id: str) -> dict[str, Any]:
         started, error = components.start(str(component_id))
         return {"ok": started, "error": error}
+
+    def comfyui_state(self, refresh: bool = False) -> dict[str, Any]:
+        """The ComfyUI card: devices found, which are installed, what is running.
+
+        refresh re-reads the hardware rather than the minute-old answer, for the
+        card's own Rescan.
+        """
+        if refresh:
+            comfyui.devices(refresh=True)
+        return comfyui.describe()
+
+    def comfyui_start(self, device_id: str, force: bool = False) -> dict[str, Any]:
+        ok, message, kind = components.run_comfyui(str(device_id), force=bool(force))
+        return {"ok": ok, "installing": message == "installing",
+                "error": "" if ok else message, "kind": kind,
+                # Refused because a queue is running, which the page may override.
+                "busy": not ok and not force and comfyui.busy()}
+
+    def comfyui_stop(self) -> dict[str, Any]:
+        comfyui.stop()
+        return {"ok": True}
+
+    def comfyui_open(self) -> None:
+        self._launcher._open_url_async(comfyui.url())
 
     def component_progress(self) -> dict[str, Any] | None:
         """Polled by the page while an install runs.
@@ -1599,6 +1624,11 @@ class Launcher:
                 log.info("cancelled the setup that was still running")
         with contextlib.suppress(Exception):
             self.service.unwatch()
+        # The ComfyUI this application started is a child of it. Left running it would
+        # hold its GPU memory with nothing left to stop it, and the next launch would
+        # find the port taken by a copy it does not know is its own.
+        with contextlib.suppress(Exception):
+            comfyui.stop()
         with contextlib.suppress(Exception):
             self.service.stop()
 
