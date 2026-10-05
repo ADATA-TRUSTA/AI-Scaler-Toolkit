@@ -1,4 +1,7 @@
-"""ComfyUI without its desktop shell, run by this application on the device you pick.
+"""ComfyUI without its desktop shell, installed here for the device you pick.
+
+This application installs it and records the device; the image and video skills start
+it, because only they can start it protected (see the runtime section below).
 
 Why not Comfy Desktop, which this used to install: Desktop owns the ComfyUI process.
 The user starts it from Desktop's window, with Desktop's arguments, so nothing else can
@@ -319,8 +322,12 @@ def recommended_device(found: list[Device]) -> Device:
 
 
 def default_device(found: list[Device]) -> Device:
-    """The remembered choice if it is still here, else the recommended one."""
-    remembered = state.get("comfyui_device")
+    """The device in use if it is still here, else the recommended one.
+
+    selected.json first: it is what the skills read, so it is what is true. The state
+    file's copy is only for a machine where that file was never written.
+    """
+    remembered = selected_device_id() or state.get("comfyui_device")
     for device in found:
         if device.id == remembered and device.usable:
             return device
@@ -505,10 +512,16 @@ def install(device: Device, out) -> bool:
 
 
 # --------------------------------------------------------------------------- runtime
-
-_process: subprocess.Popen | None = None
-_running_device: Device | None = None
-_proc_lock = threading.Lock()
+#
+# This application does not start ComfyUI. It did, from a Start button on its card,
+# and that server had no --reserve-vram: the image and video skills size that
+# reserve at launch from what the hosted LLM is holding, so it only exists when they
+# launch ComfyUI themselves. With one already on the port they connected to it and
+# inherited nothing, and the LLM could be pushed out of its memory.
+#
+# So the card records which device ComfyUI should use (selected.json) and reports
+# what is running; the skills start it, on that device, when they need it, and move
+# an idle one over when the choice changes.
 
 
 def url() -> str:
@@ -523,74 +536,43 @@ def _get(path: str, timeout: float = 1.5) -> dict | None:
         return None
 
 
-def _ours_alive() -> bool:
-    return _process is not None and _process.poll() is None
+def _running_device_id(stats: dict) -> str:
+    """cuda:N, xpu:N or cpu for the server answering, as the device ids here name them.
 
-
-def log_path() -> Path:
-    return config.log_dir() / "comfyui.log"
-
-
-def _log_tail(lines: int = 12) -> str:
-    with contextlib.suppress(OSError):
-        text = log_path().read_text(encoding="utf-8", errors="replace")
-        return "\n".join(text.strip().splitlines()[-lines:])
-    return ""
-
-
-# What ComfyUI prints as it comes up, in order, and what each one means it has done.
-# Read back from its log to draw the start-up bar: there is no progress to ask for,
-# but these lines appear on every start, so each step on the bar is a thing that has
-# actually happened rather than a guess at elapsed time. That guess said "about
-# twenty seconds", which was true on the NVIDIA card and is seventy on the Intel one.
-START_STAGES = (
-    ("", "Starting Python"),
-    ("Total VRAM", "Loading PyTorch"),
-    ("Device:", "Setting up the device"),
-    ("Import times for custom nodes", "Loading custom nodes"),
-    ("Starting server", "Starting the server"),
-)
-
-
-def _start_stage() -> int:
-    """How many of START_STAGES are done, by the markers in the log so far."""
-    try:
-        text = log_path().read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return 0
-    done = 0
-    for marker, _label in START_STAGES[1:]:
-        if marker not in text:
-            break
-        done += 1
-    return done
+    The index comes from its argv: --cuda-device hides the other cards from torch, so
+    it reports cuda:0 whichever card that is.
+    """
+    argv = [str(a) for a in (stats.get("system", {}).get("argv") or [])]
+    devs = stats.get("devices") or []
+    kind = str(devs[0].get("type", "")) if devs else ""
+    if "--cpu" in argv or kind == "cpu":
+        return "cpu"
+    index = "0"
+    if "--cuda-device" in argv:
+        position = argv.index("--cuda-device")
+        if position + 1 < len(argv):
+            index = argv[position + 1]
+    return f"{kind}:{index}" if kind else ""
 
 
 def status() -> dict:
-    """What is on the port, and whether it is the one this application started."""
-    ours = _ours_alive()
+    """What is on the port: which device, and whether it was started protected."""
     stats = _get("/system_stats")
-    device = _running_device if ours else None
-    if ours and stats is None:
-        phase = "starting"
-    elif ours:
-        phase = "running"
-    elif stats is not None:
-        phase = "foreign"   # something else answers as ComfyUI: Desktop, a portable copy
-    else:
-        phase = "stopped"
-    stage = _start_stage() if phase == "starting" else 0
+    if stats is None:
+        return {"phase": "stopped", "url": url(), "device_id": "", "device_name": "",
+                "protected": False}
+    argv = [str(a) for a in (stats.get("system", {}).get("argv") or [])]
+    device_id = _running_device_id(stats)
+    known = find_device(device_id) if device_id else None
+    devs = stats.get("devices") or []
     return {
-        "phase": phase,
+        "phase": "running",
         "url": url(),
-        "device_id": device.id if device else "",
-        "device_name": device.name if device else "",
-        "log": str(log_path()),
-        # The stage in progress (0-based) and how many there are; the bar is full
-        # once the port answers, which is the one sign of being ready.
-        "stage": stage,
-        "stages": len(START_STAGES),
-        "stage_label": START_STAGES[stage][1] if phase == "starting" else "",
+        "device_id": device_id,
+        "device_name": known.name if known else (str(devs[0].get("name", "")) if devs else ""),
+        # Started by the skills' protected launcher, which always passes this.
+        "protected": any(a == "--reserve-vram" or a.startswith("--reserve-vram=")
+                         for a in argv),
     }
 
 
@@ -603,11 +585,7 @@ def busy() -> bool:
 
 
 def _device_args(device: Device) -> tuple[list[str], dict[str, str]]:
-    """What puts ComfyUI on this device: its arguments, and the environment for them.
-
-    Separate from the host and port because it is also what selected.json hands the
-    skills, which launch ComfyUI themselves on a port and with a reserve of their own.
-    """
+    """What puts ComfyUI on this device: its arguments, and the environment for them."""
     env = {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
     if device.backend == "cuda":
         return ["--cuda-device", str(device.index)], env
@@ -620,26 +598,25 @@ def _device_args(device: Device) -> tuple[list[str], dict[str, str]]:
     return ["--cpu"], env
 
 
-def _launch_command(device: Device) -> tuple[list[str], dict[str, str]]:
-    args, device_env = _device_args(device)
-    command = [str(env_python(device.backend)), "main.py",
-               "--listen", HOST, "--port", str(PORT), "--disable-auto-launch", *args]
-    return command, {**os.environ, "PYTHONUNBUFFERED": "1", **device_env}
-
-
 def selection_path() -> Path:
     return home() / "selected.json"
 
 
-def write_selection(device: Device) -> None:
-    """Tell the image and video skills which device was picked, and how to use it.
+def selected_device_id() -> str:
+    """The device selected.json names, or "" when nothing has been picked yet."""
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        return str(json.loads(selection_path().read_text(encoding="utf-8")).get("device") or "")
+    return ""
 
-    They launch ComfyUI themselves -- the --reserve-vram that protects the hosted LLM
-    only exists if they do -- so they need what this card knows: which environment's
-    Python, which arguments put it on the chosen card, and which card to measure.
-    Without it they guess, and guessed wrong: they started ComfyUI on the NVIDIA card
-    after Intel had been picked here, and measured the NVIDIA card while ComfyUI ran
-    on Intel.
+
+def write_selection(device: Device) -> None:
+    """Record the device for the image and video skills, and how to use it.
+
+    They launch ComfyUI themselves, so they need what this card knows: which
+    environment's Python, which arguments put it on the chosen card, and which card
+    to measure. Without it they guessed, and guessed wrong: they started ComfyUI on
+    the NVIDIA card after Intel had been picked here, and measured the NVIDIA card
+    while ComfyUI ran on Intel.
 
     Written beside the install, replaced whole so a reader never sees half of it.
     """
@@ -665,127 +642,9 @@ def write_selection(device: Device) -> None:
         partial.replace(target)
     except OSError:
         log.exception("could not write %s", target)
-
-
-def stop(timeout: float = 15) -> None:
-    global _process, _running_device
-    with _proc_lock:
-        process, _process, _running_device = _process, None, None
-    if process is None or process.poll() is not None:
         return
-    log.info("stopping ComfyUI (pid %s)", process.pid)
-    process.terminate()
-    try:
-        process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=5)
-
-
-def _port_listener() -> int | None:
-    """The process listening on ComfyUI's port, by asking the system's own table."""
-    if config.IS_WINDOWS:
-        out = _run(["netstat", "-ano", "-p", "tcp"]) or ""
-        for line in out.splitlines():
-            parts = line.split()
-            if (len(parts) >= 5 and parts[0] == "TCP" and parts[1].endswith(f":{PORT}")
-                    and parts[3] == "LISTENING" and parts[4].isdigit()):
-                return int(parts[4])
-        return None
-    out = _run(["ss", "-ltnpH", f"sport = :{PORT}"]) or ""
-    match = re.search(r"pid=(\d+)", out)
-    return int(match.group(1)) if match else None
-
-
-def take_over_port(timeout: float = 20) -> tuple[bool, str]:
-    """Close the other ComfyUI on our port, so this card's can start there.
-
-    Only after the user agreed, and only when what answers there is ComfyUI: the
-    check is that /system_stats responds, so a different program that happens to
-    hold the port is never touched. The usual occupant is the one the image skills
-    started for themselves -- the same program on the same port -- which is why
-    a card that could only say "close it first" read as a button that was stuck.
-
-    The whole tree goes: a venv's python.exe is a launcher that runs the real
-    interpreter as its child, and stopping only one of the two leaves the other.
-    """
-    if _get("/system_stats") is None:
-        return True, ""
-    pid = _port_listener()
-    if pid is None:
-        return False, f"Could not tell which program is using port {PORT}."
-    log.info("closing the other ComfyUI on port %s (pid %s)", PORT, pid)
-    try:
-        if config.IS_WINDOWS:
-            parent = None
-            out = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                        f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}')"
-                        ".ParentProcessId"])
-            with contextlib.suppress(TypeError, ValueError):
-                parent = int((out or "").strip())
-            # The parent is the venv launcher when it is a python.exe of ours; kill
-            # from there so neither half is left. Anything else, only the listener.
-            parent_cmd = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                               f"(Get-CimInstance Win32_Process -Filter 'ProcessId={parent}')"
-                               ".ExecutablePath"]) if parent else ""
-            target = parent if parent_cmd and "python" in parent_cmd.lower() else pid
-            subprocess.run(["taskkill", "/PID", str(target), "/T", "/F"], capture_output=True,
-                           timeout=30, creationflags=config.subprocess_flags())
-        else:
-            os.kill(pid, 15)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"Could not close the other ComfyUI: {exc}"
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _port_listener() is None:
-            return True, ""
-        time.sleep(0.5)
-    return False, f"The other ComfyUI did not let go of port {PORT}."
-
-
-def launch(device: Device, take_over: bool = False) -> tuple[bool, str]:
-    """Start ComfyUI on this device, replacing a copy of ours on another one.
-
-    take_over also replaces another ComfyUI on the port; the page asks first.
-    Returns (started, error). Started means the process stayed up for its first
-    seconds; the page then watches status() until the port answers.
-    """
-    global _process, _running_device
-    if not env_ready(device.backend) or not source_installed():
-        return False, "That device's environment is not installed yet."
-    if not _ours_alive() and _get("/system_stats") is not None:
-        if not take_over:
-            return False, (f"Another ComfyUI is already using {url()}. "
-                           "Close it to start this one.")
-        closed, error = take_over_port()
-        if not closed:
-            return False, error
-    stop()
-
-    command, env = _launch_command(device)
-    config.log_dir().mkdir(parents=True, exist_ok=True)
-    log.info("starting ComfyUI on %s: %s", device.id, " ".join(command))
-    sink = log_path().open("w", encoding="utf-8", errors="replace")
-    try:
-        process = subprocess.Popen(command, cwd=source_dir(), env=env, stdout=sink,
-                                   stderr=subprocess.STDOUT,
-                                   start_new_session=not config.IS_WINDOWS,
-                                   creationflags=config.subprocess_flags())
-    except OSError as exc:
-        return False, f"Could not start ComfyUI: {exc}"
-    finally:
-        sink.close()
-    try:
-        code = process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        with _proc_lock:
-            _process, _running_device = process, device
-        state.set("comfyui_device", device.id)
-        write_selection(device)
-        return True, ""
-    tail = _log_tail()
-    return False, f"ComfyUI exited at once (code {code})." + (f"\n{tail}" if tail else "")
+    state.set("comfyui_device", device.id)
+    log.info("ComfyUI device set to %s", device.id)
 
 
 def device_rows(found: list[Device]) -> list[dict]:
@@ -805,13 +664,14 @@ def describe() -> dict:
     found = devices()
     return {
         "devices": device_rows(found),
-        # What the card starts out selecting (the last choice), and what it labels as
-        # recommended (the vendor order). Different questions: someone who picked the
-        # Intel card still has an NVIDIA card that is the better one.
+        # What the card starts out selecting, what it labels as recommended (the
+        # vendor order), and what the skills will use. The first follows the second
+        # until something is picked; someone who picked the Intel card still has an
+        # NVIDIA card that is the better one.
         "default": default_device(found).id,
         "recommended": recommended_device(found).id,
+        "selected": selected_device_id(),
         "status": status(),
-        "busy": busy() if _ours_alive() else False,
         "version": source_version(),
     }
 

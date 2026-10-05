@@ -529,27 +529,23 @@ def install_comfyui(out: Progress) -> bool:
     return comfyui.install(comfyui.default_device(comfyui.devices()), out)
 
 
-def run_comfyui(device_id: str, force: bool = False,
-                take_over: bool = False) -> tuple[bool, str, str]:
-    """Start ComfyUI on a device, installing what that device needs first.
+def select_comfyui(device_id: str) -> tuple[bool, str, str]:
+    """Make this the device ComfyUI uses, installing what it needs first.
 
-    Returns (ok, message, kind). When something has to be installed this starts a job
-    and returns at once; the page follows it the way it follows any install, and the
-    job starts ComfyUI as its last step.
+    Recorded, not started: the image and video skills start ComfyUI on it when they
+    need it -- see comfyui.py for why it is theirs to start. Returns (ok, message,
+    kind). When something has to be installed this starts a job and returns at once;
+    the page follows it the way it follows any install.
     """
     device = comfyui.find_device(device_id)
     if device is None:
         return False, "That device is no longer on this computer.", FAILED
     if not device.usable:
         return False, device.note or f"{device.name} cannot run ComfyUI.", BLOCKED
-    if not force and comfyui.busy():
-        # A switch is a restart, and a restart throws away whatever it was rendering.
-        return False, ("ComfyUI is still working on a queue. Wait for it to finish, "
-                       "or stop it first."), BLOCKED
 
     if comfyui.source_installed() and comfyui.env_ready(device.backend):
-        started, error = comfyui.launch(device, take_over=take_over)
-        return (True, "", DONE) if started else (False, error, FAILED)
+        comfyui.write_selection(device)
+        return True, "", DONE
 
     def work(out: Progress) -> bool:
         if not comfyui.install(device, out):
@@ -558,14 +554,11 @@ def run_comfyui(device_id: str, force: bool = False,
         # program this application no longer installs.
         with contextlib.suppress(Exception):
             shortcuts.remove_component("comfyui")
-        out.note(f"Starting ComfyUI on {device.name}.")
-        started, error = comfyui.launch(device, take_over=take_over)
-        if not started:
-            out.note(error)
-        return started
+        comfyui.write_selection(device)
+        return True
 
     started, error = start("comfyui", work=work,
-                           done=f"ComfyUI is installed and starting on {device.name}.")
+                           done=f"ComfyUI is installed and set to use {device.name}.")
     return (True, "installing", DONE) if started else (False, error, BLOCKED)
 
 
@@ -736,9 +729,9 @@ CATALOGUE: tuple[Component, ...] = (
         name="ComfyUI",
         description="Node-based generative AI workflows, run here without a window of "
                     "its own and opened in the browser.",
-        note="Pick the card it runs on below. Each kind of card gets its own PyTorch, "
-             "downloaded the first time that card is started: about 2.3 GB for NVIDIA, "
-             "1.8 GB for Intel. Changing cards restarts ComfyUI.",
+        note="Pick the card ComfyUI uses; the image and video skills start it there "
+             "when they need it. Each kind of card gets its own PyTorch, downloaded the "
+             "first time it is chosen: about 2.3 GB for NVIDIA, 1.8 GB for Intel.",
         page=comfyui.PAGE,
         detect=comfyui.detect,
         install=install_comfyui,

@@ -200,10 +200,16 @@ make that true), everything else from the system's adapter list — and the CPU 
 marked as not recommended: it is the way out when no card works, not an option anyone
 should pick for real work. AMD is listed and disabled; there is no ROCm build here.
 
-Switching between two cards of the same kind is an argument; switching kinds is
-another environment. Either way it is a restart, so Start refuses while a queue is
-running unless the user confirms. ComfyUI runs as this application's child on
-`127.0.0.1:8188` and is stopped when the application quits.
+The card chooses; it does not start ComfyUI. "Use this card" installs that card's
+build if it is missing and writes `selected.json` beside the install -- the Python, the
+arguments and environment that put ComfyUI on the card (`--cuda-device N`,
+`ONEAPI_DEVICE_SELECTOR`, `--cpu`), and the card's vendor and index. The image and
+video skills read it, start ComfyUI themselves on `127.0.0.1:8188`, and move an idle
+server over when the choice changes. An earlier version had a Start button here, and
+that was the problem: the skills size `--reserve-vram` at launch from what the hosted
+LLM holds, so a ComfyUI started from this card had none, and the skills then used it.
+The card still shows which device the running server is on, and says so when it was
+not started protected.
 
 Detection is looser than the install path on purpose: it finds copies this application
 never installed, because telling someone to install what they already have is its own
