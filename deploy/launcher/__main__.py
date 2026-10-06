@@ -1712,18 +1712,112 @@ def diagnose() -> int:
     return 0 if report.ok else 1
 
 
+# The window's own runtime. Headless has no window, so missing it blocks nothing.
+WINDOW_ONLY_CHECKS = {"webview2", "webkitgtk"}
+
+
+def headless() -> int:
+    """First-run setup and the service, with no window: what a person gets from the first
+    launch, minus the UI. For the release pipeline's acceptance run, which installs the
+    application on a build host with nobody at the screen, and for machines with no
+    desktop at all.
+
+    Runs the same steps as Launcher.bootstrap -- preflight, provisioning, starting the
+    service -- and then stays, managing the service like the windowed launcher does,
+    until it is stopped. Questions the window would ask get their safe answer instead:
+    a taken port moves to the suggested free one, and the starter model is skipped.
+    Progress goes to the launcher log and provision.log, as always; a frozen launcher
+    has no console to print to.
+
+    Exit codes: 0 stopped normally, 1 the service stopped by itself, 2 a check failed
+    before anything was installed, 3 setup failed.
+    """
+    # The windowed path would relaunch through Explorer here, and that relaunch loses
+    # this argument. A headless start is never the installer's child, so needing it
+    # means something unexpected started this; say so rather than run setup that fails.
+    if hardening.enforces_redirection_trust():
+        log.error("headless: started with the redirection-trust mitigation, under which "
+                  "uv cannot use its Python; start it directly, not from an installer")
+        return 2
+
+    try:
+        log.info("payload: %s", config.ensure_writable_payload())
+    except OSError:
+        log.exception("could not prepare a writable payload at %s", config.working_payload_dir())
+
+    if not single_instance.acquire(lambda: None):
+        log.error("headless: another copy is already running")
+        return 2
+
+    report = preflight.run()
+    blocking = [c for c in report.blocking if c.key not in WINDOW_ONLY_CHECKS]
+    if blocking:
+        for check in blocking:
+            log.error("headless: %s: %s %s", check.label, check.detail, check.remedy)
+        return 2
+
+    try:
+        if not provision.is_provisioned():
+            reach = connectivity.check()
+            if not reach.ok:
+                log.error("headless: %s -- %s", *connectivity.explain(reach))
+                return 2
+            state.set("setup_started", True)
+
+            def take_suggested(requested: int, suggested: int) -> int:
+                log.warning("headless: port %s is taken; using %s", requested, suggested)
+                return suggested
+
+            port = service_manager.resolve_first_run_port(take_suggested)
+            state.set("service_port", port)
+            env_file.ensure(port)
+            if port != config.DEFAULT_SERVICE_PORT:
+                service_manager.set_port(port)
+
+            log.info("headless: provisioning")
+            accelerator = provision.run(on_phase=lambda _key, label: log.info("headless: %s", label))
+            state.set("setup_started", False)
+            log.info("headless: provisioned (%s)", accelerator or "no accelerator")
+
+        service = service_manager.ServiceManager()
+        if service.status() == "ours" and state.get("service_version") != config.app_version():
+            log.info("headless: replacing a service started by another version")
+            service.stop()
+        service.start()
+        log.info("headless: service up on port %s", service.port)
+    except Exception:
+        log.exception("headless: setup failed")
+        return 3
+
+    try:
+        while service.is_running():
+            time.sleep(5)
+        log.error("headless: the service stopped by itself")
+        return 1
+    except KeyboardInterrupt:
+        log.info("headless: stopping")
+        service.stop()
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="launcher", description=__doc__)
     parser.add_argument("--diagnose", action="store_true",
                         help="report what startup would do, without a window and without installing")
     parser.add_argument(autostart.LOGIN_FLAG, dest="autostart", action="store_true",
                         help="this launch came from the autostart entry, not from a person")
+    parser.add_argument("--headless", action="store_true",
+                        help="set up and run the service with no window (release acceptance, "
+                             "machines without a desktop)")
     args = parser.parse_args(argv)
 
     if args.diagnose:
         return diagnose()
 
     applog.banner()
+
+    if args.headless:
+        return headless()
 
     # Before anything reads a path. An installer's child inherits a mitigation that
     # makes uv's managed Python unreachable, and a first run under it installs nothing
