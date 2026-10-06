@@ -26,6 +26,9 @@
 AppId={{8B1C5E42-3D7A-4C19-9F2B-6A5E4D3C1B70}
 AppName={#AppName}
 AppVersion={#AppVersion}
+; The release build passes the full X.Y.Z.B (0.1.0.3), so Setup.exe's file properties
+; name the exact build, not just the public version several builds can share.
+VersionInfoVersion={#AppVersion}
 AppPublisher={#Publisher}
 DefaultDirName={localappdata}\Programs\{#AppId}
 DefaultGroupName={#AppName}
