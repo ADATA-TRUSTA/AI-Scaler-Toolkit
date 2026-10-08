@@ -12,6 +12,9 @@ permissions:
 
 jobs:
   archive-metrics:
+    # The traffic it archives is the public repository's; the private copies have none
+    # worth keeping, and no GH_METRICS_TOKEN.
+    if: github.repository == 'ADATA-TRUSTA/AI-Scaler-Toolkit'
     runs-on: ubuntu-latest
     env:
       GH_METRICS_TOKEN: ${{ secrets.GH_METRICS_TOKEN }}
