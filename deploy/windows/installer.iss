@@ -42,7 +42,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; keep current instead of two.
 LicenseFile=..\..\LICENSE
 OutputDir=Output
-OutputBaseFilename=AIScalerToolkit_{#AppVersion}_Setup
+; Product, version, architecture -- named like the AppImage, with Windows' word for it.
+OutputBaseFilename=AIScalerToolkit-{#AppVersion}-x64-Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

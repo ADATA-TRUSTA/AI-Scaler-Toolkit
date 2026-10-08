@@ -247,7 +247,10 @@ main() {
     sign_args=(--sign --sign-key "$SIGN_KEY")
   fi
 
-  local target="$OUT_DIR/${APP_ID}-${VERSION}-x86_64.AppImage"
+  # Named like the Windows installer -- product, version, architecture -- with each
+  # platform's own word for the architecture. APP_ID (the lowercase id) stays what the
+  # desktop entry and the data directories use; the file name is not tied to it.
+  local target="$OUT_DIR/AIScalerToolkit-${VERSION}-x86_64.AppImage"
   log "packaging -> $target${SIGN_KEY:+ (signed with $SIGN_KEY)}"
   ARCH=x86_64 "$tool" "${sign_args[@]}" "$APPDIR" "$target"
   [[ -f "$target" ]] || die "appimagetool reported success but produced no file"

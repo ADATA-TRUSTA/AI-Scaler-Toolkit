@@ -2,6 +2,29 @@
 
 [← 回到 README](../README.zh-TW.md)
 
+## 用安裝檔安裝（一般使用者）
+
+從 GitHub 的 [Releases](https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases) 下載自己平台的檔案。每個版本都有兩個檔案，各自對應一種架構：
+
+| 平台 | 檔案 | 需求 |
+|------|------|------|
+| Windows | `AIScalerToolkit-<版本>-x64-Setup.exe` | Windows 10／11，x64。不需要系統管理員權限 |
+| Linux | `AIScalerToolkit-<版本>-x86_64.AppImage` | x86_64，glibc 2.35 以上（例如 Ubuntu 22.04 以上） |
+
+**GPU**：NVIDIA 需 compute capability 7.5 以上（RTX 20 系列、GTX 16 系列以後）與 R580 以上的驅動；Intel Arc／iGPU 亦可。目前只提供 x64／x86_64，沒有 ARM 版本。
+
+**Linux 第一次啟動**：AppImage 會一次安裝缺少的系統套件——WebKitGTK（畫視窗用）與編譯工具 `build-essential`、`cmake`——並跳出一次系統密碼視窗。llama.cpp 會在你的電腦上編譯，針對這台 CPU 最佳化。沒有圖形介面或不想授權時，先自行執行：
+
+```bash
+sudo apt install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 build-essential cmake
+chmod +x AIScalerToolkit-*-x86_64.AppImage
+./AIScalerToolkit-*-x86_64.AppImage
+```
+
+兩個平台第一次啟動都會下載 GPU 執行環境（數 GB），之後啟動就快了。
+
+以下是**從原始碼安裝**（開發者）的說明。
+
 ## 系統需求
 
 ### 基本需求（兩平台共同）

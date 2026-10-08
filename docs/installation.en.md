@@ -2,6 +2,29 @@
 
 [← Back to README](../README.md)
 
+## Installing a release (most users)
+
+Download the file for your platform from the GitHub [Releases](https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases) page. Every version has two, one per architecture:
+
+| Platform | File | Requires |
+|----------|------|----------|
+| Windows | `AIScalerToolkit-<version>-x64-Setup.exe` | Windows 10/11, x64. No administrator rights needed |
+| Linux | `AIScalerToolkit-<version>-x86_64.AppImage` | x86_64, glibc 2.35 or newer (Ubuntu 22.04 or newer, for example) |
+
+**GPU**: NVIDIA needs compute capability 7.5 or newer (RTX 20, GTX 16 series and later) and an R580 or newer driver; Intel Arc and iGPUs work too. Only x64/x86_64 builds exist; there is no ARM build.
+
+**Linux, first launch**: the AppImage installs the system packages it is missing in one go — WebKitGTK (to draw its window) and the build tools `build-essential` and `cmake` — asking once for your password. llama.cpp is compiled on your machine, tuned to its CPU. With no desktop session, or to do it yourself first:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 build-essential cmake
+chmod +x AIScalerToolkit-*-x86_64.AppImage
+./AIScalerToolkit-*-x86_64.AppImage
+```
+
+On both, first launch downloads the GPU runtime (several GB); later starts are quick.
+
+The rest of this page is about **installing from source** (developers).
+
 ## System Requirements
 
 ### Basic Requirements (Both Platforms)
