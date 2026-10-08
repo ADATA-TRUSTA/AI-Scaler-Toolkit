@@ -259,8 +259,33 @@ your distribution and version."
   fi
 }
 
-if ! have_webkitgtk; then
-  apt_install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 || true
+# llama.cpp is built on this machine during first setup: there is no Linux CUDA build
+# to download, and a local build is tuned to this CPU. So first setup needs a C and C++
+# compiler and cmake, which a desktop Ubuntu does not have. setup_env.sh, started from
+# the launcher with no terminal, cannot ask for a password -- it can only stop and say
+# what to install -- so they are asked for here, with everything else.
+missing_build_tools() {
+  command -v cmake >/dev/null 2>&1 || echo cmake
+  if ! { command -v cc || command -v gcc; } >/dev/null 2>&1 ||
+     ! { command -v c++ || command -v g++; } >/dev/null 2>&1; then
+    echo build-essential
+  fi
+}
+
+# Everything missing, in one apt_install: from a desktop each call is a polkit password
+# dialog, and first launch used to show one for WebKitGTK and another for the tray. If
+# the lot fails together -- one name this distribution does not carry -- the window's
+# own packages are tried again alone, so nothing optional can cost the user the window.
+webkit_packages=(libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1)
+wanted=()
+have_webkitgtk || wanted+=("${webkit_packages[@]}")
+have_tray_typelib || wanted+=(gir1.2-ayatanaappindicator3-0.1)
+mapfile -t build_tools < <(missing_build_tools)
+wanted+=("${build_tools[@]}")
+if ((${#wanted[@]})); then
+  if ! apt_install "${wanted[@]}" && ! have_webkitgtk; then
+    apt_install "${webkit_packages[@]}" || true
+  fi
 fi
 
 if ! have_webkitgtk; then
@@ -278,14 +303,17 @@ often than the dependency itself causes trouble."
   exit 1
 fi
 
-# Best effort, and deliberately quiet: the window is the product and the tray is a
-# convenience, so a machine that will not install this still gets a working program.
-# It is attempted here rather than from Python because it has to happen before the
-# process that will load the typelib starts.
-if ! have_tray_typelib; then
-  apt_install gir1.2-ayatanaappindicator3-0.1 || true
-  have_tray_typelib || echo "[AppRun] no AppIndicator typelib; starting without a tray icon" >&2
-fi
+# The tray is best effort, and deliberately quiet: the window is the product and the
+# tray a convenience, so a machine that will not install it still gets a working
+# program. Installed above rather than from Python because it has to be there before
+# the process that will load the typelib starts.
+have_tray_typelib || echo "[AppRun] no AppIndicator typelib; starting without a tray icon" >&2
+
+# Not fatal here: the program runs, and first setup stops with the command to run if
+# the build tools are still missing then. Said now too, for whoever reads the log.
+mapfile -t build_tools < <(missing_build_tools)
+((${#build_tools[@]} == 0)) ||
+  echo "[AppRun] first setup will need: ${build_tools[*]} (sudo apt install ${build_tools[*]})" >&2
 
 if [[ ! -f "$REQUIREMENTS" ]]; then
   report_problem "This build of $APP_TITLE is incomplete: it carries no
