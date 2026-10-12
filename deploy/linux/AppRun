@@ -305,6 +305,10 @@ apt_wanted() {
 #   libze-dev                                  only for libze_loader.so, the unversioned
 #                                              name oneCCL opens: training fails without
 #                                              it although inference works
+#   intel-ocloc                                Intel's offline compiler, which torch.compile
+#                                              runs when vLLM starts on XPU; without it
+#                                              vLLM dies with "No such file or directory:
+#                                              'ocloc'" unless it is told to run eager
 #   mesa-vulkan-drivers vulkan-tools           the Vulkan driver itself, and vulkaninfo,
 #                                              which is how preflight looks for it
 #   libvulkan-dev glslc spirv-headers          what llama's Vulkan backend compiles
@@ -332,7 +336,7 @@ intel_gpu_packages() {
       has_gpu_vendor 0x8086 || return 0
       ;;
   esac
-  apt_wanted libze1 libze-intel-gpu1 intel-opencl-icd libze-dev \
+  apt_wanted libze1 libze-intel-gpu1 intel-opencl-icd libze-dev intel-ocloc \
              mesa-vulkan-drivers vulkan-tools \
              libvulkan-dev glslc spirv-headers
 }
@@ -349,6 +353,11 @@ mapfile -t build_tools < <(missing_build_tools)
 wanted+=("${build_tools[@]}")
 mapfile -t gpu_packages < <(intel_gpu_packages)
 wanted+=("${gpu_packages[@]}")
+# git, for Hermes: its vendor installer clones the source and stops at once without it
+# (a stock Ubuntu 24.04 had none, and "Install Hermes" failed in a second). Nothing
+# else here needs git -- ComfyUI and llama come as archives -- but by the time someone
+# presses that button there is no terminal and no way left to ask for a password.
+command -v git >/dev/null 2>&1 || wanted+=(git)
 if ((${#wanted[@]})); then
   if ! apt_install "${wanted[@]}" && ! have_webkitgtk; then
     apt_install "${webkit_packages[@]}" || true

@@ -424,13 +424,22 @@ def _install_hermes_linux(out: Progress) -> bool:
     From a file rather than piped into bash, for the same reason as on Windows: a pipe
     cannot pass the switch. `bash -s -- --include-desktop` could, but a file also gives
     a real path to report errors against.
+
+    And --non-interactive, which skips the vendor's setup wizard and its gateway
+    install. The script runs them on /dev/tty whenever it can open one, so started
+    from a terminal it stopped at "How would you like to set up Hermes?" with nobody
+    reading that terminal, and the card spun forever. They are not needed: this
+    application configures Hermes itself, through `hermes config set` (see
+    hermes_commands). Started with no terminal they were skipped anyway, which is why
+    it went unnoticed.
     """
     script = Path(tempfile.gettempdir()) / "hermes-install.sh"
     if not _download(HERMES_SH, script, out):
         return False
     out.note("Installing the command line tool and building the desktop application. "
              "The desktop build is a separate step and takes several minutes.")
-    code = _stream(["bash", str(script), "--include-desktop"], out, "install-hermes.log")
+    code = _stream(["bash", str(script), "--include-desktop", "--non-interactive"], out,
+                   "install-hermes.log")
     if code != 0:
         out.note(f"The installer exited with code {code}.")
 

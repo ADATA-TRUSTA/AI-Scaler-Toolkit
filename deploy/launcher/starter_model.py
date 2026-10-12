@@ -84,9 +84,8 @@ _TERMINAL = ("completed", "failed", "cancelled")
 def vllm_installed() -> bool:
     """Whether the service environment has vLLM in it.
 
-    Read from the disk rather than from /health, which reports vLLM wherever the
-    backend runs on Linux -- including on an Intel machine, where setup installs no
-    vLLM because it only comes with the CUDA build.
+    Read from the disk rather than from /health, which once reported vLLM wherever the
+    backend ran on Linux, whether or not setup had installed it.
     """
     if config.IS_WINDOWS:
         return False
@@ -97,8 +96,16 @@ def vllm_installed() -> bool:
 
 
 def choose() -> Starter:
-    """vLLM's weights where vLLM is installed, the GGUF for llama.cpp everywhere else."""
-    return WEIGHTS if vllm_installed() else GGUF
+    """vLLM's weights where vLLM is installed on NVIDIA, the GGUF for llama.cpp elsewhere.
+
+    Intel gets vLLM too now (setup_env's vllm-xpu extra), but not this default: a laptop
+    iGPU shares system memory with everything else, and llama.cpp's Vulkan build is the
+    one measured there (61 tok/s on an Arc B390). Three times the download for an
+    engine not shown to be faster is not a first-run default; vLLM stays one click away.
+    """
+    if vllm_installed() and state.get("accelerator") == "cuda":
+        return WEIGHTS
+    return GGUF
 
 
 def _request(port: int, path: str, body: dict | None = None) -> dict | None:

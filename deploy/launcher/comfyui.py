@@ -222,7 +222,11 @@ def _linux_adapters() -> list[dict]:
     out = _run(["lspci", "-nn"]) or ""
     adapters = []
     for line in out.splitlines():
-        if not re.search(r"vga|3d|display", line, re.IGNORECASE):
+        # By PCI class, display controllers being 03xx: the description is not enough.
+        # Matching "vga|3d|display" in it took a Xeon's "Non-VGA unclassified device
+        # [0000]: Intel ... [8086:7f2f]" for an Intel GPU, offered it as an XPU device,
+        # and the XPU install that followed could only fail.
+        if not re.search(r"\[03[0-9a-f]{2}\]", line, re.IGNORECASE):
             continue
         match = re.search(r"\[([0-9a-f]{4}):[0-9a-f]{4}\]", line, re.IGNORECASE)
         if not match:
