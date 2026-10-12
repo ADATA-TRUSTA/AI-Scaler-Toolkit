@@ -272,6 +272,71 @@ missing_build_tools() {
   fi
 }
 
+# Whether any GPU from this PCI vendor is present, read from sysfs: lspci is not on
+# every desktop, and this runs before anything is installed.
+has_gpu_vendor() {
+  local v
+  for v in /sys/class/drm/card*/device/vendor; do
+    [[ -r "$v" && "$(<"$v")" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# The packages named that are not installed and that this release's archive carries.
+# Filtered by availability first because apt installs all or nothing: one name a
+# release does not have (Level Zero is not in 22.04's archive) would otherwise sink the
+# window's own packages along with it.
+apt_wanted() {
+  command -v dpkg-query >/dev/null 2>&1 || return 0
+  local p
+  for p in "$@"; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" && continue
+    apt-cache show "$p" >/dev/null 2>&1 && echo "$p"
+  done
+}
+
+# An Intel GPU takes the XPU build of torch and the Vulkan build of llama, and a stock
+# Ubuntu has neither half's user-space. The kernel driver is in the box; what is not:
+#
+#   libze1 libze-intel-gpu1 intel-opencl-icd   Level Zero and OpenCL, which torch's
+#                                              XPU backend talks to the GPU through.
+#                                              Without them it counts zero devices and
+#                                              setup fails its XPU check
+#   libze-dev                                  only for libze_loader.so, the unversioned
+#                                              name oneCCL opens: training fails without
+#                                              it although inference works
+#   mesa-vulkan-drivers vulkan-tools           the Vulkan driver itself, and vulkaninfo,
+#                                              which is how preflight looks for it
+#   libvulkan-dev glslc spirv-headers          what llama's Vulkan backend compiles
+#                                              against, beside cmake and the compilers
+#
+# Found by installing on two Panther Lake laptops (Ubuntu 24.04): both failed setup
+# twice, once at the XPU check and once at the llama build, and both completed once
+# these were installed by hand. On Windows the same pieces come with Intel's driver.
+#
+# What this cannot do is make them new enough. 24.04's archive carries compute runtime
+# 23.43, from before Lunar Lake; those laptops needed 26.31 from Intel's graphics PPA
+# (ppa:kobuk-team/intel-graphics). Adding a package source is the user's decision, not
+# a side effect of opening an application, so the install docs say to add it first and
+# this installs from whatever sources the machine has -- the PPA's builds when it is
+# there, the archive's when it is not.
+#
+# Not for NVIDIA, which takes the CUDA builds and needs none of it: the same rule as
+# preflight's, nvidia-smi first, and TRUSTA_ACCEL decides when it is set.
+intel_gpu_packages() {
+  case "${TRUSTA_ACCEL:-}" in
+    cuda) return 0 ;;
+    xpu) ;;
+    *)
+      command -v nvidia-smi >/dev/null 2>&1 && return 0
+      has_gpu_vendor 0x8086 || return 0
+      ;;
+  esac
+  apt_wanted libze1 libze-intel-gpu1 intel-opencl-icd libze-dev \
+             mesa-vulkan-drivers vulkan-tools \
+             libvulkan-dev glslc spirv-headers
+}
+
 # Everything missing, in one apt_install: from a desktop each call is a polkit password
 # dialog, and first launch used to show one for WebKitGTK and another for the tray. If
 # the lot fails together -- one name this distribution does not carry -- the window's
@@ -282,6 +347,8 @@ have_webkitgtk || wanted+=("${webkit_packages[@]}")
 have_tray_typelib || wanted+=(gir1.2-ayatanaappindicator3-0.1)
 mapfile -t build_tools < <(missing_build_tools)
 wanted+=("${build_tools[@]}")
+mapfile -t gpu_packages < <(intel_gpu_packages)
+wanted+=("${gpu_packages[@]}")
 if ((${#wanted[@]})); then
   if ! apt_install "${wanted[@]}" && ! have_webkitgtk; then
     apt_install "${webkit_packages[@]}" || true
@@ -314,6 +381,9 @@ have_tray_typelib || echo "[AppRun] no AppIndicator typelib; starting without a 
 mapfile -t build_tools < <(missing_build_tools)
 ((${#build_tools[@]} == 0)) ||
   echo "[AppRun] first setup will need: ${build_tools[*]} (sudo apt install ${build_tools[*]})" >&2
+mapfile -t gpu_packages < <(intel_gpu_packages)
+((${#gpu_packages[@]} == 0)) ||
+  echo "[AppRun] the Intel GPU still needs: ${gpu_packages[*]} (sudo apt install ${gpu_packages[*]})" >&2
 
 if [[ ! -f "$REQUIREMENTS" ]]; then
   report_problem "This build of $APP_TITLE is incomplete: it carries no

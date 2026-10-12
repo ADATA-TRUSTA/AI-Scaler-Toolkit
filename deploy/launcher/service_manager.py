@@ -422,6 +422,16 @@ class ServiceManager:
             merged["PATH"] = str(cuda_home / "bin") + os.pathsep + merged.get("PATH", "")
             log.info("CUDA_HOME=%s (the toolkit the cuda extra installed)", cuda_home)
 
+        # Intel only: setup_env.sh links libze_loader.so into the environment when
+        # libze-dev is absent, because oneCCL opens that unversioned name and training
+        # fails without it while inference works. On LD_LIBRARY_PATH here, as
+        # run_service.sh does, so the training process the service spawns inherits it.
+        ze_links = config.venv_dir() / "lib" / "trusta-ze"
+        if not config.IS_WINDOWS and ze_links.is_dir():
+            current = merged.get("LD_LIBRARY_PATH", "")
+            merged["LD_LIBRARY_PATH"] = str(ze_links) + (os.pathsep + current if current else "")
+            log.info("LD_LIBRARY_PATH += %s (libze_loader.so without libze-dev)", ze_links)
+
         # Its output goes to a file, not to nowhere. Discarding it meant a service that
         # failed to start left no explanation at all.
         config.log_dir().mkdir(parents=True, exist_ok=True)

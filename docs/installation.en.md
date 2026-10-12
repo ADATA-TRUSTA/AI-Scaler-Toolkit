@@ -13,10 +13,33 @@ Download the file for your platform from the GitHub [Releases](https://github.co
 
 **GPU**: NVIDIA needs compute capability 7.5 or newer (RTX 20, GTX 16 series and later) and an R580 or newer driver; Intel Arc and iGPUs work too. Only x64/x86_64 builds exist; there is no ARM build.
 
-**Linux, first launch**: the AppImage installs the system packages it is missing in one go — WebKitGTK (to draw its window) and the build tools `build-essential` and `cmake` — asking once for your password. llama.cpp is compiled on your machine, tuned to its CPU. With no desktop session, or to do it yourself first:
+**Linux, install FUSE first**: an AppImage runs through FUSE 2, which Ubuntu 24.04 does not install by default; without it the file does not open at all. Once, before the first launch:
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 build-essential cmake
+sudo apt install libfuse2t64      # Ubuntu 24.04 and newer
+sudo apt install libfuse2         # Ubuntu 22.04
+```
+
+**Linux, first launch**: the AppImage installs the system packages it is missing in one go, asking once for your password:
+
+- WebKitGTK (to draw its window) and the tray icon
+- the build tools `build-essential` and `cmake`: llama.cpp is compiled on your machine, tuned to its CPU
+- **with an Intel GPU**, also: Level Zero and OpenCL (`libze1`, `libze-intel-gpu1`, `intel-opencl-icd`, through which PyTorch uses the GPU), `libze-dev` (fine-tuning needs it), the Vulkan driver and tools (`mesa-vulkan-drivers`, `vulkan-tools`), and `libvulkan-dev`, `glslc` and `spirv-headers`, which llama.cpp's Vulkan build compiles against. On Windows these come with Intel's driver; a stock Ubuntu has none of them
+- **a recent Intel GPU (Lunar Lake, Panther Lake, Arc B-series) needs Intel's graphics package source first**: the version Ubuntu 24.04 ships (from 2023) is too old to see the GPU at all. Once, before the first launch:
+
+  ```bash
+  sudo add-apt-repository -y ppa:kobuk-team/intel-graphics
+  ```
+
+  The AppImage does not add a package source for you, since it changes what every later system update installs. Ubuntu 22.04's archive has no Level Zero, so for an Intel GPU use 24.04 or newer
+- an NVIDIA driver is proprietary and yours to install beforehand (`nvidia-smi` has to run)
+
+With no desktop session, or to do it yourself first:
+
+```bash
+sudo apt install libfuse2t64 libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 gir1.2-ayatanaappindicator3-0.1 build-essential cmake
+# and with an Intel GPU (a recent one: add the PPA above first):
+sudo apt install libze1 libze-intel-gpu1 intel-opencl-icd libze-dev mesa-vulkan-drivers vulkan-tools libvulkan-dev glslc spirv-headers
 chmod +x AIScalerToolkit-*-x86_64.AppImage
 ./AIScalerToolkit-*-x86_64.AppImage
 ```

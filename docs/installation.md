@@ -13,10 +13,33 @@
 
 **GPU**：NVIDIA 需 compute capability 7.5 以上（RTX 20 系列、GTX 16 系列以後）與 R580 以上的驅動；Intel Arc／iGPU 亦可。目前只提供 x64／x86_64，沒有 ARM 版本。
 
-**Linux 第一次啟動**：AppImage 會一次安裝缺少的系統套件——WebKitGTK（畫視窗用）與編譯工具 `build-essential`、`cmake`——並跳出一次系統密碼視窗。llama.cpp 會在你的電腦上編譯，針對這台 CPU 最佳化。沒有圖形介面或不想授權時，先自行執行：
+**Linux 先裝 FUSE**：AppImage 要靠 FUSE 2 才能執行，Ubuntu 24.04 預設沒有，沒裝的話檔案連開都開不起來。第一次使用前先執行一次：
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 build-essential cmake
+sudo apt install libfuse2t64      # Ubuntu 24.04 以上
+sudo apt install libfuse2         # Ubuntu 22.04
+```
+
+**Linux 第一次啟動**：AppImage 會把缺少的系統套件一次裝好，只跳一次系統密碼視窗：
+
+- WebKitGTK（畫視窗用）、系統匣圖示
+- 編譯工具 `build-essential`、`cmake`：llama.cpp 會在你的電腦上編譯，針對這台 CPU 最佳化
+- **Intel 顯示卡**另外會裝：Level Zero 與 OpenCL（`libze1`、`libze-intel-gpu1`、`intel-opencl-icd`，PyTorch 用它們使用 GPU）、`libze-dev`（微調訓練要用）、Vulkan 驅動與工具（`mesa-vulkan-drivers`、`vulkan-tools`），以及 llama.cpp 編 Vulkan 版所需的 `libvulkan-dev`、`glslc`、`spirv-headers`。Windows 上這些會隨 Intel 驅動一起裝好，Ubuntu 預設沒有
+- **新款 Intel 顯示卡（Lunar Lake、Panther Lake、Arc B 系列）要先加 Intel 的顯卡套件來源**：Ubuntu 24.04 內建的版本（2023 年）太舊，裝了也偵測不到 GPU。第一次啟動前先執行一次：
+
+  ```bash
+  sudo add-apt-repository -y ppa:kobuk-team/intel-graphics
+  ```
+
+  AppImage 不會替你加套件來源，因為它會影響之後整個系統的更新。Ubuntu 22.04 的套件庫沒有 Level Zero，Intel 顯示卡請用 24.04 以上
+- NVIDIA 顯示卡的驅動是專有軟體，要自己先裝好（`nvidia-smi` 能執行即可）
+
+沒有圖形介面、或想先自己裝好時：
+
+```bash
+sudo apt install libfuse2t64 libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 gir1.2-ayatanaappindicator3-0.1 build-essential cmake
+# Intel 顯示卡再加上（新款先加上面的 PPA）：
+sudo apt install libze1 libze-intel-gpu1 intel-opencl-icd libze-dev mesa-vulkan-drivers vulkan-tools libvulkan-dev glslc spirv-headers
 chmod +x AIScalerToolkit-*-x86_64.AppImage
 ./AIScalerToolkit-*-x86_64.AppImage
 ```
