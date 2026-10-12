@@ -35,7 +35,12 @@ HOSTS: tuple[tuple[str, str, str], ...] = (
     ("PyTorch", "https://download.pytorch.org/whl/", "the GPU build of PyTorch"),
 )
 
-_TIMEOUT_SECONDS = 6
+# A host that misses the first is asked once more, with longer: a slow answer is not a
+# missing one. With a single 6 s try, a Panther Lake laptop was told PyPI was blocked --
+# setup stopped there -- while PyPI answered a HEAD in 0.25 s before and after; the
+# moment it was asked, on Wi-Fi straight after an apt install, it took 13 s. An
+# unplugged machine still finds out at once: name resolution fails on both tries.
+_TIMEOUTS_SECONDS = (8, 15)
 
 
 @dataclass(frozen=True)
@@ -52,16 +57,20 @@ class Result:
 
 
 def _reachable(url: str) -> bool:
-    request = urllib.request.Request(url, method="HEAD",
-                                     headers={"User-Agent": "AI-Scaler-Toolkit"})
-    try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS):
+    for timeout in _TIMEOUTS_SECONDS:
+        request = urllib.request.Request(url, method="HEAD",
+                                         headers={"User-Agent": "AI-Scaler-Toolkit"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout):
+                return True
+        except urllib.error.HTTPError:
+            # An answer is an answer: a 403 or 405 to a HEAD still proves the host is there.
             return True
-    except urllib.error.HTTPError:
-        # An answer is an answer: a 403 or 405 to a HEAD still proves the host is there.
-        return True
-    except (OSError, ValueError):
-        return False
+        except ValueError:
+            return False
+        except OSError:
+            continue
+    return False
 
 
 def check() -> Result:
