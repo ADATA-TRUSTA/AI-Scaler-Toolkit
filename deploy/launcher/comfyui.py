@@ -508,7 +508,38 @@ def ensure_env(backend: str, out) -> bool:
     if code != 0:
         out.note("ComfyUI's requirements did not install.")
         return False
+    _place_crt(backend, out)
     return _verify(backend, out)
+
+
+def _torch_imports(backend: str) -> bool:
+    try:
+        result = subprocess.run([str(env_python(backend)), "-c", "import torch"],
+                                capture_output=True, timeout=120,
+                                creationflags=config.subprocess_flags())
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _place_crt(backend: str, out) -> None:
+    """Put the payload's Visual C++ runtime beside torch when torch cannot load without it.
+
+    A clean Windows has no VC++ redistributable, and torch's c10.dll then fails with
+    WinError 126. The backend's setup_env does the same for its own torch; this
+    environment is ComfyUI's and was left out. Only when the import fails, as there:
+    an app-local DLL shadows the system's, so a machine whose runtime works keeps it.
+    """
+    if not config.IS_WINDOWS:
+        return
+    runtime = config.vcruntime_dir()
+    torch_lib = env_dir(backend) / "Lib" / "site-packages" / "torch" / "lib"
+    if not runtime.is_dir() or not torch_lib.is_dir() or _torch_imports(backend):
+        return
+    out.note("torch cannot load here without the Visual C++ runtime; placing the copy "
+             "this application carries beside it.")
+    for dll in runtime.glob("*.dll"):
+        shutil.copy2(dll, torch_lib / dll.name)
 
 
 def install(device: Device, out) -> bool:
