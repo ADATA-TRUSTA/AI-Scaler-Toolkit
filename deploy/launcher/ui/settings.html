@@ -351,7 +351,10 @@
           <div class="label" id="version">—</div>
           <div class="hint" id="update-hint">Checks the public releases page.</div>
         </div>
-        <div class="control"><button id="check-update">Check now</button></div>
+        <div class="control">
+          <button id="check-update">Check now</button>
+          <button id="install-update" hidden>Update now</button>
+        </div>
       </div>
     </section>
 
@@ -438,6 +441,9 @@
       el("autostart").checked = s.autostart;
       el("port").value = s.service_port;
       el("version").textContent = "Installed version " + (s.installed_version || "unknown");
+      if (s.updated_from) {
+        el("update-hint").textContent = "Update finished — updated from " + s.updated_from + ".";
+      }
       if (s.platform !== "win32") {
         el("autostart-label").textContent = "Start automatically when you log in";
         el("autostart-hint").textContent =
@@ -528,8 +534,15 @@
         // Every outcome says something. "No update" and "could not ask" are different
         // answers and only one of them is worth acting on.
         if (s.available) {
-          hint.textContent = "Version " + s.latest + " is available — opening the release page.";
-          api.open_release_page();
+          // Installed from here, not by sending the user to a release page to download
+          // and run it themselves. The page stays one click away for the changes.
+          hint.textContent = "Version " + s.latest + " is available. ";
+          var notes = document.createElement("a");
+          notes.href = "#";
+          notes.textContent = "What's new";
+          notes.addEventListener("click", function (ev) { ev.preventDefault(); api.open_release_page(); });
+          hint.appendChild(notes);
+          el("install-update").hidden = false;
         } else if (s.reason === "none-published") {
           hint.textContent = "No releases have been published yet, so there is nothing newer.";
         } else if (s.reason === "unreachable") {
@@ -537,6 +550,45 @@
         } else {
           hint.textContent = "You are on the newest release (" + (s.latest || "unknown") + ").";
         }
+      });
+    });
+
+    el("install-update").addEventListener("click", function (e) {
+      var button = e.target;
+      var hint = el("update-hint");
+      button.disabled = true;
+      el("check-update").disabled = true;
+      hint.textContent = "Downloading…";
+      api.install_update().then(function (r) {
+        if (!r.ok) {
+          hint.textContent = "Could not update: " + r.error;
+          button.disabled = false;
+          el("check-update").disabled = false;
+          return;
+        }
+        var timer = setInterval(function () {
+          api.update_progress().then(function (p) {
+            var mb = function (n) { return (n / 1048576).toFixed(0); };
+            if (p.phase === "downloading") {
+              hint.textContent = "Downloading… " + mb(p.done) + (p.total ? " of " + mb(p.total) : "") + " MB";
+            } else if (p.phase === "verifying") {
+              hint.textContent = "Verifying the download…";
+            } else if (p.phase === "restarting") {
+              clearInterval(timer);
+              hint.textContent = "Installing. AI Scaler Toolkit closes now and reopens on the new version by itself.";
+            } else if (p.phase === "failed") {
+              clearInterval(timer);
+              hint.textContent = "Could not update: " + p.error + " ";
+              var page = document.createElement("a");
+              page.href = "#";
+              page.textContent = "Download it from the release page";
+              page.addEventListener("click", function (ev) { ev.preventDefault(); api.open_release_page(); });
+              hint.appendChild(page);
+              button.disabled = false;
+              el("check-update").disabled = false;
+            }
+          });
+        }, 500);
       });
     });
 

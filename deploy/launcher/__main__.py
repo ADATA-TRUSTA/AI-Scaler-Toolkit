@@ -399,6 +399,7 @@ class SettingsApi:
     def __init__(self, launcher: Launcher) -> None:
         self._launcher = launcher
         self._update: updater.UpdateStatus | None = None
+        self._install: dict[str, Any] = {}
 
     def get_state(self) -> dict[str, Any]:
         stored = state.load()
@@ -406,6 +407,7 @@ class SettingsApi:
             "autostart": autostart.is_enabled(),
             "service_port": stored["service_port"],
             "installed_version": config.app_version(),
+            "updated_from": self._take_updated_from(),
             "accelerator": stored["accelerator"],
             "last_setup": stored["last_setup"],
             "package_count": stored["package_count"],
@@ -486,6 +488,55 @@ class SettingsApi:
     def open_release_page(self) -> None:
         if self._update:
             updater.open_release_page(self._update)
+
+    def install_update(self) -> dict[str, Any]:
+        """Download the newer release, verify it, and restart into it. Runs in the background.
+
+        The page polls update_progress. The application quits itself once the update
+        is handed over; the helper that applies it reopens the new version.
+        """
+        status = self._update
+        if not status or not status.available:
+            return {"ok": False, "error": "no newer version to install; check again first"}
+        if self._install.get("phase") in ("downloading", "verifying", "restarting"):
+            return {"ok": True}
+        self._install = {"phase": "downloading", "done": 0, "total": 0, "error": None}
+
+        def on_bytes(done: int, total: int) -> None:
+            self._install.update(done=done, total=total)
+
+        def work() -> None:
+            try:
+                downloaded = updater.download_verified(status, updater.install_dir(), on_bytes)
+                self._install["phase"] = "verifying"
+                updater.apply_and_relaunch(downloaded, os.getpid())
+                self._install["phase"] = "restarting"
+                state.set("updated_from", config.app_version())
+                log.info("update to %s handed over; quitting so it can be applied", status.latest)
+                time.sleep(1.5)  # long enough for the page to say so
+                self._launcher.quit()
+            except Exception as exc:
+                log.exception("the update failed")
+                self._install.update(phase="failed", error=str(exc))
+
+        threading.Thread(target=work, name="update", daemon=True).start()
+        return {"ok": True}
+
+    def update_progress(self) -> dict[str, Any]:
+        return dict(self._install)
+
+    @staticmethod
+    def _take_updated_from() -> str | None:
+        """The version an update from this page replaced, said once after it finished.
+
+        Recorded before quitting; cleared the first time the settings page shows it.
+        Still the old version means the update did not take, so there is nothing to say.
+        """
+        before = state.get("updated_from")
+        if not before:
+            return None
+        state.set("updated_from", None)
+        return before if before != config.app_version() else None
 
     def open_url(self, url: str) -> None:
         # Through the launcher, which is where _open_url_async lives. Calling it on

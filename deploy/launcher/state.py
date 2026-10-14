@@ -44,6 +44,9 @@ DEFAULTS: dict[str, Any] = {
     # update that changes the backend's dependencies changes it, and the next start
     # brings the environment up to date before running the new backend on it.
     "environment_lock": None,
+    # The version an update from the settings page replaced, so the new version can
+    # say the update finished. Cleared once shown.
+    "updated_from": None,
     # How long setup took and on which accelerator. The completion screen no longer
     # waits to be dismissed, so this is where that information stays available.
     "last_setup": None,
