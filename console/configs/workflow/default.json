@@ -1,0 +1,7 @@
+{
+  "description": "Complete Workflow Configuration - defines model loading and chat settings",
+  "inference_config": "configs/inference/transformers.json",
+  "chat_settings": "configs/chat/batch.json",
+  "timeout": 600,
+  "verbose": false
+}

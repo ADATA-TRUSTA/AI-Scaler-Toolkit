@@ -1,11 +1,97 @@
 [project]
-name = "ai-api-client"
+name = "ai-scaler-console"
 version = "0.1.0"
-description = "Headless Python client for the Trusta AST backend: model load/unload, OpenAI-compatible chat, and fine-tune training"
+description = "Headless Python client for the AI Scaler (Trusta AST) backend: model load/unload, OpenAI-compatible chat, and fine-tune training"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
-    "openai>=2.26.0",
-    "pydantic>=2.12.5",
-    "requests>=2.32.5",
+  # openai 3 is what moved the HTTP client to httpx2; the two travel together,
+  # because openai_client.py hands the SDK its own client instance.
+  "openai>=3.0.0",
+  "pydantic>=2.13.4",
+  "python-dotenv>=1.2.2",
+  "httpx2>=2.10.0", # sole HTTP client (sync + async); replaced httpx, which replaced requests
+  "textual>=8.2.8", # terminal UI for the parallel chat example; replaced pyqt6
 ]
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[dependency-groups]
+dev = [
+  "ruff==0.16.3",
+  "pre-commit==4.6.2",
+  "pyright==1.1.411", # pinned to the .pre-commit-config.yaml hook rev
+  "pytest==9.1.1", # same pin as trusta-ast-backend
+  "pytest-asyncio==1.4.0", # the Textual UI tests are async; 1.x is what allows pytest 9
+]
+
+[tool.ruff] # https://docs.astral.sh/ruff/settings/#top-level
+# internal/ holds throwaway benchmark scripts that are never published; they are
+# not held to the same standard as the package and the public examples.
+exclude = [
+  ".venv",
+  "internal",
+]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint] # https://docs.astral.sh/ruff/settings/#lint
+extend-select = [
+  "D100", # missing-module-docstring
+  "D101", # undocumented-public-class
+  "D102", # missing-class-docstring
+  "D103", # undocumented-public-function
+  "D213", # multi-line-summary-second-line
+  "D400", # missing-trailing-period
+]
+select = [
+  "B", # flake8-bugbear
+  "E", # pycodestyle
+  "F", # pyflakes
+  "I", # isort
+  "S", # bandit
+  "W", # pycodestyle
+  "UP", # pyupgrade
+  "C4", # flake8-comprehensions
+  "ANN", # flake8-annotations
+  "TRY", # tryceratops
+  "PERF", # perflint
+  "ASYNC", # flake8-async
+]
+
+# Globally ignore noisy rules (kept aligned with trust-hmst-backend)
+ignore = [
+  "E402", # module level import not at top of file
+  "E501", # line-too-long — ruff format owns code width; long strings/comments are not hard-wrapped
+  "TRY003", # Avoid specifying long messages outside the exception class
+  "TRY301", # Abstract `raise` to an inner function
+  "TRY300", # Consider-else — over-picky about the common try/return/except idiom
+  "TRY401", # Redundant exception in logging.exception msg — keeping {e} aids log grepping
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests are still linted (unused imports, import order, modernisation all
+# matter), but three rules fight the form rather than improve it.
+"tests/*" = [
+  "S101", # assert IS the test
+  "D103", # a test's name is its documentation
+  "D102", # ditto for methods on the fake clients
+  "S603", # subprocess with sys.executable and a repo path; no untrusted input
+]
+
+[tool.ruff.format] # https://docs.astral.sh/ruff/settings/#format
+quote-style = "double" # Quote style, double quotes are default
+
+[tool.pyright]
+exclude = [
+  "**/node_modules",
+  "**/__pycache__",
+  "**/.*",
+  ".venv",
+  "internal",
+]
+typeCheckingMode = "basic"
+venv = ".venv"
+venvPath = "."

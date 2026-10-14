@@ -1,7 +1,0 @@
-{
-  "description": "Transformers with offload workflow - Support for larger models with GPU/CPU offload",
-  "inference_config": "infer_model_configs/inference-config-transformers-offload.json",
-  "chat_settings": "app_settings/app_settings_batch_chat.json",
-  "timeout": 900,
-  "verbose": false
-}

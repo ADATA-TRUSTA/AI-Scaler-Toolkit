@@ -13,7 +13,7 @@ This runs the model over held-out probes and checks what it actually says.
 The probe file is JSON, a list of objects:
 
     [
-      {"image": "imgs/24_Simon10.jpeg", "question": "Who is this person?",
+      {"image": "imgs/unseen_01.jpg", "question": "Who is this person?",
        "expected": "Simon", "note": "unseen photo of Simon"},
       {"question": "Who founded ADATA?", "expected_not": "Simon"}
     ]

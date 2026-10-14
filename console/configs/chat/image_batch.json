@@ -1,0 +1,32 @@
+{
+  "model": "trusta-ast/trusta-ast-default",
+  "system_prompt": "You are a helpful assistant that can analyze images.",
+  "stream": false,
+  "temperature": 0.5,
+  "top_p": 0.9,
+  "max_tokens": 1024,
+  "continue_on_error": true,
+  "extra_body": {
+    "top_k": 50,
+    "repetition_penalty": 1.1,
+    "total_timeout": 300,
+    "enable_thinking": false
+  },
+  "tasks": [
+    {
+      "prompt": "Describe what you can observe in this image.",
+      "images": ["examples/assets/test_image.jpg"]
+    },
+    {
+      "prompt": "Identify the main objects and provide a short caption.",
+      "images": ["examples/assets/test_image.jpg"]
+    },
+    {
+      "prompt": "Compare these two images and explain key differences.",
+      "images": [
+        "examples/assets/test_image.jpg",
+        "https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg"
+      ]
+    }
+  ]
+}

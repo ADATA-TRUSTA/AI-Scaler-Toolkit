@@ -1894,14 +1894,16 @@ class TrainingProcessManager:
             except Exception as e:
                 logger.exception(f"[TrainingManager] Error stopping process: {e}")
 
-        # Drop resource references
+        self._release_process()
+        self.current_status = "stopped"
+        return {"status": "stopped"}
+
+    def _release_process(self) -> None:
+        """Drop the worker handles without touching the reported status or error."""
         self.process = None
         self.request_q = None
         self.status_q = None
         self.stop_event = None
-
-        self.current_status = "stopped"
-        return {"status": "stopped"}
 
     def _drain_status(self) -> None:
         if not self.status_q:
@@ -1940,8 +1942,12 @@ class TrainingProcessManager:
                     logger.error(
                         "[TrainingManager] Training worker reported error; stopping training."
                     )
-                # Call stop_training() to trigger the cleanup flow
+                # Call stop_training() to trigger the cleanup flow. It marks the run
+                # "stopped", which would hide this error from /training/status, so put
+                # the terminal state back. The queue is released with the process.
                 self.stop_training()
+                self.current_status = "error"
+                return
             elif status == "progress":
                 # incremental progress report from worker
                 self.current_step = int(msg.get("step", self.current_step))
@@ -1966,17 +1972,23 @@ class TrainingProcessManager:
         """
         Return the current training status, draining any pending worker updates.
         """
+        # Drain before the liveness check. A worker that fails reports its error on the
+        # queue and then exits, so by the time anyone polls it is usually already dead
+        # with that report still queued. Checking liveness first took the dead worker
+        # for a silent crash and went through cleanup(), which reset the status to idle,
+        # cleared last_error and dropped the queue, report included -- a run that failed
+        # in post-training GGUF conversion showed status=idle, error=null.
+        self._drain_status()
+
         # Check if worker process died unexpectedly (e.g., from sys.exit(1) on OOM)
         if self.process and not self.process.is_alive():
-            if self.current_status in {"running", "initializing"}:
-                # Worker was active but died - likely OOM or fatal error
+            if self.current_status in {"starting", "running", "initializing"}:
+                # Worker was active but died without reporting -- likely a hard crash
                 if not self.last_error:
                     self.last_error = "Worker process terminated unexpectedly"
                 self.current_status = "error"
-                # Clean up the dead process
-                self.cleanup()
-
-        self._drain_status()
+                # Release the dead process but keep the error for the caller to read.
+                self._release_process()
         # `error` only ever carries a real error now (progress lives in `phase`).
         error_msg = self.last_error if self.current_status == "error" else None
         if self.current_status not in {"starting", "running", "initializing"}:

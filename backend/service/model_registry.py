@@ -95,6 +95,14 @@ def _get_max_context_length_from_hf(model_id: str, hf_token: str | None = None) 
         return None
 
 
+# The lifecycle of a registry entry, as reported by list_models() and as stored in
+# the registry file. Deleting a model is not instant -- a 30 GB directory takes a
+# while to remove -- so the entry stays in the list, marked, until it really is gone.
+MODEL_STATUS_READY = "ready"
+MODEL_STATUS_DELETING = "deleting"
+MODEL_STATUS_DELETE_FAILED = "delete_failed"
+
+
 # Seed models used only to initialize the registry file when it does not exist yet.
 # After creation, the JSON file is the single source of truth.
 SEED_BASE_MODELS: list[dict] = []
@@ -134,6 +142,7 @@ class ModelRegistry:
         self.path = REGISTRY_PATH
         self.mutex = Lock()
         self._ensure_file()
+        self._reconcile_interrupted_deletions()
         self._initialized = True
         logger.info(f"ModelRegistry initialized at {self.path}")
 
@@ -145,6 +154,35 @@ class ModelRegistry:
                 "llama_gguf_models": [],
             }
             self._write(data)
+
+    def _reconcile_interrupted_deletions(self) -> None:
+        """
+        Entries left mid-deletion by a restart are marked failed, not resumed.
+
+        A "deleting" mark is only ever cleared by the worker that set it, so one that
+        survives a restart means the service went away while the files were being
+        removed. Deleting on its own initiative at start-up is not the right answer
+        for a destructive operation nobody asked for twice; saying so and leaving the
+        entry where someone can ask again is. Asking again is safe -- a path that is
+        already gone counts as deleted.
+        """
+        with self.mutex:
+            data = self._read()
+            changed = False
+            for section, _model_type in self._SECTIONS:
+                for item in data.get(section, []):
+                    if item.get("status") == MODEL_STATUS_DELETING:
+                        item["status"] = MODEL_STATUS_DELETE_FAILED
+                        item["delete_error"] = (
+                            "The service restarted while this model was being deleted, "
+                            "so its files may be partly removed. Delete it again to finish."
+                        )
+                        changed = True
+                        logger.warning(
+                            f"Model {item.get('label')} was left mid-deletion by a restart"
+                        )
+            if changed:
+                self._write(data)
 
     def _read(self) -> dict:
         try:
@@ -184,6 +222,32 @@ class ModelRegistry:
         if model_type == "llama_gguf":
             return ["label", "local_path", "filename"]
         return ["label"]
+
+    # (registry section, the "type" reported for entries in it). Ordered: a label is
+    # looked for in base models first, exactly as delete_model has always done.
+    _SECTIONS = (
+        ("base_models", "base"),
+        ("finetuned_models", "finetuned"),
+        ("llama_gguf_models", "llama_gguf"),
+    )
+
+    def _find_entries(self, data: dict, label: str) -> tuple[str, str, list[dict]] | None:
+        """
+        (section, type, matching entries) for the first section holding `label`.
+
+        Returns every match in that section rather than the first, because that is
+        what removal has to act on: an entry left behind would keep a deleted model
+        in the list.
+        """
+        for section, model_type in self._SECTIONS:
+            matches = [
+                item
+                for item in data.get(section, [])
+                if self._matches_model_identifier(item, model_type, label)
+            ]
+            if matches:
+                return section, model_type, matches
+        return None
 
     def _matches_model_identifier(self, item: dict, model_type: str, label: str) -> bool:
         target_variants = self._identifier_variants(label)
@@ -229,6 +293,13 @@ class ModelRegistry:
             "size": item.get("size"),
             "method": item.get("method"),  # only for finetuned_models
             "max_context_length": item.get("max_context_length"),
+            # Where the entry is in its life, for every client alike: "ready",
+            # "deleting" while its files are being removed, or "delete_failed" when
+            # that did not finish. An entry only leaves the list once its files are
+            # actually gone, so nobody is shown a model that is still on the disk --
+            # or, worse, told it was deleted while the removal is still running.
+            "status": item.get("status") or MODEL_STATUS_READY,
+            "delete_error": item.get("delete_error"),
         }
 
     def list_models(self) -> dict:
@@ -469,65 +540,74 @@ class ModelRegistry:
             self._write(data)
             logger.info(f"Finetuned model added to registry: {info.output_dir}")
 
-    def delete_model(self, label: str) -> dict | None:
+    def begin_deletion(self, label: str) -> dict | None:
         """
-        Delete a model from registry by label.
-        Returns the deleted model info if found, else None.
-        Checks both base_models and finetuned_models.
+        Mark a model as being deleted and return it as it was before the mark.
+
+        The entry stays in the registry: it is the only thing that can tell everyone
+        looking at the list that the model is on its way out rather than gone, and it
+        holds the paths the caller needs to remove the files. Call delete_model once
+        those are gone, or mark_deletion_failed if they are not.
+
+        The returned snapshot carries the status the entry had on arrival, so a
+        caller can see that another request had already claimed the deletion.
+
+        Returns None when no model matches `label`.
         """
         with self.mutex:
             data = self._read()
-            deleted_model = None
+            found = self._find_entries(data, label)
+            if not found:
+                return None
+            _section, model_type, matches = found
+            snapshot = dict(matches[0])
+            snapshot["type"] = model_type
+            snapshot.setdefault("status", MODEL_STATUS_READY)
+            for item in matches:
+                item["status"] = MODEL_STATUS_DELETING
+                item.pop("delete_error", None)
+            self._write(data)
+            logger.info(f"Model marked as deleting in registry: {label}")
+            return snapshot
 
-            # Check base_models
-            base_models = data.get("base_models", [])
-            new_base_models = []
-            for m in base_models:
-                if self._matches_model_identifier(m, "base", label):
-                    deleted_model = m
-                    deleted_model["type"] = "base"
-                else:
-                    new_base_models.append(m)
+    def mark_deletion_failed(self, label: str, error: str) -> None:
+        """
+        Record that the files could not be removed, keeping the entry in the list.
 
-            if deleted_model:
-                data["base_models"] = new_base_models
-                self._write(data)
-                logger.info(f"Deleted base model from registry: {label}")
-                return deleted_model
+        Dropping the entry would hide a model that is still occupying the disk, with
+        nothing left in the interface to delete it with.
+        """
+        with self.mutex:
+            data = self._read()
+            found = self._find_entries(data, label)
+            if not found:
+                return
+            _section, _model_type, matches = found
+            for item in matches:
+                item["status"] = MODEL_STATUS_DELETE_FAILED
+                item["delete_error"] = error
+            self._write(data)
+            logger.warning(f"Model deletion failed for {label}: {error}")
 
-            # Check finetuned_models
-            finetuned_models = data.get("finetuned_models", [])
-            new_finetuned_models = []
-            for m in finetuned_models:
-                if self._matches_model_identifier(m, "finetuned", label):
-                    deleted_model = m
-                    deleted_model["type"] = "finetuned"
-                else:
-                    new_finetuned_models.append(m)
-
-            if deleted_model:
-                data["finetuned_models"] = new_finetuned_models
-                self._write(data)
-                logger.info(f"Deleted finetuned model from registry: {label}")
-                return deleted_model
-
-            # Check llama_gguf_models
-            gguf_models = data.get("llama_gguf_models", [])
-            new_gguf_models = []
-            for m in gguf_models:
-                if self._matches_model_identifier(m, "llama_gguf", label):
-                    deleted_model = m
-                    deleted_model["type"] = "llama_gguf"
-                else:
-                    new_gguf_models.append(m)
-
-            if deleted_model:
-                data["llama_gguf_models"] = new_gguf_models
-                self._write(data)
-                logger.info(f"Deleted GGUF model from registry: {label}")
-                return deleted_model
-
-            return None
+    def delete_model(self, label: str) -> dict | None:
+        """
+        Remove a model from the registry by label.
+        Returns the removed model info (with its "type") if found, else None.
+        Checks base_models, finetuned_models and llama_gguf_models, in that order.
+        """
+        with self.mutex:
+            data = self._read()
+            found = self._find_entries(data, label)
+            if not found:
+                return None
+            section, model_type, matches = found
+            removed_ids = {id(item) for item in matches}
+            data[section] = [item for item in data.get(section, []) if id(item) not in removed_ids]
+            self._write(data)
+            logger.info(f"Deleted {model_type} model from registry: {label}")
+            deleted_model = dict(matches[0])
+            deleted_model["type"] = model_type
+            return deleted_model
 
 
 # Singleton instance

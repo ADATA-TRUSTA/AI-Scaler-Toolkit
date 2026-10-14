@@ -28,6 +28,7 @@ from openai import APIError, AsyncOpenAI
 
 from ..config_models import InferenceConfig, InferenceEngine
 from ..settings import (
+    DEFAULT_GENERATION_TIMEOUT,
     LLAMA_SERVER_API_KEY,
     MAX_OUTPUT_TOKENS_CAP,
     VLLM_CLIENT_HOST,
@@ -75,6 +76,48 @@ def resolve_server_endpoint(config: InferenceConfig) -> dict[str, Any]:
             "api_key": VLLM_OPENAI_API_KEY or "EMPTY",
         }
     raise ValueError(f"Engine {engine} is not an OpenAI-compatible server engine")
+
+
+def settle_managed_port(config: InferenceConfig) -> None:
+    """
+    Move the managed llama-server off a port something else already holds.
+
+    The subprocess is this application's own: it binds loopback, only this application
+    talks to it, and it is killed on unload. Nothing outside depends on the number --
+    but it was passed straight to --port with no fallback, so a busy 5001 meant a model
+    that would not load. That is worst where it can be recovered from least: a desktop
+    install exposes no way to change it.
+
+    Done here, in the process that owns the configuration, and before the worker is
+    given a copy. Resolving it inside the engine looked right and was not: the engine
+    runs in another process, so it moved its own copy and left resolve_server_endpoint
+    above -- which reads the same field in this process -- talking to the old port. The
+    model loaded and every generation failed to connect.
+
+    Untouched when the server is someone else's: an explicit llama_server_url, or
+    auto-start off, means we are a client of something already running on that port.
+    """
+    import socket
+
+    if getattr(config, "engine", None) != InferenceEngine.LLAMA_SERVER:
+        return
+    if (getattr(config, "llama_server_url", None) or "").strip():
+        return
+    if not getattr(config, "llama_server_auto_start", False):
+        return
+
+    host, preferred = config.llama_server_host, config.llama_server_port
+    for candidate in range(preferred, preferred + 50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind((host, candidate))
+            except OSError:
+                continue
+        if candidate != preferred:
+            logger.warning("[LlamaServer] port %s is in use; starting on %s", preferred, candidate)
+            config.llama_server_port = candidate
+        return
+    raise RuntimeError(f"no free port for llama-server between {preferred} and {preferred + 49}")
 
 
 def client_for_config(config: InferenceConfig, *, model: str | None = None) -> "AsyncServerClient":
@@ -349,14 +392,22 @@ def _extract_reasoning(obj: Any) -> str | None:  # noqa: ANN401 - OpenAI SDK del
     return None
 
 
-def _wrap_reasoning(text: Any) -> str:  # noqa: ANN401 - reasoning value may be str or other SDK type
-    """Collapse whitespace and wrap reasoning text in a single think block."""
-    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not normalized:
-        return ""
-    if "<think>" in normalized or "</think>" in normalized:
-        return normalized
-    return f"<think>{normalized}</think>"
+def _strip_reasoning_separator(content: str) -> str:
+    """
+    Drop the newlines that separate a reasoning block from the answer.
+
+    Qwen-style templates render ``\\n</think>\\n\\n`` between the two, and the
+    model reproduces it. vLLM's reasoning parser splits exactly at ``</think>``
+    and trims only the reasoning side, so the ``\\n\\n`` lands at the start of
+    the answer. llama.cpp consumes it as part of the delimiter instead, so
+    without this the same model answered with two blank lines on vLLM and none
+    on llama-server.
+
+    This only changes what the API returns. The template ``|trim``s content
+    and re-adds the separator itself when it renders history, so the prompt the
+    model sees on the next turn is byte-identical either way.
+    """
+    return content.lstrip("\n")
 
 
 def build_chat_payload(
@@ -442,6 +493,19 @@ def build_chat_payload(
     if enable_thinking is not None:
         chat_template_kwargs = extra_body.setdefault("chat_template_kwargs", {})
         chat_template_kwargs["enable_thinking"] = bool(enable_thinking)
+
+    # The graded level, for models whose template takes one (gpt-oss: "Reasoning:
+    # low|medium|high"). vLLM reads it as a request field and hands it to the
+    # template and to Harmony; llama-server has no such field, so it goes in as the
+    # template variable gpt-oss's template reads. Templates that do not use it
+    # ignore it. Kept in extra_body so the SDK does not type-check the value.
+    reasoning_effort = params.get("reasoning_effort")
+    if reasoning_effort:
+        if engine == InferenceEngine.LLAMA_SERVER:
+            chat_template_kwargs = extra_body.setdefault("chat_template_kwargs", {})
+            chat_template_kwargs["reasoning_effort"] = str(reasoning_effort)
+        else:
+            extra_body["reasoning_effort"] = str(reasoning_effort)
 
     if extra_body:
         payload["extra_body"] = extra_body
@@ -884,15 +948,7 @@ class AsyncServerClient:
         payload = build_chat_payload(
             model, messages, params, stream=True, engine=self.engine, model_path=self.model_path
         )
-        timeout_s = float(params.get("total_timeout", 300))
-
-        # Reasoning models (e.g. gpt-oss) emit reasoning_content while thinking
-        # and no content yet; forward it wrapped in a single <think> block so the
-        # frontend shows progress instead of a silent gap. Mirrors dev's
-        # llama_server_runner stream logic.
-        include_reasoning = params.get("enable_thinking") is not None
-        reasoning_fallback = _is_qwen_model(model)
-        in_thinking_block = False
+        timeout_s = float(params.get("total_timeout") or DEFAULT_GENERATION_TIMEOUT)
 
         start = time.perf_counter()
         # When the first token reached us — the boundary between prefill and decode.
@@ -903,6 +959,10 @@ class AsyncServerClient:
         stopped = False
         tool_call_acc: dict[int, dict[str, Any]] = {}
         server_finish_reason: str | None = None
+        # Set once reasoning arrives; cleared at the answer's first real character.
+        # The separator newlines can be split across several deltas ("\n", "\n",
+        # "The..."), so this has to span chunks rather than strip each one.
+        strip_separator = False
 
         # See _fallback_parse_tool_call: some models wrap a tool call in a shape
         # none of vLLM's parsers recognise, sometimes after a prose lead-in
@@ -937,6 +997,7 @@ class AsyncServerClient:
                     break
 
                 out_parts: list[str] = []
+                reasoning_parts: list[str] = []
                 if event.choices:
                     choice = event.choices[0]
                     # The server reports why it stopped only on the final choice
@@ -952,28 +1013,22 @@ class AsyncServerClient:
                     reasoning_chunk = _extract_reasoning(delta)
                     content_chunk = delta.content
 
-                    if include_reasoning and isinstance(reasoning_chunk, str) and reasoning_chunk:
-                        if not in_thinking_block:
-                            out_parts.append("<think>\n")
-                            in_thinking_block = True
-                        out_parts.append(reasoning_chunk)
-                    elif (
-                        reasoning_fallback
-                        and isinstance(reasoning_chunk, str)
-                        and reasoning_chunk
-                        and not content_chunk
-                    ):
-                        # Qwen sometimes returns only reasoning_content even with
-                        # thinking off; forward it so the stream is not empty.
-                        if not in_thinking_block:
-                            out_parts.append("<think>\n")
-                            in_thinking_block = True
-                        out_parts.append(reasoning_chunk)
+                    # Reasoning rides its own key, never content. Both servers
+                    # already separate it upstream (llama-server and vLLM's
+                    # reasoning parsers), so merging it back under <think> markers
+                    # only re-created markup every caller then had to strip -- and
+                    # made model-authored <think> prose indistinguishable from a
+                    # real reasoning block.
+                    if isinstance(reasoning_chunk, str) and reasoning_chunk:
+                        reasoning_parts.append(reasoning_chunk)
+                        strip_separator = True
+
+                    if strip_separator and isinstance(content_chunk, str) and content_chunk:
+                        content_chunk = _strip_reasoning_separator(content_chunk)
+                        if content_chunk:
+                            strip_separator = False
 
                     if isinstance(content_chunk, str) and content_chunk:
-                        if in_thinking_block:
-                            out_parts.append("\n</think>\n")
-                            in_thinking_block = False
                         if fallback_state == "off":
                             out_parts.append(content_chunk)
                         elif fallback_state == "scanning":
@@ -1038,19 +1093,17 @@ class AsyncServerClient:
                         total_tokens = int(usage.total_tokens)
 
                 chunk_text = "".join(out_parts)
-                if chunk_text and first_token_at is None:
+                reasoning_text = "".join(reasoning_parts)
+                if (chunk_text or reasoning_text) and first_token_at is None:
                     # Reasoning counts: for a thinking model the prefill ends when it
                     # starts emitting, whether or not that text is the final answer.
                     first_token_at = time.perf_counter()
+                if reasoning_text:
+                    yield {"reasoning": reasoning_text, "done": False}
                 if chunk_text:
                     # Stream text (and reasoning) live; tool_calls are reassembled
                     # and delivered on the done event (fragments are useless here).
                     yield {"chunk": chunk_text, "done": False}
-
-            # Close a dangling think block (reasoning-only or stopped mid-think).
-            if in_thinking_block:
-                in_thinking_block = False
-                yield {"chunk": "\n</think>", "done": False}
 
             fallback_tool_calls: list[dict[str, Any]] | None = None
             if fallback_state == "scanning" and fallback_scan:
@@ -1158,7 +1211,7 @@ class AsyncServerClient:
         payload = build_chat_payload(
             model, messages, params, stream=False, engine=self.engine, model_path=self.model_path
         )
-        timeout_s = float(params.get("total_timeout", 300))
+        timeout_s = float(params.get("total_timeout") or DEFAULT_GENERATION_TIMEOUT)
 
         start = time.perf_counter()
         completion = await self._create_completion(payload, timeout_s, "generate")
@@ -1166,13 +1219,11 @@ class AsyncServerClient:
         choice = completion.choices[0] if completion.choices else None
         message = getattr(choice, "message", None) if choice else None
         content = getattr(message, "content", "") if message else ""
-        # Merge reasoning_content (gpt-oss / Qwen) into the returned text, wrapped
-        # in a think block, mirroring dev's non-stream behaviour.
-        reasoning = _extract_reasoning(message) if message else None
-        if isinstance(reasoning, str) and reasoning:
-            include_reasoning = params.get("enable_thinking") is not None
-            if include_reasoning or _is_qwen_model(model):
-                content = f"{_wrap_reasoning(reasoning)}{content or ''}"
+        # Reasoning comes back on its own key; the answer never carries <think>
+        # markup. See the streaming path for why the old merge was dropped.
+        reasoning_out = _extract_reasoning(message) if message else None
+        if reasoning_out and isinstance(content, str):
+            content = _strip_reasoning_separator(content)
         finish_reason = getattr(choice, "finish_reason", None) if choice else None
         tool_calls = _serialize_tool_calls(
             getattr(message, "tool_calls", None) if message else None
@@ -1224,6 +1275,8 @@ class AsyncServerClient:
             result["finish_reason"] = finish_reason
         if tool_calls is not None:
             result["tool_calls"] = tool_calls
+        if reasoning_out:
+            result["reasoning_content"] = reasoning_out
         logger.info(
             "[AsyncServerClient] completion finished: finish_reason=%s gen_tokens=%s tool_calls=%s",
             finish_reason,

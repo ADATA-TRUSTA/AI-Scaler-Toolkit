@@ -20,7 +20,7 @@ import torch
 from ..config_models import InferenceConfig, InferenceEngine
 
 # Import settings BEFORE torch/transformers (sets HF_HOME environment variable)
-from ..settings import configure_logging
+from ..settings import DEFAULT_GENERATION_TIMEOUT, configure_logging
 from .engines.llama_server_engine import LlamaServerEngine
 
 # Import engines
@@ -751,8 +751,8 @@ class ModelInferenceProcess:
                 raise self._build_queue_unavailable_error("Generation") from None
 
             # Wait on this request's dedicated queue (dispatcher guarantees it only holds our responses)
-            # Read total_timeout from params, defaulting to 300s
-            total_timeout = params.get("total_timeout", 300)
+            # Read total_timeout from params, falling back to the configured default
+            total_timeout = params.get("total_timeout") or DEFAULT_GENERATION_TIMEOUT
             timeout_start = time.time()
 
             while True:
@@ -852,8 +852,8 @@ class ModelInferenceProcess:
                 raise self._build_queue_unavailable_error("Stream generation") from None
 
             # Stream results from this request's dedicated queue (the dispatcher guarantees order and ownership)
-            # Read total_timeout from params, defaulting to 300s
-            total_timeout = params.get("total_timeout", 300)
+            # Read total_timeout from params, falling back to the configured default
+            total_timeout = params.get("total_timeout") or DEFAULT_GENERATION_TIMEOUT
             timeout_start = time.time()
 
             while True:

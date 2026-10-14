@@ -9,7 +9,6 @@ multiprocessing.set_start_method("spawn", force=True)
 
 import asyncio
 import json
-import os
 import signal
 import sys
 import threading
@@ -23,7 +22,7 @@ from types import FrameType
 from typing import Annotated, Any, cast
 
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -65,7 +64,7 @@ from .config_models import (
 )
 from .download_manager import DownloadTask, download_manager
 from .inference.engines.llama_server_engine import resolve_local_model_path
-from .inference.engines.vllm_engine import sweep_stale_vllm_processes
+from .inference.engines.vllm_engine import configured_reasoning_parser, sweep_stale_vllm_processes
 from .inference.gguf_estimator import (
     RECOMMEND_SOLVED_KEYS,
     SWEEP_SOLVED_KEYS,
@@ -74,8 +73,9 @@ from .inference.gguf_estimator import (
 )
 from .inference.memory_estimator import memory_estimator
 from .inference.model_family import is_qwen35_family, read_model_arch, read_model_context_length
+from .model_deletion import delete_model_files, resolve_model_files_path
 from .model_manager import model_manager
-from .model_registry import model_registry
+from .model_registry import MODEL_STATUS_DELETING, model_registry
 from .platform_support import (
     current_platform,
     engine_support,
@@ -200,6 +200,58 @@ def _is_qwen35_model(model_name: str | None = None) -> bool:
     )
 
 
+# A tool request only defaults to thinking when the caller left room for it.
+# Below this, reasoning eats the whole budget before any answer or tool call
+# is emitted (measured: max_tokens=512 finished inside <think>).
+_TOOL_CALL_THINKING_MIN_TOKENS = 2048
+
+
+# OpenAI reasoning_effort levels that mean "do not think", folded into the boolean
+# enable_thinking chat templates understand. Every other level asks for thinking:
+# the vocabulary keeps growing across clients (hermes alone adds "ultra" past
+# OpenAI's "max"), so naming the "on" levels would silently drop any new one.
+_REASONING_EFFORT_OFF = frozenset({"none", "minimal"})
+
+
+def _enable_thinking_from_reasoning_effort(reasoning_effort: str | None) -> bool | None:
+    """Map an OpenAI reasoning_effort onto enable_thinking; None when it says nothing."""
+    level = str(reasoning_effort or "").strip().lower()
+    if not level:
+        return None
+    return level not in _REASONING_EFFORT_OFF
+
+
+# The graded levels every reasoning-effort model accepts. Each family has its own
+# wider vocabulary, and a level outside it is an error, not a hint: vLLM renders
+# gpt-oss through Harmony, which takes only low/medium/high and fails on "none" or
+# "xhigh". So the level is forwarded only inside this core, and anything above it
+# asks for the most the core offers. The cost is that a model with a level above
+# "high" (DeepSeek V4's "max") is capped at high through this service.
+_FORWARDED_REASONING_EFFORTS = ("low", "medium", "high")
+
+
+def _forwarded_reasoning_effort(reasoning_effort: str | None) -> str | None:
+    """
+    The graded level to hand the engine, or None to send no level at all.
+
+    The off levels send none: thinking is switched off through enable_thinking, and
+    a model that cannot stop thinking (gpt-oss) rejects "none" rather than falling
+    back to its default.
+    """
+    level = str(reasoning_effort or "").strip().lower()
+    if not level or level in _REASONING_EFFORT_OFF:
+        return None
+    return level if level in _FORWARDED_REASONING_EFFORTS else "high"
+
+
+def _vllm_reasoning_parser_active() -> bool:
+    """Whether the loaded model is served by vLLM with a reasoning parser on."""
+    config = model_manager.config
+    if not config or str(getattr(config, "engine", "")) != InferenceEngine.VLLM:
+        return False
+    return configured_reasoning_parser(config) is not None
+
+
 def _resolve_model_aware_generation_options(
     *,
     temperature: float,
@@ -207,8 +259,20 @@ def _resolve_model_aware_generation_options(
     top_k: int,
     repetition_penalty: float,
     enable_thinking: bool | None,
+    for_tool_call: bool = False,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Resolve generation options with model-specific safe defaults."""
+    """
+    Resolve generation options with model-specific safe defaults.
+
+    ``for_tool_call`` marks a request that carries tools. The Qwen3.5 defaults
+    below are tuned for prose and actively break tool use: forcing temperature
+    to 1.0 makes emitting a well-formed tool call a dice roll, and defaulting
+    thinking off removes the reasoning step the model takes before it decides
+    to call anything. Measured on Qwen3.5-35B-A3B against the same request --
+    llama-server direct produced 153 tool-call deltas, while this path produced
+    0 and answered with a markdown code block instead.
+    """
     model_name = _resolve_loaded_model_name()
 
     resolved = {
@@ -220,6 +284,24 @@ def _resolve_model_aware_generation_options(
     }
 
     if not _is_qwen35_model(model_name):
+        # vLLM's reasoning parsers treat everything up to </think> as reasoning and,
+        # with no </think>, the whole reply. A hybrid template (MiniCPM5) left without
+        # enable_thinking prefills nothing, so the model often answers straight away
+        # -- and the parser files that answer, tool call included, as reasoning. Seen
+        # on openbmb/MiniCPM5-1B + qwen3: every reply after a tool result came back
+        # empty. Pinning the template's state keeps the split well-defined.
+        #
+        # Off, not on, keeps thinking opt-in: a fine-tune is trained on answers with no
+        # think block, and switching thinking on at inference cost what it learned --
+        # a MiniCPM5-1B LoRA on vLLM answered 27/40 knowledge probes with thinking off
+        # against 18/40 when this defaulted to on. Only with a reasoning parser on: that
+        # is the case the empty replies come from, and leaving every other load alone
+        # keeps a model whose template thinks by default (Qwen3) thinking.
+        if resolved["enable_thinking"] is None and _vllm_reasoning_parser_active():
+            logger.info(
+                "vLLM reasoning parser active: enable_thinking unspecified; defaulting to False"
+            )
+            resolved["enable_thinking"] = False
         return resolved
 
     # --- Safe parameters specific to Qwen3.5 MoE models ---
@@ -235,6 +317,27 @@ def _resolve_model_aware_generation_options(
 
     # Match the official Qwen3.5 generation_config:
     # temperature=1.0, top_p=0.95, top_k=20.
+    #
+    # Tool requests are exempt: a tool call is structured output, where sampling
+    # away from the caller's choice costs reliability rather than buying natural
+    # prose. repetition_penalty above is NOT exempt -- that one guards against
+    # gibberish, which is a correctness problem either way.
+    if for_tool_call:
+        if resolved["enable_thinking"] is None:
+            # Thinking is what makes the tool call happen at all, but it is also
+            # what burns the budget: a caller with max_tokens=512 spends all of it
+            # inside <think> and never answers. Only think when there is room.
+            budget_ok = max_tokens is None or max_tokens >= _TOOL_CALL_THINKING_MIN_TOKENS
+            resolved["enable_thinking"] = budget_ok
+            logger.info(
+                "Qwen3.5-family arch detected: tool request, enable_thinking unspecified; "
+                "defaulting to %s (max_tokens=%s, needs >= %s to think)",
+                budget_ok,
+                max_tokens,
+                _TOOL_CALL_THINKING_MIN_TOKENS,
+            )
+        return resolved
+
     # The previous 0.7 / 0.8 was more conservative, but on this MoE model it easily
     # degrades sampling and instead yields cross-language gibberish and unnatural output.
     if resolved["temperature"] != 1.0:
@@ -1952,7 +2055,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
             if isinstance(value, bool):
                 return value
 
-        return None
+        return _enable_thinking_from_reasoning_effort(request.reasoning_effort)
 
     def _resolve_repetition_penalty() -> float:
         if request.presence_penalty is None:
@@ -2140,6 +2243,8 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
             top_k=request.top_k,
             repetition_penalty=_resolve_repetition_penalty(),
             enable_thinking=_resolve_enable_thinking(),
+            for_tool_call=True,
+            max_tokens=request.max_tokens,
         )
         passthrough_messages = _build_passthrough_messages()
         model_name = _resolve_response_model_name(request.model)
@@ -2156,6 +2261,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
             "system_prompt": None,
             "total_timeout": request.total_timeout,
             "enable_thinking": generation_options["enable_thinking"],
+            "reasoning_effort": _forwarded_reasoning_effort(request.reasoning_effort),
             "tools": request.tools,
             "tool_choice": _normalize_tool_choice_for_backend(request.tool_choice),
             "request_id": backend_request_id,
@@ -2182,6 +2288,9 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                 "tool_calls" if tool_calls else "stop"
             )
             message: dict[str, Any] = {"role": "assistant", "content": content}
+            reasoning_content = internal_resp.get("reasoning_content")
+            if reasoning_content:
+                message["reasoning_content"] = reasoning_content
             if tool_calls:
                 message["tool_calls"] = tool_calls
                 if not content:
@@ -2285,6 +2394,26 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                         chunk_text = str(item.get("chunk", "") or "")
                         is_done = item.get("done") is True
 
+                        # Thinking arrives on its own key; forward it as the OpenAI
+                        # reasoning delta rather than as content, so no <think>
+                        # markup ever reaches the answer.
+                        reasoning_chunk = str(item.get("reasoning", "") or "")
+                        if reasoning_chunk:
+                            chunk_payload = {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model_name,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"reasoning_content": reasoning_chunk},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                            yield f"data: {json.dumps(chunk_payload)}\n\n"
+
                         # Stream text content live; tool_calls are deferred to the done
                         # event to avoid incremental delta inconsistencies (e.g. Hermes format)
                         if chunk_text:
@@ -2307,6 +2436,16 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                         if is_done:
                             # Emit complete accumulated tool_calls as a single chunk
                             if tool_calls:
+                                # A streamed tool_call must carry `index` -- it is the
+                                # one required field of an OpenAI delta tool_call, the
+                                # key clients join fragments on. The accumulated list is
+                                # in message shape (id/type/function), which has none,
+                                # so strict clients dropped or rejected the call. Its
+                                # position is its index: the list is already ordered.
+                                delta_tool_calls = [
+                                    {**call, "index": position}
+                                    for position, call in enumerate(tool_calls)
+                                ]
                                 chunk_payload = {
                                     "id": completion_id,
                                     "object": "chat.completion.chunk",
@@ -2315,7 +2454,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                                     "choices": [
                                         {
                                             "index": 0,
-                                            "delta": {"tool_calls": tool_calls},
+                                            "delta": {"tool_calls": delta_tool_calls},
                                             "finish_reason": None,
                                         }
                                     ],
@@ -2429,6 +2568,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                 "system_prompt": None,
                 "total_timeout": request.total_timeout,
                 "enable_thinking": generation_options["enable_thinking"],
+                "reasoning_effort": _forwarded_reasoning_effort(request.reasoning_effort),
                 "request_id": backend_request_id,
             }
             try:
@@ -2484,6 +2624,11 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
             except Exception as exc:
                 logger.exception(f"Failed to save session history (openai non-stream): {exc}")
 
+        message: dict[str, Any] = {"role": "assistant", "content": content}
+        reasoning_content = internal_resp.get("reasoning_content")
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
+
         output: dict[str, Any] = {
             "id": completion_id,
             "object": "chat.completion",
@@ -2492,7 +2637,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": content},
+                    "message": message,
                     # Honour the backend's reason (e.g. "length" when max_tokens
                     # truncated the answer); only assume "stop" when unreported.
                     "finish_reason": internal_resp.get("finish_reason") or "stop",
@@ -2534,6 +2679,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                 "system_prompt": None,
                 "total_timeout": request.total_timeout,
                 "enable_thinking": generation_options["enable_thinking"],
+                "reasoning_effort": _forwarded_reasoning_effort(request.reasoning_effort),
                 "request_id": backend_request_id,
             }
 
@@ -2547,6 +2693,26 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                         )
                         yield f"data: {json.dumps(_build_openai_stream_error(item.get('error')))}\n\n"
                         return
+
+                    # Separated thinking rides its own key; it is not part of the
+                    # answer, so it is neither echoed as content nor saved to the
+                    # session transcript below.
+                    reasoning_chunk = item.get("reasoning", "")
+                    if reasoning_chunk:
+                        chunk_payload = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model_name,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"reasoning_content": reasoning_chunk},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(chunk_payload)}\n\n"
 
                     chunk_text = item.get("chunk", "")
                     if chunk_text:
@@ -3129,6 +3295,40 @@ async def get_download_status(task_id: str) -> DownloadTask:
     return task
 
 
+@app.post("/config/models/download/{task_id}/cancel")
+async def cancel_download(task_id: str) -> dict[str, Any]:
+    """
+    Stop a download that is still running.
+
+    A repository asked for without a file name is fetched whole, which for a GGUF
+    repository means every quantisation -- nine files and several gigabytes for even a
+    small model. That is a reasonable thing to ask for and a bad thing to be stuck
+    with, and until now there was no way out of it but restarting the service.
+
+    This returns as soon as the request is recorded, not once the worker has acted on
+    it. The task reports itself "cancelling" from that moment, which is what tells
+    every client -- not only the one that asked -- that a stop is under way; it turns
+    to "cancelled" when the worker has stopped and cleaned up. How long that takes depends on the transfer: with Xet off, which is the
+    default, the file in flight is ended and it is a second or two; with Xet on the
+    stop can only land before the next file.
+
+    What the download had fetched is then removed -- the completed files as well as
+    the fragment of the one in flight. Nothing is registered, so anything left would
+    be invisible to the application: in no list, on no screen, with no way to find it
+    again. Only what this download added goes; a copy that was already in the cache is
+    left alone.
+    """
+    task = download_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not download_manager.cancel(task_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Task is {task.status}, so there is nothing to cancel.",
+        )
+    return {"status": "cancelling", "task_id": task_id}
+
+
 @app.get("/config/models/downloads")
 async def list_download_tasks() -> dict[str, Any]:
     """List all download tasks."""
@@ -3172,147 +3372,63 @@ async def get_conversion_status(job_id: str) -> ConversionResponse:
 
 
 @app.delete("/config/models/{label:path}")
-async def delete_model(label: str, delete_files: bool = False) -> dict[str, Any]:
+async def delete_model(
+    label: str,
+    background_tasks: BackgroundTasks,
+    response: Response,
+    delete_files: bool = False,
+) -> dict[str, Any]:
     """
     Delete a registered model.
+
+    Removing the files is not instant, so this does not wait for it: the entry is
+    marked "deleting" in the registry, the response says so, and the files go
+    afterwards. Poll GET /config/models -- the entry stays in the list with
+    status "deleting" until its files are gone, and turns to "delete_failed", with
+    the reason in delete_error, if they cannot be removed. Driving the interface from
+    that status rather than from what one browser remembers is what makes every
+    client, and the same client after a refresh, agree on what is happening.
 
     Args:
         label: the model label
         delete_files: also delete the local files (default False)
     """
     try:
-        # 1. Remove from registry
-        model_info = model_registry.delete_model(label)
+        model_info = model_registry.begin_deletion(label)
 
         if not model_info:
             raise HTTPException(status_code=404, detail=f"Model with label '{label}' not found")
 
-        result = {
-            "status": "deleted",
+        if model_info.get("status") == MODEL_STATUS_DELETING:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Model '{label}' is already being deleted.",
+            )
+
+        result: dict[str, Any] = {
+            "status": MODEL_STATUS_DELETING,
             "label": label,
-            "registry_removed": True,
-            "files_removed": False,
+            "registry_removed": False,
+            # Not "files_removed": nothing can say yet. The model list is what
+            # reports the outcome, and it does so to every client, not just this one.
             "path": None,
+            "message": None,
         }
 
-        # 2. Delete local files if requested
-        if delete_files:
-            import shutil
-            from pathlib import Path
+        if not delete_files:
+            # Nothing to remove from the disk, so this finishes here rather than
+            # leaving the entry marked for a worker that would have nothing to do.
+            model_registry.delete_model(label)
+            result["status"] = "deleted"
+            result["registry_removed"] = True
+            result["message"] = "Model removed from the registry; its files were kept."
+            return result
 
-            path_to_delete = None
-
-            if model_info.get("type") == "base":
-                # For base models, check 'local_path'
-                raw_path = model_info.get("local_path")
-                if raw_path:
-                    path_to_delete = raw_path
-                    # Optimization: for a Hugging Face cache layout, delete the whole model
-                    # directory to reclaim the blobs. Standard layout: .../models--Org--Repo/snapshots/HASH
-                    try:
-                        p = Path(raw_path)
-                        if "snapshots" in p.parts:
-                            # Walk up until a directory starting with models-- is found
-                            current = p
-                            while len(current.parts) > 1:
-                                if current.name.startswith("models--"):
-                                    path_to_delete = str(current)
-                                    logger.info(
-                                        f"Detected HF cache, expanding deletion path to model root: {path_to_delete}"
-                                    )
-                                    break
-                                current = current.parent
-                    except Exception as e:
-                        logger.warning(f"Error parsing HF cache path: {e}")
-                else:
-                    # Fallback: without a local_path, infer the default path from HF_HOME
-                    hf_id = model_info.get("base_model_name")
-                    if hf_id and "/" in hf_id:
-                        try:
-                            hf_home = os.getenv("HF_HOME") or os.path.expanduser(  # noqa: ASYNC240 - cheap string expansion, not blocking I/O
-                                "~/.cache/huggingface"
-                            )
-                            # HF cache directory naming convention: models--Org--Repo
-                            dir_name = "models--" + hf_id.replace("/", "--")
-                            potential_path = Path(hf_home) / dir_name
-
-                            if potential_path.exists():
-                                path_to_delete = str(potential_path)
-                                logger.info(
-                                    f"No local_path found, but detected default HF cache path: {path_to_delete}"
-                                )
-                        except Exception as e:
-                            logger.warning(f"Error inferring default HF cache path: {e}")
-
-            elif model_info.get("type") == "finetuned":
-                # For finetuned models, check 'output_dir'
-                path_to_delete = model_info.get("output_dir")
-
-            elif model_info.get("type") == "llama_gguf":
-                # For GGUF models, check 'local_path' or 'filename'
-                path_to_delete = model_info.get("local_path")
-                # If no local_path, check filename (might be absolute path in some legacy entries)
-                if not path_to_delete and model_info.get("filename"):
-                    path_to_delete = model_info.get("filename")
-
-                # If path detected, check if it is part of HF cache (to delete entire model folder)
-                if path_to_delete:
-                    try:
-                        p = Path(path_to_delete)
-                        if "snapshots" in p.parts:
-                            # Walk up until a directory starting with models-- is found
-                            current = p
-                            while len(current.parts) > 1:
-                                if current.name.startswith("models--"):
-                                    path_to_delete = str(current)
-                                    logger.info(
-                                        f"Detected HF cache for GGUF model, expanding deletion path to model root: {path_to_delete}"
-                                    )
-                                    break
-                                current = current.parent
-                    except Exception as e:
-                        logger.warning(f"Error parsing GGUF path for HF cache detection: {e}")
-
-            if path_to_delete:
-                # Guard against deleting OS system directories via a poisoned
-                # registry entry (e.g. output_dir="/etc" from a malicious config).
-                if not os.path.lexists(path_to_delete):  # noqa: ASYNC240 - cheap stat
-                    result["files_removed"] = True
-                    result["path"] = path_to_delete
-                    result["file_deletion_note"] = "Path already missing; treated as deleted"
-                    logger.info(
-                        f"Model files for {label} already missing at {path_to_delete}; treated as deleted"
-                    )
-                elif is_protected_system_path(path_to_delete):  # noqa: ASYNC240 - cheap stat; the delete itself runs in to_thread
-                    logger.error(
-                        f"Blocked attempt to delete protected system path: {path_to_delete}"
-                    )
-                    result["file_deletion_error"] = (
-                        "Deletion blocked: path resolves to a protected system directory"
-                    )
-                else:
-                    try:
-                        if os.path.isdir(path_to_delete):  # noqa: ASYNC240 - cheap stat
-                            # Deleting a large model directory can take seconds; move it off the event loop
-                            await asyncio.to_thread(shutil.rmtree, path_to_delete)
-                        else:
-                            await asyncio.to_thread(os.remove, path_to_delete)
-                        result["files_removed"] = True
-                        result["path"] = path_to_delete
-                        logger.info(f"Deleted local files for model {label} at {path_to_delete}")
-                    except FileNotFoundError:
-                        result["files_removed"] = True
-                        result["path"] = path_to_delete
-                        result["file_deletion_note"] = (
-                            "Path already missing during deletion; treated as deleted"
-                        )
-                        logger.info(
-                            f"Model files for {label} disappeared during deletion at {path_to_delete}; treated as deleted"
-                        )
-                    except Exception as e:
-                        logger.exception(f"Failed to delete files at {path_to_delete}: {e}")
-                        result["file_deletion_error"] = str(e)
-
+        path_to_delete = resolve_model_files_path(model_info)
+        result["path"] = path_to_delete
+        result["message"] = "Deleting the model files; the model list will say when it is done."
+        background_tasks.add_task(delete_model_files, label, path_to_delete)
+        response.status_code = 202
         return result
 
     except HTTPException:
@@ -3344,8 +3460,12 @@ async def get_system_resources(
 
         # calc_size triggers a recursive os.walk; block OS system directories
         # that are never valid data/model paths to prevent filesystem enumeration.
+        # Off the event loop for the same reason as the three probes below: the guard
+        # resolves disk_path, which the caller supplies, and resolving a path on an
+        # unreachable network mount waits out an SMB/DNS timeout of ten seconds or
+        # more. On the loop that is one request stalling every other one.
         if calc_size:
-            if is_protected_system_path(disk_path):  # noqa: ASYNC240 - cheap stat
+            if await asyncio.to_thread(is_protected_system_path, disk_path):
                 raise HTTPException(
                     status_code=400,
                     detail=f"calc_size is not allowed for system directory: {disk_path}",

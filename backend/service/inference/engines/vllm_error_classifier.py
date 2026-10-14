@@ -15,30 +15,63 @@ from dataclasses import dataclass, field
 # Error category constants (plain strings rather than Enum, so they serialize
 # easily into status_queue / data_queue)
 ERROR_OOM = "oom"
+ERROR_CONFIG = "config"
 ERROR_PORT_BUSY = "port_busy"
 ERROR_MODEL_NOT_FOUND = "model_not_found"
 ERROR_CUDA_MISMATCH = "cuda_mismatch"
+ERROR_GPU_FAULT = "gpu_fault"
 ERROR_SHARED_LIBRARY_MISSING = "shared_library_missing"
+# A compiler vLLM or torch.compile needs at startup is not on the machine.
+ERROR_TOOLCHAIN_MISSING = "toolchain_missing"
 ERROR_TEMPLATE = "chat_template"
 ERROR_QUANTIZATION = "quantization"
-ERROR_LMCACHE = "lmcache"
 ERROR_UNKNOWN = "unknown"
 
 
 # Matching rules: (category, keyword tuple); any keyword hit assigns that category.
 # Matching is lower-case substring containment; keep rules tight to avoid false positives.
+#
+# Order matters: for a line matching several rules, the first one here wins. The
+# config rules come before OOM on purpose -- they name a specific setting to
+# change, which is a strictly more useful answer than "you ran out of memory".
 _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        # vLLM refused the configuration and said which knob to turn. These are
+        # ValueErrors raised during startup validation, not allocation failures,
+        # and they used to be reported as OOM -- which sends the operator after
+        # a bigger card when the fix is one setting.
+        #
+        # Keywords are taken verbatim from vLLM 0.28's message text rather than
+        # guessed, so they stay tight: a bare "kv cache" or "max_num_seqs" is
+        # what over-matched before.
+        ERROR_CONFIG,
+        (
+            # config/compilation.py: max_num_seqs exceeds Mamba cache blocks
+            "exceeds available mamba cache",
+            "please lower max_num_seqs",
+            # v1/core/kv_cache_utils.py: model len needs more KV cache than exists
+            "is larger than the available kv cache memory",
+            "no available memory for the cache blocks",
+            # v1/core/kv_cache_utils.py: heterogeneous KV specs cannot be merged
+            "failed to promote local kv cache specs",
+            "cannot be unified",
+            # config/scheduler.py: batched-token vs sequence budget disagreement
+            "exceeds max_num_seqs",
+            # v1/worker: less free device memory than gpu_memory_utilization asks for.
+            # Seen on an Intel iGPU, whose memory is the system's and was already
+            # in use; the remedy is that setting, not a bigger card.
+            "is less than desired gpu memory utilization",
+        ),
+    ),
     (
         ERROR_OOM,
         (
             "out of memory",
             "cuda out of memory",
-            "no available memory",
-            "kv cache",  # common when vLLM fails to allocate the KV cache
             # vLLM v1 sampler warm-up OOM: message contains
-            # `Please try lowering max_num_seqs or gpu_memory_utilization ...`
+            # `Please try lowering max_num_seqs or gpu_memory_utilization ...`.
+            # Matched on the phase, not on the setting names it suggests.
             "warming up sampler",
-            "max_num_seqs",
         ),
     ),
     (
@@ -63,6 +96,18 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        # Before model_not_found, which matches any "no such file or directory":
+        # torch.compile on Intel XPU runs Intel's offline compiler and fails with
+        # "[Errno 2] No such file or directory: 'ocloc'" when intel-ocloc is not
+        # installed, and that was reported as a missing model. flashinfer's JIT
+        # build fails the same way without nvcc.
+        ERROR_TOOLCHAIN_MISSING,
+        (
+            "no such file or directory: 'ocloc'",
+            "could not find nvcc",
+        ),
+    ),
+    (
         ERROR_MODEL_NOT_FOUND,
         (
             "no such file or directory",
@@ -73,9 +118,32 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        # Hardware or driver faulted at runtime. Distinct from cuda_mismatch,
+        # which is a build/hardware incompatibility: the remedies share nothing.
+        # A fault means reset the GPU or check the card; a mismatch means
+        # reinstall a build that matches it. A bare "cuda error" used to land in
+        # cuda_mismatch and sent every fault down the wrong path.
+        ERROR_GPU_FAULT,
+        (
+            "uncorrectable ecc error",
+            "illegal memory access",
+            "device-side assert triggered",
+            "gpu has fallen off the bus",
+            "unspecified launch failure",
+            "cuda error: unknown error",
+            "misaligned address",
+            # The driver's own words for a card that needs a reset. Observed for
+            # real: an Xid 62 as the EngineCore exited, then NV_ERR_RESET_REQUIRED
+            # on every subsequent call until the host was rebooted. Without these
+            # the driver message alone classifies as `unknown`, and a dead card
+            # reads like an ordinary startup failure worth retrying.
+            "nv_err_reset_required",
+            "nvrm: xid",
+        ),
+    ),
+    (
         ERROR_CUDA_MISMATCH,
         (
-            "cuda error",
             "cuda capability",
             "no kernel image is available",
             "compute capability",
@@ -97,31 +165,33 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "awq",
             "gptq",
             "fp8",
-        ),
-    ),
-    # Deliberately last, and deliberately narrow. LMCache logs plenty of INFO lines
-    # through its own logger even when VLLM_LOGGING_LEVEL is ERROR, so a bare
-    # "lmcache" substring would relabel every unrelated failure (an OOM, a bad model
-    # path) as an LMCache problem the moment the connector is enabled. These keywords
-    # only appear when the connector itself cannot be loaded or wired up.
-    (
-        ERROR_LMCACHE,
-        (
-            "no module named 'lmcache'",
-            "lmcacheconnectorv1",
-            "lmcache_integration",
-            "unsupported connector",
+            # A checkpoint whose quantization layout this build cannot serve, which
+            # surfaces as a bare assert naming neither the format nor the file.
+            # Observed: an AWQ-8bit MoE with group_size 32, where vLLM's INT8 MoE
+            # path requires -1. The remedy is a different checkpoint, so saying
+            # "quantization" is the whole value of the message.
+            "group_size must be",
+            "group size must be",
+            "w8a8",
         ),
     ),
 )
 
 
 # Generic keywords marking a line as "important"; any hit counts as a signal.
+#
+# `file "` is what keeps a traceback readable. A Python frame line --
+# `  File "vllm/config/vllm.py", line 1731, in __post_init__` -- contains none of
+# the other keywords, so the summary used to keep the `Traceback (most recent
+# call last):` header and the final `SomeError: ...` and silently drop every
+# frame between them. That is precisely the part that says *where* it broke, and
+# without it the summary cannot be acted on.
 _IMPORTANT_KEYWORDS: tuple[str, ...] = (
     "error",
     "failed",
     "exception",
     "traceback",
+    'file "',
     "out of memory",
     "abort",
     "fatal",
@@ -157,7 +227,7 @@ class VllmErrorReport:
 def classify_stderr(
     lines: Iterable[str],
     *,
-    max_important: int = 8,
+    max_important: int = 16,
     max_tail: int = 25,
 ) -> VllmErrorReport:
     """
@@ -166,6 +236,10 @@ def classify_stderr(
     Args:
         lines: stderr line sequence (raw strings, newlines allowed; no need to lower-case).
         max_important: Max lines kept in ``important_lines``, preferring the tail.
+            16, not the 8 it was: traceback frames now count as important, and a
+            vLLM startup failure runs deep enough that 8 truncated the frames back
+            off again, which is the thing keeping them was meant to fix. Tail-biased
+            selection means the innermost frames and the final exception survive.
         max_tail: When no important keyword matched, keep the last N lines in ``tail_lines``.
 
     Returns:
@@ -248,16 +322,15 @@ def _build_summary(category: str, important_tail: list[str], tail: list[str]) ->
     """Build a human-readable one-line summary for logger / status_queue."""
     label = {
         ERROR_OOM: "GPU/CPU memory exhausted",
+        ERROR_CONFIG: "vLLM rejected the configuration",
         ERROR_PORT_BUSY: "vLLM port already bound",
         ERROR_MODEL_NOT_FOUND: "model artifact not found",
         ERROR_CUDA_MISMATCH: "CUDA / GPU capability mismatch",
+        ERROR_GPU_FAULT: "GPU fault (hardware or driver), not a build mismatch",
         ERROR_SHARED_LIBRARY_MISSING: "missing CUDA shared library runtime",
+        ERROR_TOOLCHAIN_MISSING: "a GPU compiler vLLM needs is missing (Intel: install intel-ocloc)",
         ERROR_TEMPLATE: "chat template parse error",
         ERROR_QUANTIZATION: "quantization configuration error",
-        ERROR_LMCACHE: (
-            "LMCache KV connector could not be loaded "
-            "(install the optional dependency with `uv sync --extra vllm`)"
-        ),
         ERROR_UNKNOWN: "vLLM startup/runtime failure",
     }.get(category, "vLLM startup/runtime failure")
 

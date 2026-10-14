@@ -17,9 +17,10 @@ from .inference.async_server_client import (
     client_for_config,
     is_server_engine,
     resolve_server_endpoint,
+    settle_managed_port,
 )
 from .inference.model_inference_process import ModelInferenceProcess
-from .settings import configure_logging, effective_llama_binary
+from .settings import DEFAULT_GENERATION_TIMEOUT, configure_logging, effective_llama_binary
 
 logger = configure_logging(__name__)
 
@@ -210,6 +211,10 @@ class ModelManager:
             if self.inference_process.current_status == "loading":
                 raise RuntimeError("Model is already loading.")
 
+            # Before the config is persisted or handed to the worker, so the file,
+            # this process and the worker all name the same port.
+            settle_managed_port(config)
+
             # Persist the config file and update state
             self._save_config(config)
             self.config = config  # report the user's settings right away
@@ -302,8 +307,9 @@ class ModelManager:
         top_k: int = 50,
         repetition_penalty: float = 1.1,
         system_prompt: str | None = None,
-        total_timeout: int = 300,
+        total_timeout: int = DEFAULT_GENERATION_TIMEOUT,
         enable_thinking: bool | None = None,
+        reasoning_effort: str | None = None,
         images: list[str] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
@@ -313,8 +319,9 @@ class ModelManager:
         Generate text (non-streaming).
 
         Args:
-            total_timeout: Total generation timeout in seconds (default 300)
+            total_timeout: Total generation timeout in seconds (DEFAULT_GENERATION_TIMEOUT)
             enable_thinking: Whether to enable thinking mode
+            reasoning_effort: Graded thinking level (low/medium/high) for models that take one
         """
         if not self.is_loaded():
             raise RuntimeError("Model not loaded. Please load a model first.")
@@ -338,6 +345,7 @@ class ModelManager:
             "repetition_penalty": repetition_penalty,
             "total_timeout": total_timeout,
             "enable_thinking": enable_thinking,
+            "reasoning_effort": reasoning_effort,
             "images": images,
             "tools": tools,
             "tool_choice": tool_choice,
@@ -357,8 +365,9 @@ class ModelManager:
         top_k: int = 50,
         repetition_penalty: float = 1.1,
         system_prompt: str | None = None,
-        total_timeout: int = 300,
+        total_timeout: int = DEFAULT_GENERATION_TIMEOUT,
         enable_thinking: bool | None = None,
+        reasoning_effort: str | None = None,
         images: list[str] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
@@ -368,8 +377,9 @@ class ModelManager:
         Generate text (streaming).
 
         Args:
-            total_timeout: Total generation timeout in seconds (default 300)
+            total_timeout: Total generation timeout in seconds (DEFAULT_GENERATION_TIMEOUT)
             enable_thinking: Whether to enable thinking mode
+            reasoning_effort: Graded thinking level (low/medium/high) for models that take one
         """
         if not self.is_loaded():
             raise RuntimeError("Model not loaded. Please load a model first.")
@@ -397,6 +407,7 @@ class ModelManager:
             "repetition_penalty": repetition_penalty,
             "total_timeout": total_timeout,
             "enable_thinking": enable_thinking,
+            "reasoning_effort": reasoning_effort,
             "images": images,
             "tools": tools,
             "tool_choice": tool_choice,
@@ -416,6 +427,7 @@ class ModelManager:
         repetition_penalty: float,
         total_timeout: int,
         enable_thinking: bool | None,
+        reasoning_effort: str | None,
         images: list[str] | None,
         tools: list[dict[str, Any]] | None,
         tool_choice: Any | None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
@@ -428,6 +440,7 @@ class ModelManager:
             "repetition_penalty": repetition_penalty,
             "total_timeout": total_timeout,
             "enable_thinking": enable_thinking,
+            "reasoning_effort": reasoning_effort,
             "images": images,
             "tools": tools,
             "tool_choice": tool_choice,
@@ -455,8 +468,9 @@ class ModelManager:
         top_k: int = 50,
         repetition_penalty: float = 1.1,
         system_prompt: str | None = None,
-        total_timeout: int = 300,
+        total_timeout: int = DEFAULT_GENERATION_TIMEOUT,
         enable_thinking: bool | None = None,
+        reasoning_effort: str | None = None,
         images: list[str] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
@@ -474,6 +488,7 @@ class ModelManager:
             repetition_penalty=repetition_penalty,
             total_timeout=total_timeout,
             enable_thinking=enable_thinking,
+            reasoning_effort=reasoning_effort,
             images=images,
             tools=tools,
             tool_choice=tool_choice,
@@ -529,8 +544,9 @@ class ModelManager:
         top_k: int = 50,
         repetition_penalty: float = 1.1,
         system_prompt: str | None = None,
-        total_timeout: int = 300,
+        total_timeout: int = DEFAULT_GENERATION_TIMEOUT,
         enable_thinking: bool | None = None,
+        reasoning_effort: str | None = None,
         images: list[str] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
@@ -548,6 +564,7 @@ class ModelManager:
             repetition_penalty=repetition_penalty,
             total_timeout=total_timeout,
             enable_thinking=enable_thinking,
+            reasoning_effort=reasoning_effort,
             images=images,
             tools=tools,
             tool_choice=tool_choice,
@@ -632,7 +649,9 @@ class ModelManager:
             "vllm_enforce_eager": cfg.vllm_enforce_eager if cfg else None,
             "vllm_kv_cache_dtype": cfg.vllm_kv_cache_dtype if cfg else None,
             "vllm_cpu_offload_gb": cfg.vllm_cpu_offload_gb if cfg else None,
+            "vllm_cpu_offload_params": cfg.vllm_cpu_offload_params if cfg else None,
             "vllm_kv_offloading_size": (cfg.vllm_kv_offloading_size if cfg else None),
+            "vllm_kv_offloading_disk_path": cfg.vllm_kv_offloading_disk_path if cfg else None,
             "vllm_tensor_parallel_size": cfg.vllm_tensor_parallel_size if cfg else None,
             "vllm_max_num_seqs": cfg.vllm_max_num_seqs if cfg else None,
             "vllm_max_num_batched_tokens": (cfg.vllm_max_num_batched_tokens if cfg else None),
@@ -644,15 +663,6 @@ class ModelManager:
             "vllm_tool_call_parser": cfg.vllm_tool_call_parser if cfg else None,
             "vllm_reasoning_parser": cfg.vllm_reasoning_parser if cfg else None,
             "vllm_server_extra_args": cfg.vllm_server_extra_args if cfg else None,
-            "vllm_lmcache_enabled": cfg.vllm_lmcache_enabled if cfg else None,
-            "vllm_lmcache_max_local_cpu_size": (
-                cfg.vllm_lmcache_max_local_cpu_size if cfg else None
-            ),
-            "vllm_lmcache_local_disk": cfg.vllm_lmcache_local_disk if cfg else None,
-            "vllm_lmcache_max_local_disk_size": (
-                cfg.vllm_lmcache_max_local_disk_size if cfg else None
-            ),
-            "vllm_lmcache_chunk_size": cfg.vllm_lmcache_chunk_size if cfg else None,
         }
 
         # GPU memory usage: prefer the numbers reported by the worker process

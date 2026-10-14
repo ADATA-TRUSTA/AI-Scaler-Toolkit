@@ -49,6 +49,15 @@ logger = configure_logging(__name__)
 # Values of vllm_tool_call_parser that mean "serve chat only".
 _TOOL_PARSER_OFF_VALUES = frozenset({"off", "none", "disabled", "false", "0"})
 
+
+def configured_reasoning_parser(config: object) -> str | None:
+    """The reasoning parser a vLLM load was configured with, or None when it is off."""
+    raw = str(getattr(config, "vllm_reasoning_parser", None) or "off").strip()
+    if raw.lower() in _TOOL_PARSER_OFF_VALUES:
+        return None
+    return raw
+
+
 # Name of the probe helper run under the interpreter vLLM runs from, and the marker
 # it prints. A marker is needed because importing the parsers makes vLLM log INFO
 # lines to stdout alongside the answer.
@@ -56,9 +65,6 @@ _TOOL_PARSER_PROBE_SCRIPT = "vllm_tool_parser_probe.py"
 _TOOL_PARSER_PROBE_MARKER = "TRUSTA_TOOL_PARSER="
 _TOOL_PARSER_PROBE_AMBIGUOUS_MARKER = "TRUSTA_TOOL_PARSER_AMBIGUOUS="
 _TOOL_PARSER_PROBE_TIMEOUT_S = 120
-# A bare `import lmcache` only touches the package; generous enough for a cold
-# filesystem, still trivial next to the model load it is there to pre-empt.
-_LMCACHE_IMPORT_PROBE_TIMEOUT_S = 60
 
 # Tie-break order when auto-detection is ambiguous (several parsers round-trip the
 # same probe call). First match wins; anything not listed here is never auto-picked
@@ -196,6 +202,82 @@ class VllmRuntimeContext:
     # totalling 200+ lines per failure; too small a maxlen pushes the root
     # cause (e.g. OOM) out of the buffer.
     stderr_recent_lines: deque[str] = field(default_factory=lambda: deque(maxlen=500))
+    # /dev/shm offload files present before this server was launched. Anything
+    # matching the patterns that appears after it, and that no live process has
+    # mapped once the server is gone, was left behind by this run. See
+    # `_reclaim_orphaned_shm`.
+    shm_files_before_launch: frozenset[str] = frozenset()
+    # True from launch until the health check succeeds. While set, vLLM's INFO
+    # lines (KV cache size, chosen kernels) are forwarded to the service log;
+    # afterwards they are dropped, because at serving time vLLM logs INFO per
+    # request and would bury everything else. See `_pump_server_logs`.
+    in_startup: bool = True
+    # Only true when *we* raised the subprocess to INFO. An operator who set
+    # VLLM_LOGGING_LEVEL explicitly gets exactly what they asked for, with no
+    # filtering applied on top.
+    startup_log_boost: bool = False
+    # When the subprocess last produced any output. A startup timeout means
+    # something different depending on whether the server was silent or still
+    # compiling, and the error message should say which.
+    last_server_output_at: float = 0.0
+
+
+# vLLM's KV/EC offload regions are tmpfs files under /dev/shm, sized by the
+# offload budget: `/dev/shm/vllm_offload_{engine_id}.mmap` and
+# `/dev/shm/vllm_ec_{engine_id}.mmap`. engine_id is a uuid4 generated inside the
+# subprocess, so the name cannot be predicted from here -- which is why cleanup
+# works by diffing a snapshot rather than by constructing a path.
+# noqa S108: not a temp file this code creates -- it is where vLLM puts its
+# offload regions, and the only place they can be found to reclaim.
+_SHM_DIR = "/dev/shm"  # noqa: S108
+_SHM_OFFLOAD_GLOBS = ("vllm_offload_*.mmap", "vllm_ec_*.mmap")
+
+
+def _shm_offload_files() -> frozenset[str]:
+    """Current vLLM offload regions in /dev/shm. Empty off Linux, or if unreadable."""
+    found: set[str] = set()
+    for pattern in _SHM_OFFLOAD_GLOBS:
+        try:
+            found.update(glob.glob(os.path.join(_SHM_DIR, pattern)))
+        except OSError:  # pragma: no cover - /dev/shm missing (non-Linux)
+            continue
+    return frozenset(found)
+
+
+def _paths_mapped_by_live_processes(candidates: frozenset[str]) -> set[str]:
+    """
+    Subset of ``candidates`` that some live process still has mapped.
+
+    This is the guard that makes reclaiming safe when more than one vLLM is
+    running on the host: the files are named by a uuid we cannot predict, so
+    without it a cleanup would be reduced to globbing and could delete the
+    region another engine is actively using. Reading /proc directly rather than
+    going through psutil.memory_maps(), which raises on every process the user
+    does not own -- here, being unable to read a process must mean "assume it
+    might be using the file", not "skip it".
+    """
+    if not candidates:
+        return set()
+    in_use: set[str] = set()
+    for proc_dir in glob.glob("/proc/[0-9]*"):
+        try:
+            with open(os.path.join(proc_dir, "maps"), encoding="utf-8", errors="replace") as f:
+                blob = f.read()
+        except OSError:
+            # Process exited, or is not ours to read. Fall back to the safe
+            # answer by consulting the open file descriptors we *can* see.
+            try:
+                for fd in glob.glob(os.path.join(proc_dir, "fd", "*")):
+                    target = os.readlink(fd)
+                    if target in candidates:
+                        in_use.add(target)
+            except OSError:
+                pass
+            continue
+        for path in candidates:
+            if path in blob:
+                in_use.add(path)
+    return in_use
 
 
 class VllmEngine(BaseEngine):
@@ -248,6 +330,27 @@ class VllmEngine(BaseEngine):
             ctx["model_name"] = self.config.model_name
         return ctx
 
+    def _should_drop_server_log(self, txt: str) -> bool:
+        """
+        True for a vLLM INFO/DEBUG line emitted after startup finished.
+
+        Only applies when we raised the subprocess to INFO ourselves, and only
+        once the server is serving. The point is to get the startup facts (KV
+        cache size, selected kernels) into the service log without paying for
+        vLLM's per-request INFO afterwards -- which is what makes raising the
+        default level a bad trade, and why the default is left alone.
+
+        A line with no recognisable level is always kept: dropping output we
+        cannot classify is how a real error goes missing.
+        """
+        if not self.runtime.startup_log_boost or self.runtime.in_startup:
+            return False
+        # vLLM's format puts the level first: "INFO 09-17 12:00:00 [file.py:12] ...".
+        # Match it anchored, so a message merely containing the word "info" is not
+        # swallowed.
+        head = txt.lstrip()[:32].upper()
+        return head.startswith(("INFO", "DEBUG"))
+
     def _pump_server_logs(self, stream: "IO[str] | None", is_stderr: bool = False) -> None:
         """Forward vLLM subprocess output to this service's logger with structured fields."""
         if stream is None:
@@ -257,6 +360,13 @@ class VllmEngine(BaseEngine):
             for line in iter(stream.readline, ""):
                 txt = (line or "").rstrip()
                 if not txt:
+                    continue
+
+                # Any output at all is evidence the server is still working --
+                # a long BF16 compile looks identical to a hang without it.
+                self.runtime.last_server_output_at = time.time()
+
+                if self._should_drop_server_log(txt):
                     continue
 
                 extra = self._log_context(stream_label=stream_label)
@@ -399,6 +509,38 @@ class VllmEngine(BaseEngine):
 
         return False
 
+    def _effective_gpu_memory_utilization(self, config: InferenceConfig) -> float:
+        """
+        The --gpu-memory-utilization to start vLLM with: the requested one, except on XPU.
+
+        An Intel iGPU has no memory of its own; vLLM's "device memory" is system RAM
+        shared with everything else, and it refuses to start when less is free than the
+        fraction asks for. The interface sends 0.9, which on a 32 GB laptop is 25.7 GB
+        and never fits. So on the XPU build the fraction is lowered to what is free now,
+        leaving 2 GiB for the system, and the log says so. Measured against total RAM,
+        which is a little more than the device total vLLM divides by -- so the bytes
+        asked for stay under what is free. The CUDA build is passed through untouched:
+        a discrete card's memory is its own.
+        """
+        requested = config.vllm_gpu_memory_utilization
+        project_venv = os.path.join(self._resolve_vllm_server_dir(), ".venv")
+        if "+xpu" not in (self._installed_package_version(project_venv, "vllm") or ""):
+            return requested
+        memory = psutil.virtual_memory()
+        reserve = 2 * 1024**3
+        fits = max(0.05, round((memory.available - reserve) / memory.total, 2))
+        if requested <= fits:
+            return requested
+        logger.warning(
+            "[Worker] Intel XPU shares system memory: lowering vLLM gpu_memory_utilization "
+            "from %.2f to %.2f (%.1f GiB free of %.1f GiB)",
+            requested,
+            fits,
+            memory.available / 1024**3,
+            memory.total / 1024**3,
+        )
+        return fits
+
     def _core_args(self, config: InferenceConfig) -> list[str]:
         """
         Core required flags: model / address / dtype / memory budget / max len /
@@ -418,14 +560,15 @@ class VllmEngine(BaseEngine):
             "--dtype",
             config.vllm_dtype,
             "--gpu-memory-utilization",
-            str(config.vllm_gpu_memory_utilization),
+            str(self._effective_gpu_memory_utilization(config)),
         ]
         if config.vllm_max_model_len is not None:
             args.extend(["--max-model-len", str(config.vllm_max_model_len)])
+        args.extend(["--cpu-offload-gb", str(config.vllm_cpu_offload_gb)])
+        if config.vllm_cpu_offload_params:
+            args.extend(["--cpu-offload-params", *config.vllm_cpu_offload_params])
         args.extend(
             [
-                "--cpu-offload-gb",
-                str(config.vllm_cpu_offload_gb),
                 "--served-model-name",
                 served_model_name,
                 "--tensor-parallel-size",
@@ -442,13 +585,28 @@ class VllmEngine(BaseEngine):
         if config.vllm_kv_cache_dtype:
             args.extend(["--kv-cache-dtype", config.vllm_kv_cache_dtype])
         if config.vllm_kv_offloading_size is not None and config.vllm_kv_offloading_size > 0:
-            args.extend(
-                [
-                    "--kv-offloading-size",
-                    str(config.vllm_kv_offloading_size),
-                    "--disable-hybrid-kv-cache-manager",
-                ]
-            )
+            # Deliberately without --disable-hybrid-kv-cache-manager, which used to
+            # be pinned here alongside it.
+            #
+            # vLLM decides this better than we can. The flag is three-state: unset
+            # means "auto -- disable only when the chosen KV connector cannot do
+            # hybrid allocation", while passing it means "always disable, no
+            # questions asked". Both connectors --kv-offloading-size selects
+            # (OffloadingConnector, SimpleCPUOffloadConnector) declare SupportsHMA
+            # in vLLM 0.28, so auto leaves hybrid allocation on -- and pinning the
+            # flag turned it off for models that need it. vLLM's own words for
+            # what that costs: hybrid SSM models (Jamba, Bamba) "will fail at
+            # startup without it", and sliding-window models "run with reduced
+            # performance". Leaving it unset gets the same protection when a
+            # connector really cannot do HMA, with a logged reason.
+            args.extend(["--kv-offloading-size", str(config.vllm_kv_offloading_size)])
+            # Offloaded blocks are stored and looked up by prefix hash, which only
+            # exists with prefix caching on. vLLM turns it on by default for decoder
+            # and hybrid models; saying so here keeps a future default change, or a
+            # model vLLM defaults off, from turning the offload tiers into dead weight.
+            args.append("--enable-prefix-caching")
+            if config.vllm_kv_offloading_disk_path:
+                args.extend(["--kv-transfer-config", self._kv_disk_tier_config(config)])
         if config.vllm_max_num_seqs is not None:
             args.extend(["--max-num-seqs", str(config.vllm_max_num_seqs)])
 
@@ -542,11 +700,13 @@ class VllmEngine(BaseEngine):
         round-tripped as reliably as a tool call, so guessing risks mangling output.
         ``off`` (the default) emits nothing; any other value is passed to vLLM as-is.
         """
-        raw = str(getattr(config, "vllm_reasoning_parser", None) or "off").strip()
-        if raw.lower() in _TOOL_PARSER_OFF_VALUES:
-            logger.info("[Worker] vLLM reasoning parser disabled by config (%s)", raw)
-            return None
-        return raw
+        parser = configured_reasoning_parser(config)
+        if parser is None:
+            logger.info(
+                "[Worker] vLLM reasoning parser disabled by config (%s)",
+                getattr(config, "vllm_reasoning_parser", None) or "off",
+            )
+        return parser
 
     def _resolve_tool_call_parser(self, config: InferenceConfig) -> str | None:
         """
@@ -616,7 +776,7 @@ class VllmEngine(BaseEngine):
             return None
 
         # Only the hub cache location matters here, so build a minimal env rather
-        # than reusing the server's: none of its vLLM/LMCache settings apply, and
+        # than reusing the server's: none of its vLLM settings apply, and
         # not depending on _build_server_env keeps this off that signature.
         env = os.environ.copy()
         env["HF_HUB_OFFLINE"] = "1"
@@ -695,26 +855,26 @@ class VllmEngine(BaseEngine):
                 return candidate
         return None
 
-    def _lmcache_args(self, config: InferenceConfig) -> list[str]:
+    @staticmethod
+    def _kv_disk_tier_config(config: InferenceConfig) -> str:
         """
-        LMCache KV connector wiring, expressed as ``--kv-transfer-config``.
+        ``--kv-transfer-config`` that adds a disk tier behind ``--kv-offloading-size``.
 
-        ``kv_role`` is ``kv_both``: one standalone server both writes and reads prefix KV.
-        ``use_native`` stays False so the adapter inside the ``lmcache`` package is used
-        rather than vLLM's vendored one, which did not import against lmcache 0.5.3.
-        That pairing was established against vllm 0.20.1 and has not been re-checked
-        against the 0.27.1 / lmcache 0.5.4 this now resolves to.
-        Tier sizes and chunk size are env vars, not CLI flags; see ``_lmcache_env``.
+        It names only the tiering spec and the file tier. vLLM fills in the rest when
+        it applies --kv-offloading-size: the OffloadingConnector, ``kv_both``, and the
+        DRAM tier size as ``cpu_bytes_to_use``, merged into this same config
+        (VllmConfig._post_init_kv_transfer_config), so the two flags describe one
+        connector rather than competing for it.
         """
-        if not getattr(config, "vllm_lmcache_enabled", False):
-            return []
-
-        kv_transfer_config = {
-            "kv_connector": "LMCacheConnectorV1",
-            "kv_role": "kv_both",
-            "kv_connector_extra_config": {"use_native": False},
+        tier = {
+            "kv_connector_extra_config": {
+                "spec_name": "TieringOffloadingSpec",
+                "secondary_tiers": [
+                    {"type": "fs", "root_dir": config.vllm_kv_offloading_disk_path}
+                ],
+            }
         }
-        return ["--kv-transfer-config", json.dumps(kv_transfer_config)]
+        return json.dumps(tier, separators=(",", ":"))
 
     def _extra_args(self, config: InferenceConfig) -> list[str]:
         """User-supplied ``vllm_server_extra_args``, passed to ``vllm serve`` verbatim."""
@@ -728,17 +888,15 @@ class VllmEngine(BaseEngine):
         """
         Assemble the full ``vllm serve <args...>`` command.
 
-        Each group (core/perf/mm/template/lmcache) has its own method to ease unit testing.
+        Each group (core/perf/mm/template) has its own method to ease unit testing.
         ``_extra_args`` is appended last so a user override wins: vLLM uses argparse,
-        and when a flag appears twice, the later occurrence takes effect. That includes
-        overriding the ``--kv-transfer-config`` that ``_lmcache_args`` builds.
+        and when a flag appears twice, the later occurrence takes effect.
         """
         cmd: list[str] = ["vllm", "serve"]
         cmd.extend(self._core_args(config))
         cmd.extend(self._perf_args(config))
         cmd.extend(self._mm_args(config))
         cmd.extend(self._template_args(config))
-        cmd.extend(self._lmcache_args(config))
         cmd.extend(self._extra_args(config))
         return cmd
 
@@ -798,7 +956,7 @@ class VllmEngine(BaseEngine):
             raise RuntimeError(
                 f"vLLM launcher unavailable: no executable at "
                 f"{venv_bin} and `uv` not found on PATH. "
-                "Run setup_env on a CUDA host (it syncs `--extra cuda --extra vllm`) first."
+                "Run setup_env on a Linux CUDA or Intel XPU host (it installs the matching vLLM build) first."
             )
         return prefixes
 
@@ -890,6 +1048,11 @@ class VllmEngine(BaseEngine):
         throwaway. It only fires when a required library is genuinely missing.
         """
         project_venv = os.path.join(project_dir, ".venv")
+        # The XPU build (setup_env's vllm-xpu extra, versioned "+xpu") has no NVIDIA
+        # libraries to find, and "repairing" them would install CUDA wheels into it.
+        vllm_version = self._installed_package_version(project_venv, "vllm") or ""
+        if "+xpu" in vllm_version:
+            return
         missing_pairs = [
             (lib_name, package_name)
             for lib_name, package_name in _REQUIRED_NVIDIA_RUNTIME_LIBS
@@ -1004,49 +1167,6 @@ class VllmEngine(BaseEngine):
             ", ".join(lib_name for lib_name, _ in missing_pairs),
         )
 
-    def _lmcache_env(self, config: InferenceConfig) -> dict[str, str]:
-        """
-        Build the ``LMCACHE_*`` environment for the vLLM subprocess.
-
-        LMCache reads its engine config from env vars rather than ``vllm serve`` flags.
-        Returns an empty dict when disabled, leaving the default path's env untouched.
-        """
-        if not getattr(config, "vllm_lmcache_enabled", False):
-            return {}
-
-        env = {
-            "LMCACHE_CHUNK_SIZE": str(config.vllm_lmcache_chunk_size),
-            "LMCACHE_LOCAL_CPU": "True",
-            "LMCACHE_MAX_LOCAL_CPU_SIZE": str(config.vllm_lmcache_max_local_cpu_size),
-            # Not a tuning knob: vLLM roots its prefix-hash chain at NONE_HASH, which
-            # falls back to os.urandom(32) when the seed is unset, so chunk keys would
-            # differ between two runs of the same prompt. Losing hash randomisation in
-            # this subprocess is harmless here and is what vLLM advises.
-            "PYTHONHASHSEED": "0",
-        }
-
-        local_disk = config.vllm_lmcache_local_disk
-        if local_disk:
-            # Resolve before use. A relative path lands wherever the launcher happened
-            # to cd to -- the repo root under scripts/linux/run_service.sh, but
-            # service/ under the Docker entrypoint -- and `file://./x` is not a valid
-            # file URL either: urlparse reads the "." as a host and the remainder as an
-            # absolute path. Every other path field in this repo resolves to absolute.
-            local_disk = os.path.abspath(os.path.expanduser(local_disk))
-            os.makedirs(local_disk, exist_ok=True)
-            env["LMCACHE_LOCAL_DISK"] = f"file://{local_disk}"
-            env["LMCACHE_MAX_LOCAL_DISK_SIZE"] = str(config.vllm_lmcache_max_local_disk_size)
-
-        logger.info(
-            "[Worker] LMCache enabled: chunk_size=%s cpu_tier=%sGB disk_tier=%s",
-            config.vllm_lmcache_chunk_size,
-            config.vllm_lmcache_max_local_cpu_size,
-            f"{config.vllm_lmcache_max_local_disk_size}GB at {local_disk}"
-            if local_disk
-            else "disabled",
-        )
-        return env
-
     @staticmethod
     def _is_loopback_bind(host: str) -> bool:
         """Whether the vLLM server bind address is reachable from this host only."""
@@ -1081,10 +1201,33 @@ class VllmEngine(BaseEngine):
     def _build_server_env(self, config: InferenceConfig) -> dict[str, str]:
         """Build the environment variables for the vLLM subprocess."""
         env = os.environ.copy()
-        env.setdefault("VLLM_LOGGING_LEVEL", VLLM_LOGGING_LEVEL)
+        # Startup facts -- the KV cache size vLLM settled on, which attention
+        # kernel it chose -- are INFO lines. At the default ERROR they are never
+        # emitted, so the only way to find them was to go read /metrics after the
+        # fact. Raise the subprocess to INFO so they exist, and drop them in the
+        # pump once startup is done; the service log's steady-state verbosity is
+        # unchanged, because serving-time INFO is one line per request.
+        #
+        # Only when the operator expressed no preference. An explicit
+        # VLLM_LOGGING_LEVEL is honoured verbatim and never filtered.
+        operator_set_level = bool(os.environ.get("VLLM_LOGGING_LEVEL"))
+        self.runtime.startup_log_boost = not operator_set_level and VLLM_LOGGING_LEVEL in {
+            "ERROR",
+            "CRITICAL",
+            "WARNING",
+        }
+        if self.runtime.startup_log_boost:
+            env["VLLM_LOGGING_LEVEL"] = "INFO"
+        else:
+            env.setdefault("VLLM_LOGGING_LEVEL", VLLM_LOGGING_LEVEL)
         env["HF_HUB_OFFLINE"] = "1"
         env.update(self._admin_endpoint_env())
-        env.update(self._lmcache_env(config))
+        # Not a tuning knob: vLLM roots its prefix-hash chain at NONE_HASH, which
+        # falls back to os.urandom(32) when PYTHONHASHSEED is unset. KV blocks
+        # offloaded to disk are named by that hash, so without a fixed seed every
+        # restart names the same prompt differently: nothing written before it is
+        # found again, and the directory keeps growing. An operator's own value wins.
+        env.setdefault("PYTHONHASHSEED", "0")
 
         project_venv = os.path.join(self._resolve_vllm_server_dir(), ".venv")
         active_venv = env.get("VIRTUAL_ENV")
@@ -1105,41 +1248,34 @@ class VllmEngine(BaseEngine):
         env["PATH"] = os.pathsep.join([os.path.join(project_venv, "bin"), env.get("PATH", "")])
         return env
 
-    def _assert_lmcache_importable(self, config: InferenceConfig) -> None:
+    @staticmethod
+    def _prepare_kv_disk_tier(config: InferenceConfig) -> None:
         """
-        Fail now, not four minutes into a load, when LMCache is on but not installed.
+        Create the disk tier directory and refuse setups where vLLM would skip it.
 
-        Without this the missing package only surfaces once the server subprocess has
-        started and begun loading weights, so the operator waits out a full model load
-        to be told about a one-line dependency problem.
+        Both failures below otherwise surface late or not at all: an unwritable
+        directory only shows up as store errors once requests run, and with
+        VLLM_USE_SIMPLE_KV_OFFLOAD set, --kv-offloading-size selects the
+        SimpleCPUOffloadConnector, which ignores the tiering spec entirely -- the
+        server starts, serves, and never touches the disk.
         """
-        if not getattr(config, "vllm_lmcache_enabled", False):
+        path = config.vllm_kv_offloading_disk_path
+        if not path:
             return
-
-        interpreter = self._resolve_venv_python() or sys.executable
-        try:
-            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, no user input
-                [interpreter, "-c", "import lmcache"],
-                capture_output=True,
-                text=True,
-                timeout=_LMCACHE_IMPORT_PROBE_TIMEOUT_S,
-                check=False,
+        if os.environ.get("VLLM_USE_SIMPLE_KV_OFFLOAD", "").strip().lower() in {"1", "true", "yes"}:
+            raise RuntimeError(
+                "vllm_kv_offloading_disk_path is set but VLLM_USE_SIMPLE_KV_OFFLOAD is on: "
+                "vLLM then uses SimpleCPUOffloadConnector, which has no disk tier. Unset "
+                "VLLM_USE_SIMPLE_KV_OFFLOAD in the service environment"
             )
-        except (subprocess.SubprocessError, OSError) as e:
-            # Inconclusive, not negative: let the load proceed rather than block it on
-            # a probe that could not run. The classifier still names the cause on death.
-            logger.warning("[Worker] LMCache import probe failed to run: %s", e)
-            return
-
-        if proc.returncode == 0:
-            return
-
-        raise RuntimeError(
-            "vllm_lmcache_enabled is set but the lmcache package is not importable by "
-            f"{interpreter}. Install it into the environment vLLM runs from "
-            "(`uv sync --extra vllm`), or set vllm_lmcache_enabled=false. "
-            f"probe_stderr={(proc.stderr or '').strip()[-300:]}"
-        )
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(
+                f"vllm_kv_offloading_disk_path {path!r} cannot be created: {e}"
+            ) from e
+        if not os.access(path, os.W_OK | os.X_OK):
+            raise RuntimeError(f"vllm_kv_offloading_disk_path {path!r} is not writable")
 
     def _validate_runtime_environment(self, config: InferenceConfig) -> None:
         """
@@ -1150,7 +1286,7 @@ class VllmEngine(BaseEngine):
           2. At least one launcher is available (venv
               ``python -m vllm.entrypoints.cli.main`` or system uv).
         3. ``VLLM_PORT`` is within 1-65535.
-        4. ``lmcache`` is importable, when the config asks for it.
+        4. The disk KV offload tier, when configured, can actually be used.
 
         Failures raise directly; the caller's ``load_model`` try/except reports
         the error to the main process via status_queue.
@@ -1161,8 +1297,8 @@ class VllmEngine(BaseEngine):
         self._repair_vllm_nvidia_runtime(project_dir)
         # 3: port range
         self._resolve_vllm_port()
-        # 4: optional dependency, checked only when the config depends on it
-        self._assert_lmcache_importable(config)
+        # 4: disk KV offload tier
+        self._prepare_kv_disk_tier(config)
 
     def _start_server_process(self, config: InferenceConfig) -> None:
         port = self._resolve_vllm_port()
@@ -1182,13 +1318,21 @@ class VllmEngine(BaseEngine):
         ]
 
         last_error: Exception | None = None
-        # Clear first: _build_server_env can raise (LMCache creates its disk tier
-        # there), and the failure handler staples _get_error_reason() onto whatever
+        # Clear first: _build_server_env can raise, and the failure handler staples _get_error_reason() onto whatever
         # it raises. Left uncleared, that is the *previous* run's stderr, so a
         # permission error arrives wearing an unrelated traceback.
         with self.runtime.stderr_buffer_lock:
             self.runtime.stderr_recent_lines.clear()
         env = self._build_server_env(config)
+
+        # Snapshot before launch, so unload can tell this run's offload regions
+        # from any that were already there (another engine, or an earlier leak).
+        self.runtime.shm_files_before_launch = _shm_offload_files()
+        # Set here rather than relying on the dataclass default: a reload onto a
+        # runtime that already served would otherwise start with startup logging
+        # already suppressed, and the new server's startup facts would be lost.
+        self.runtime.in_startup = True
+        self.runtime.last_server_output_at = 0.0
 
         for cmd in launch_candidates:
             try:
@@ -1224,11 +1368,28 @@ class VllmEngine(BaseEngine):
 
         raise RuntimeError(f"Failed to start vLLM server. {last_error}")
 
+    def _graceful_stop_timeout(self) -> float:
+        """
+        How long to let vLLM shut down cleanly before escalating.
+
+        Scaled by the KV offload budget rather than fixed at 10s. Tearing down
+        an offload region means unmapping and unlinking a tmpfs file the size of
+        the budget, and only the graceful path does that -- SIGKILL leaves the
+        whole thing resident in RAM. A flat 10s is why the large offloads were
+        the ones that leaked: they are precisely the ones that cannot finish in
+        10s. ~1s per GiB, floor 10s, ceiling 120s so a wedged server is still
+        killed in bounded time.
+        """
+        budget = getattr(self.config, "vllm_kv_offloading_size", None) if self.config else None
+        if not budget or budget <= 0:
+            return 10.0
+        return min(120.0, max(10.0, float(budget)))
+
     def _stop_server_process(self) -> None:
         if self.runtime.server_process and self.runtime.server_process.poll() is None:
             try:
                 os.killpg(os.getpgid(self.runtime.server_process.pid), signal.SIGINT)  # pyright: ignore[reportAttributeAccessIssue]  # POSIX-only; vLLM runs on Linux
-                self.runtime.server_process.wait(timeout=10)
+                self.runtime.server_process.wait(timeout=self._graceful_stop_timeout())
             except (
                 ProcessLookupError,
                 PermissionError,
@@ -1287,6 +1448,59 @@ class VllmEngine(BaseEngine):
             extra=self._log_context(stream_label="lifecycle"),
         )
         return False
+
+    def _reclaim_orphaned_shm(self) -> int:
+        """
+        Delete /dev/shm offload regions this run left behind. Returns bytes freed.
+
+        vLLM does unlink these itself, in ``SharedOffloadRegion.cleanup()`` -- but
+        only if it gets to run. ``_stop_server_process`` escalates SIGINT ->
+        SIGTERM -> SIGKILL, and SIGKILL cannot be caught, so a server that has
+        not finished tearing down when the grace period expires leaves the whole
+        region on tmpfs. tmpfs is RAM: two observed leaks held 20GB and 48GB,
+        and the second made the next load fail with "Insufficient space in
+        /dev/shm". Bigger offloads take longer to tear down, which is exactly
+        why the big ones are the ones that leak.
+
+        Only files that appeared after this server launched *and* that no live
+        process has mapped are removed, so a second engine's live region is
+        never touched.
+        """
+        appeared = _shm_offload_files() - self.runtime.shm_files_before_launch
+        if not appeared:
+            return 0
+
+        still_mapped = _paths_mapped_by_live_processes(appeared)
+        freed = 0
+        for path in sorted(appeared - still_mapped):
+            try:
+                size = os.path.getsize(path)
+                os.unlink(path)
+            except OSError as e:
+                logger.warning(
+                    "[Worker] Could not reclaim leaked vLLM offload region %s: %s",
+                    path,
+                    e,
+                    extra=self._log_context(stream_label="lifecycle"),
+                )
+                continue
+            freed += size
+            logger.info(
+                "[Worker] Reclaimed leaked vLLM offload region %s (%.1f GiB)",
+                path,
+                size / (1 << 30),
+                extra=self._log_context(stream_label="lifecycle"),
+            )
+
+        if still_mapped:
+            # Not an error: a concurrent engine owning its own region looks
+            # exactly like this, and deleting it would be the real bug.
+            logger.info(
+                "[Worker] Left %d /dev/shm offload region(s) alone; still mapped by a live process",
+                len(still_mapped),
+                extra=self._log_context(stream_label="lifecycle"),
+            )
+        return freed
 
     def _drain_stderr_pump(self, timeout: float = 2.0) -> None:
         """
@@ -1430,6 +1644,9 @@ class VllmEngine(BaseEngine):
                     else (model_ids[0] if model_ids else preferred)
                 )
                 self._record_served_context_length(cards, resolved)
+                # Serving now: stop forwarding vLLM's INFO, which from here on
+                # is one line per request.
+                self.runtime.in_startup = False
                 return resolved
             except (APIError, OSError, ValueError, TypeError) as e:
                 last_error = str(e)
@@ -1444,6 +1661,21 @@ class VllmEngine(BaseEngine):
         if last_error:
             details_parts.append(f"last_error={last_error}")
         details_parts.append(f"category={report.category}")
+        # A timeout means two very different things, and the remedy differs:
+        # a silent server is wedged, one that was talking a second ago just
+        # needed longer (a BF16 compile routinely outlives a short timeout).
+        if self.runtime.last_server_output_at:
+            silent_for = time.time() - self.runtime.last_server_output_at
+            details_parts.append(
+                f"last_output={silent_for:.0f}s ago"
+                + (
+                    " (still producing output -- raise VLLM_HEALTH_TIMEOUT)"
+                    if silent_for < 30
+                    else " (silent)"
+                )
+            )
+        else:
+            details_parts.append("last_output=never (the server produced no output at all)")
         details_parts.append(f"stderr_excerpt={report.to_text()}")
         details = "; " + "; ".join(details_parts)
         raise RuntimeError(
@@ -1543,6 +1775,10 @@ class VllmEngine(BaseEngine):
 
         self._stop_server_process()
 
+        # After the process is gone, not before: a region still mapped by the
+        # dying server must not be unlinked out from under it.
+        freed_shm = self._reclaim_orphaned_shm()
+
         # On hot swap, load_model follows unload immediately; make sure the old
         # server really released the port so the next _cleanup_port does not hit
         # TIME_WAIT or a leftover process.
@@ -1559,6 +1795,8 @@ class VllmEngine(BaseEngine):
         self.config = None
 
         unload_msg = "vLLM engine unloaded and server stopped"
+        if freed_shm:
+            unload_msg += f" (reclaimed {freed_shm / (1 << 30):.1f} GiB of leaked /dev/shm)"
         if not port_released:
             unload_msg += f" (warning: port {port} not yet released)"
 

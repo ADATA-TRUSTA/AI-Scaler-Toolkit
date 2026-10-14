@@ -1,0 +1,8 @@
+{
+  "base_model": "Qwen/Qwen3-4B",
+  "model_path": "Qwen/Qwen3-4B",
+  "engine": "transformers",
+  "quantization": "int4",
+  "device_map": "cuda:0",
+  "max_memory": null
+}

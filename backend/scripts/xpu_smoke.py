@@ -17,6 +17,7 @@ Exit codes: 0 = usable, 1 = not usable (reason on stderr).
 """
 
 import os
+import re
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
@@ -85,6 +86,43 @@ def _version_pair_note() -> str:
     )
 
 
+def _linux_runtime_remedy() -> str:
+    """
+    What to install when Linux sees no Intel GPU: the runtime is missing, or too old.
+
+    Both were met on Panther Lake laptops with a stock Ubuntu 24.04: first no Level Zero at
+    all, then the archive's compute runtime (23.43), which predates the GPU and counts zero
+    devices. Intel's graphics PPA (26.x) fixed it. Empty on Windows, where the runtime comes
+    with Intel's driver.
+    """
+    if os.name == "nt":
+        return ""
+    packages = "libze1 libze-intel-gpu1 intel-opencl-icd libze-dev"
+    installed = _installed_driver_version()
+    if installed == "unknown":
+        return (
+            "\n[xpu_smoke] The Intel GPU compute runtime (Level Zero) is not installed:\n"
+            f"[xpu_smoke]   sudo apt install {packages}\n"
+            "[xpu_smoke] (the AppImage asks for these on first launch)"
+        )
+    major = int(re.match(r"\d*", installed).group() or 0)
+    if major >= 25:
+        # Already Intel's current build: the runtime is not what is missing.
+        return (
+            f"\n[xpu_smoke] The Intel GPU compute runtime ({installed}) is current and still sees "
+            "no GPU. Check that this user can open /dev/dri/renderD* (the render group: "
+            "sudo usermod -aG render $USER, then log in again) and that the xe or i915 kernel "
+            "driver is loaded (lspci -k)."
+        )
+    return (
+        f"\n[xpu_smoke] The Intel GPU compute runtime ({installed}) is installed but sees no GPU. "
+        "Ubuntu's own build predates recent Intel GPUs (Lunar Lake, Panther Lake, Arc B-series); "
+        "on one of those, install Intel's build and run setup again:\n"
+        "[xpu_smoke]   sudo add-apt-repository -y ppa:kobuk-team/intel-graphics\n"
+        f"[xpu_smoke]   sudo apt install {packages}"
+    )
+
+
 def _check_device(torch: ModuleType, index: int) -> None:
     """Run a real GEMM and a real optimizer step on one XPU device."""
     device = f"xpu:{index}"
@@ -120,7 +158,9 @@ def main() -> int:
     if not torch.xpu.is_available():
         return _fail(
             "torch.xpu.is_available() is False: the build has no XPU support "
-            "(is this the cuda extra?) or no Intel GPU was detected\n" + _version_pair_note()
+            "(is this the cuda extra?) or no Intel GPU was detected\n"
+            + _version_pair_note()
+            + _linux_runtime_remedy()
         )
 
     count = torch.xpu.device_count()

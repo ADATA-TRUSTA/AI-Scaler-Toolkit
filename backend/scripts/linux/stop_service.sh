@@ -5,7 +5,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-SERVICE_PORT="${TRUSTA_SERVICE_PORT:-8000}"
+# SERVICE_PORT, the variable the service itself reads (service/settings.py). This used
+# to read TRUSTA_SERVICE_PORT, a name nothing anywhere sets -- so the port check always
+# looked at the default while a one-click install runs on 8571, and it reported the
+# port released without having looked at the right one.
+SERVICE_PORT="${SERVICE_PORT:-8000}"
 
 echo "Stopping LLM service..."
 

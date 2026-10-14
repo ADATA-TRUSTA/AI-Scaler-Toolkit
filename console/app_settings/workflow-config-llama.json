@@ -1,7 +1,0 @@
-{
-  "description": "Llama.cpp workflow configuration - GGUF format inference",
-  "inference_config": "infer_model_configs/inference-config-llama.json",
-  "chat_settings": "app_settings/app_settings_batch_chat.json",
-  "timeout": 600,
-  "verbose": false
-}

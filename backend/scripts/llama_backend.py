@@ -129,6 +129,42 @@ def host_has_avx2() -> bool | None:
     return None
 
 
+def _probe_env() -> dict[str, str] | None:
+    """
+    Return the environment the service will start llama-server in, or None to inherit.
+
+    Windows only, and it is load-bearing. ggml-cuda.dll imports cublas64_<major>.dll, and the
+    CUDA build this project installs deliberately does not ship it: setup_env pairs the release
+    with the cuBLAS inside torch's +cuXXX wheels rather than downloading llama.cpp's 372MB
+    cudart archive. llama_server_engine puts torch/lib on PATH for exactly this reason -- but
+    this probe did not, so it ran the binary in an environment the service never uses.
+
+    The backend loader does not report a load failure; it simply carries on without that
+    backend. So the probe saw
+
+        load_backend: loaded RPC backend ...
+        load_backend: loaded CPU backend ...
+        Available devices:
+
+    and concluded the CUDA build was a CPU one, which fails verification and takes the whole
+    first run with it. On a clean Windows install -- no CUDA Toolkit, nothing else putting
+    those DLLs on PATH -- that is every machine. It went unseen because a developer's machine
+    has the Toolkit installed.
+    """
+    if os.name != "nt":
+        return None  # the Linux build carries an RPATH to the libraries it needs
+    try:
+        import torch
+    except ImportError:
+        return None
+    lib = os.path.join(os.path.dirname(os.path.abspath(torch.__file__)), "lib")
+    if not os.path.isdir(lib):
+        return None
+    env = os.environ.copy()
+    env["PATH"] = f"{lib}{os.pathsep}{env.get('PATH', '')}"
+    return env
+
+
 def _run(cmd: list[str]) -> tuple[int, str, str]:
     """Run a probe command; returns (-1, "", reason) when it could not run at all."""
     try:
@@ -139,6 +175,7 @@ def _run(cmd: list[str]) -> tuple[int, str, str]:
             errors="replace",
             timeout=PROBE_TIMEOUT_SEC,
             check=False,
+            env=_probe_env(),
             # A degraded binary is exactly where a missing DLL is likely, and on Windows
             # that pops a modal loader dialog that would hang an unattended setup.
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,

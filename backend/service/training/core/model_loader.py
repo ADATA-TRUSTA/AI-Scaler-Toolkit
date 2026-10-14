@@ -212,7 +212,7 @@ def verify_labels_are_supervised(
     Whether a row survives depends on ITS OWN length, so rows are sampled from
     across the dataset rather than off the head -- checking only the first two
     misses it entirely when the long prompts are later. Measured on SmolVLM with
-    `dataset/mixed_finetune_demo`: rows 0-1 keep 11 supervised tokens at
+    a small mixed image-and-text dataset: rows 0-1 keep 11 supervised tokens at
     `max_seq_length=1024` while a shuffled batch of other rows keeps 0.
 
     All-affected raises; some-affected warns, because a handful of over-long

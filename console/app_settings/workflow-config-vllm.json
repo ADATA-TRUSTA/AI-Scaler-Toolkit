@@ -1,7 +1,0 @@
-{
-  "description": "vLLM workflow configuration - Fast inference with vLLM engine",
-  "inference_config": "infer_model_configs/inference-config-vllm.json",
-  "chat_settings": "app_settings/app_settings_parallel_terminal_batch_chat_8.json",
-  "timeout": 600,
-  "verbose": false
-}

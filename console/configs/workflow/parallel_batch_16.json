@@ -1,0 +1,7 @@
+{
+  "description": "Parallel batch workflow - High throughput with 16 parallel requests",
+  "inference_config": "configs/inference/vllm.json",
+  "chat_settings": "configs/chat/parallel_16.json",
+  "timeout": 900,
+  "verbose": false
+}

@@ -22,6 +22,8 @@ when vLLM renames a parser or changes its syntax.
 
 import json
 import sys
+from collections.abc import Callable
+from typing import Any
 
 _TOOLS = [
     {
@@ -59,6 +61,68 @@ _MESSAGES = [
 ]
 
 
+def _probe_request() -> object | None:
+    """
+    Build the chat request a parser sees when serving, carrying the probe tool.
+
+    Parsers are handed the live request in production, and some read it: vLLM's
+    ``minicpm5`` parser looks up ``request.tools`` to type each parameter, so given
+    ``request=None`` it raises AttributeError, the loop below swallows it, and a
+    model whose syntax that parser reads perfectly is reported as having no parser
+    at all -- tool calling then silently stays off (seen on openbmb/MiniCPM5-1B,
+    vLLM 0.28.0). Returns None only when this vLLM cannot build one; parsers that
+    ignore the request are unaffected either way.
+    """
+    try:
+        # The protocol module moved in newer vLLM; try the current home first.
+        from vllm.entrypoints.openai.chat_completion.protocol import (  # pyright: ignore[reportMissingImports]
+            ChatCompletionRequest,
+        )
+    except ImportError:
+        try:
+            from vllm.entrypoints.openai.protocol import (  # pyright: ignore[reportMissingImports]
+                ChatCompletionRequest,
+            )
+        except ImportError:
+            return None
+    try:
+        return ChatCompletionRequest(model="trusta-probe", messages=_MESSAGES[:1], tools=_TOOLS)
+    except Exception:  # noqa: BLE001 - a schema drift here must not abort the probe
+        return None
+
+
+def _matching_parsers(
+    parsers: dict[str, Callable[[Any], Any]], tokenizer: object, segment: str, request: object
+) -> list[str]:
+    """Names of the parsers that read ``segment`` back as exactly the probe call."""
+    expected_args = _CALL[0]["function"]["arguments"]
+    matches: list[str] = []
+    for name, factory in parsers.items():
+        try:
+            parser = factory(tokenizer)
+            info = parser.extract_tool_calls(segment, request=request)
+        except Exception:
+            continue
+        calls = getattr(info, "tool_calls", None) or []
+        if not (getattr(info, "tools_called", False) and calls):
+            continue
+        call = calls[0]
+        if call.function.name != "trusta_probe_fn":
+            continue
+        # Match the arguments too, not just the function name: a parser that merely
+        # tolerates the wrapper but mangles the JSON is not a real match. This is
+        # what disambiguates families (e.g. Qwen2.5) where several parsers loosely
+        # accept the same <tool_call> envelope.
+        try:
+            parsed_args = json.loads(call.function.arguments or "{}")
+        except (ValueError, TypeError):
+            continue
+        if parsed_args != expected_args:
+            continue
+        matches.append(name)
+    return matches
+
+
 def main(model_ref: str) -> int:
     """Print the parser that round-trips this model's tool-call syntax."""
     from transformers import AutoTokenizer
@@ -91,32 +155,15 @@ def main(model_ref: str) -> int:
         return 1
     segment = rendered[len(prompt_only) :]
 
-    expected_args = _CALL[0]["function"]["arguments"]
     names = sorted(set(ToolParserManager.tool_parsers) | set(ToolParserManager.lazy_parsers))
-    matches: list[str] = []
+    parsers: dict[str, Callable[[Any], Any]] = {}
     for name in names:
         try:
-            parser = ToolParserManager.get_tool_parser(name)(tokenizer)
-            info = parser.extract_tool_calls(segment, request=None)  # type: ignore[arg-type]
+            parsers[name] = ToolParserManager.get_tool_parser(name)
         except Exception:
+            # A lazy parser whose optional dependency is missing cannot be loaded.
             continue
-        calls = getattr(info, "tool_calls", None) or []
-        if not (getattr(info, "tools_called", False) and calls):
-            continue
-        call = calls[0]
-        if call.function.name != "trusta_probe_fn":
-            continue
-        # Match the arguments too, not just the function name: a parser that merely
-        # tolerates the wrapper but mangles the JSON is not a real match. This is
-        # what disambiguates families (e.g. Qwen2.5) where several parsers loosely
-        # accept the same <tool_call> envelope.
-        try:
-            parsed_args = json.loads(call.function.arguments or "{}")
-        except (ValueError, TypeError):
-            continue
-        if parsed_args != expected_args:
-            continue
-        matches.append(name)
+    matches = _matching_parsers(parsers, tokenizer, segment, _probe_request())
 
     if not matches:
         return 1

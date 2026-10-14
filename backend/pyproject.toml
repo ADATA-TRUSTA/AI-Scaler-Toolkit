@@ -19,13 +19,19 @@ dependencies = [
   # wants numpy<2.4 on python<3.13. Would otherwise be 2.5.2. The lock is universal, so
   # every host pays this, including the ones that never install vllm.
   #
-  # lmcache (also in the vllm extra) caps it harder still, at numpy<=2.2.6 -- that is
-  # the binding constraint, not vllm's <2.4. Dropping lmcache is what would let this
-  # go back to 2.3.5.
+  # 2.2.6 was lmcache's cap, and lmcache is gone, so vllm's <2.4 is now the binding
+  # constraint and this could move to 2.3.5. Left as is: a numpy bump is a separate,
+  # whole-project change.
   "numpy==2.2.6",
   "pillow==12.3.0", # ML / inference / training
   # torch (+cu130 / +xpu variants) comes from the cuda/xpu extras below
   "transformers==5.15.0",
+  # Required to keep MXFP4 checkpoints (gpt-oss) packed. Without it transformers'
+  # Mxfp4HfQuantizer silently dequantizes the experts to bf16, turning the 65 GB
+  # gpt-oss-120b checkpoint into a 233 GB model. transformers 5.15.0 accepts
+  # 0.16.0 <= kernels < 0.17.0; do not bump past that without checking
+  # KERNELS_MAX_VERSION in transformers/utils/import_utils.py.
+  "kernels==0.16.1",
   "trl==1.10.0",
   "peft==0.20.0",
   "accelerate==1.14.0",
@@ -64,6 +70,37 @@ cuda = [
   # CUDA-only: the package compiles a CUDA extension, so it must not be pulled in
   # by the xpu extra (the cuda/xpu conflict declared under [tool.uv] keeps them apart).
   "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
+  # The nvcc toolchain, pinned to the same CUDA minor as the runtime torch brings.
+  # torch==2.13.0+cu130 holds nvidia-cuda-runtime and -nvrtc at 13.0.x, but nothing
+  # pinned the compiler, so it floated to the newest release (13.3, now 13.4) and
+  # nvcc refused to compile against 13.0 headers:
+  #
+  #   error: "CUDA compiler and CUDA toolkit headers are incompatible,
+  #           please check your include paths"
+  #
+  # All three have to be pinned, not just nvcc: nvcc ships the driver and ptxas,
+  # while cicc (the device front end) comes from nvidia-nvvm and the headers from
+  # nvidia-cuda-crt -- and nvcc requires both of those without a version bound.
+  # Pinning nvcc alone leaves cicc 13.3 emitting PTX that ptxas 13.0 rejects:
+  #
+  #   ptxas fatal: Unsupported .version 9.3; current version is '9.0'
+  #
+  # This goes unnoticed on a machine with a system CUDA toolkit, because
+  # causal-conv1d finds /usr/local/cuda first and that is internally consistent.
+  # Only a machine with just a driver -- which is most of them -- assembles the
+  # mismatched set, and then fails after several gigabytes have downloaded.
+  "nvidia-cuda-nvcc==13.0.88; sys_platform == 'linux'",
+  "nvidia-nvvm==13.0.88; sys_platform == 'linux'",
+  "nvidia-cuda-crt==13.0.88; sys_platform == 'linux'",
+  # CCCL (nv/target, cub, thrust) is part of a toolkit too, and llama.cpp's CUDA build
+  # includes it from cuda_fp16.h. It used to arrive only through vllm (humming-kernels[cu13],
+  # unbounded, so at 13.3), which left TRUSTA_SETUP_VLLM=0 failing with
+  #
+  #   cuda_fp16.h: fatal error: nv/target: No such file or directory
+  #
+  # and the default install pairing 13.3 headers with the 13.0 compiler. Pinned here
+  # with the rest of the toolchain.
+  "nvidia-cuda-cccl==13.0.85; sys_platform == 'linux'",
 ]
 # vLLM inference backend. Linux + CUDA only (no Windows wheels), so setup_env adds this
 # extra alongside `cuda` and never alongside `xpu`.
@@ -71,16 +108,36 @@ cuda = [
 # This extra drives the torch, fastapi and numpy pins above, so upgrading it is a
 # whole-project change: check what the new release does to those three first.
 vllm = [
-  "vllm==0.27.1; sys_platform == 'linux'",
-  # LMCache KV connector (vllm_lmcache_enabled). Ships alongside vllm rather than in
-  # its own extra because vLLM loads it in-process: LMCacheConnectorV1 imports
-  # lmcache.integration.vllm, so the two have to live in the same environment.
-  # Its numpy<=2.2.6 cap is what holds numpy back above.
-  #
-  # 0.5.4 is the newest release; it does not declare which vLLM it targets, so the
-  # pairing is not something the resolver can check. The earlier 0.5.3 pin was chosen
-  # against vllm 0.20.1 and does not carry over to 0.27.1.
-  "lmcache==0.5.4; sys_platform == 'linux'",
+  # 0.28.0, not 0.27.1: the Gemma4 arch convertor in 0.27.1 reads head_dim off the
+  # global text config, which Transformers >= 5.15.0 refuses for a heterogeneous
+  # model. gemma-4-E4B is heterogeneous for real -- 35 sliding layers at head_dim
+  # 256 and 7 full-attention layers at 512 -- so the read raises
+  # AmbiguousGlobalPerLayerAttributeError and every gemma-4 load fails at startup.
+  # 0.28.0 builds the per-layer configs instead. torch stays at 2.13.0 across the
+  # bump, which is what makes it a single-package move.
+  "vllm==0.28.0; sys_platform == 'linux'",
+]
+# The same vLLM release built for Intel XPU, from vLLM's own index (PyPI carries only the
+# CUDA build, which is all the `vllm` extra above can ever resolve to). setup_env adds this
+# alongside `xpu`, as it adds `vllm` alongside `cuda`; the two never meet (see conflicts).
+# It asks for torch==2.13.0, which the xpu extra's 2.13.0+xpu satisfies, and for
+# triton==3.7.2+xpu, a shim on the same index that only requires triton-xpu==3.7.2 -- what
+# the xpu extra installs anyway. Its kernels (vllm-xpu-kernels) come from PyPI.
+vllm-xpu = [
+  "vllm==0.28.0+xpu; sys_platform == 'linux'",
+  # Named here only so its source below can be tied to this extra (uv requires that).
+  "triton==3.7.2+xpu; sys_platform == 'linux'",
+  # The xpu extra's torch, repeated: uv resolves every extra on its own as well as
+  # together, and alone this one would take PyPI's CUDA torch, whose triton 3.7.1 the
+  # shim above cannot satisfy. Kept identical to the xpu extra below.
+  "torch==2.13.0+xpu; sys_platform == 'linux'",
+  "torchvision==0.28.0+xpu; sys_platform == 'linux'",
+  "torchaudio==2.11.0+xpu; sys_platform == 'linux'",
+  "triton-xpu==3.7.2; sys_platform == 'linux'",
+  # vLLM imports torchcodec at startup, and PyPI's build links CUDA's libnvrtc: on an
+  # Intel host vLLM died with "libnvrtc.so.13: cannot open shared object file". The
+  # PyTorch XPU index carries the same release built without CUDA.
+  "torchcodec==0.16.0+cpu; sys_platform == 'linux'",
 ]
 # Intel XPU (Arc / iGPU): pulls the +xpu variants from the PyTorch XPU index; works on Linux and Windows.
 # torch 2.13.0+xpu bundles the oneAPI 2026.0.0 runtime, which needs Intel graphics driver
@@ -193,24 +250,40 @@ explicit = true
 name = "pytorch-whl"
 url = "https://download.pytorch.org/whl"
 
+# vLLM's per-release index; this path holds the 0.28.0 XPU build and its triton shim.
+[[tool.uv.index]]
+explicit = true
+name = "vllm-xpu"
+url = "https://wheels.vllm.ai/0.28.0/xpu"
+
 [tool.uv.sources]
 torch = [
   {index = "pytorch-cuda", extra = "cuda"},
   {index = "pytorch-xpu", extra = "xpu"},
+  {index = "pytorch-xpu", extra = "vllm-xpu"},
 ]
 torchaudio = [
   {index = "pytorch-cuda", extra = "cuda"},
   {index = "pytorch-xpu", extra = "xpu"},
+  {index = "pytorch-xpu", extra = "vllm-xpu"},
 ]
 torchvision = [
   {index = "pytorch-cuda", extra = "cuda"},
   {index = "pytorch-xpu", extra = "xpu"},
+  {index = "pytorch-xpu", extra = "vllm-xpu"},
 ]
 triton-xpu = {index = "pytorch-whl"}
+# Only for vllm-xpu; with any other extra both resolve from PyPI as before.
+vllm = [{index = "vllm-xpu", extra = "vllm-xpu"}]
+torchcodec = [{index = "pytorch-xpu", extra = "vllm-xpu"}]
+triton = [{index = "vllm-xpu", extra = "vllm-xpu"}]
 
 [tool.uv]
 conflicts = [
   [{extra = "cuda"}, {extra = "xpu"}],
+  [{extra = "vllm"}, {extra = "vllm-xpu"}],
+  [{extra = "cuda"}, {extra = "vllm-xpu"}],
+  [{extra = "xpu"}, {extra = "vllm"}],
 ]
 environments = [
   "sys_platform == 'linux'",

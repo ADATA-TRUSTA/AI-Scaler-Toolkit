@@ -15,6 +15,7 @@ import torch
 from PIL import Image
 from transformers import BatchEncoding, PreTrainedTokenizerBase
 
+from ...settings import DEFAULT_GENERATION_TIMEOUT
 from ..async_server_client import reorder_multimodal_content
 
 logger = logging.getLogger(__name__)
@@ -394,7 +395,7 @@ def validate_and_prepare_params(params: dict[str, Any]) -> dict[str, Any]:
     top_k = _safe_int_param(params, "top_k", 50, 0, 1000)
     repetition_penalty = _safe_float_param(params, "repetition_penalty", 1.1, 1.0, 2.0)
     max_new_tokens = _safe_int_param(params, "max_new_tokens", 512, 1, 8192)
-    total_timeout = params.get("total_timeout", 300)
+    total_timeout = params.get("total_timeout") or DEFAULT_GENERATION_TIMEOUT
     do_sample = temperature > 0.0
 
     if do_sample and top_p == 0.0 and top_k == 0:

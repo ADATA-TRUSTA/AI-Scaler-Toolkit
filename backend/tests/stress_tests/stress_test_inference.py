@@ -5,11 +5,11 @@ import random
 import os
 from datetime import datetime
 
-import httpx
+import httpx2
 
 # load_model / chat endpoints block for minutes; disable the client timeout to
 # match requests' default (no timeout).
-http = httpx.Client(timeout=None)
+http = httpx2.Client(timeout=None)
 
 # Ensure logs directory exists
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -37,7 +37,7 @@ OFFLOAD_CONFIGS = [
     {"quantization": "none", "offload_folder": None, "device_map": "auto"},
     {"quantization": "int8", "offload_folder": None, "device_map": "auto"},
     {"quantization": "int4", "offload_folder": None, "device_map": "auto"},
-    # CPU Offload simulation (requires setting max_memory to force offload usually, 
+    # CPU Offload simulation (requires setting max_memory to force offload usually,
     # but here we just change params that might trigger different paths)
     {"quantization": "int4", "offload_folder": "./offload_test", "device_map": "auto"},
 ]
@@ -48,14 +48,14 @@ def wait_for_model_load(timeout=600):
         try:
             resp = http.get(f"{BASE_URL}/inference/status")
             status = resp.json()
-            
+
             if status.get("loaded"):
                 logger.info("Model loaded successfully")
                 return True
             if status.get("error"):
                 logger.error(f"Model load failed: {status.get('error')}")
                 return False
-                
+
             time.sleep(2)
         except Exception as e:
             logger.error(f"Error checking load status: {e}")
@@ -68,11 +68,11 @@ def ensure_model_exists(model_name):
     models = resp.json()
     base_models = models.get("base_models", [])
     finetuned_models = models.get("finetuned_models", [])
-    
+
     for m in base_models + finetuned_models:
         if m.get("label") == model_name or m.get("base_model_name") == model_name:
             return True
-            
+
     logger.error(f"Model {model_name} not found in registry.")
     return False
 
@@ -89,9 +89,9 @@ def get_registry_label(model_name):
 
 def run_inference_cycle(iteration, config):
     logger.info(f"=== Iteration {iteration} | Config: {config} ===")
-    
+
     target_model = get_registry_label(MODEL_NAME)
-    
+
     # 1. Load Model
     payload = {
         "model_name": target_model,
@@ -99,7 +99,7 @@ def run_inference_cycle(iteration, config):
         "device_map": config["device_map"],
         "offload_folder": config["offload_folder"]
     }
-    
+
     logger.info("Loading model...")
     resp = http.post(f"{BASE_URL}/inference/load_model", json=payload)
     if resp.status_code != 200:
@@ -115,10 +115,10 @@ def run_inference_cycle(iteration, config):
         else:
             logger.error(f"Failed to load model: {resp.text}")
             return False
-            
+
     if not wait_for_model_load():
         return False
-        
+
     # 2. Chat
     logger.info("Chatting...")
     chat_payload = {
@@ -132,20 +132,20 @@ def run_inference_cycle(iteration, config):
     else:
         logger.error(f"Chat failed: {resp.text}")
         return False
-        
+
     # 3. Unload
     logger.info("Unloading...")
     http.post(f"{BASE_URL}/inference/unload_model")
-    
+
     # Wait a bit for cleanup
     time.sleep(3)
-    
+
     # Verify unloaded
     status = http.get(f"{BASE_URL}/inference/status").json()
     if status.get("loaded"):
         logger.error("Model failed to unload properly")
         return False
-        
+
     return True
 
 def main():
@@ -155,7 +155,7 @@ def main():
         if not run_inference_cycle(i, config):
             logger.error("Stress test failed at iteration {i}")
             sys.exit(1)
-            
+
     logger.info("Inference stress test completed successfully")
 
 if __name__ == "__main__":

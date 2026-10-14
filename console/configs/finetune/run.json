@@ -1,0 +1,3 @@
+{
+  "finetune_config_path": "configs/finetune/training_qwen3_4b_lora_fasttest.json"
+}

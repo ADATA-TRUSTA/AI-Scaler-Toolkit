@@ -204,8 +204,18 @@ WATCHFILES_LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] =
     "WATCHFILES_LOG_LEVEL", _DEFAULT_WATCHFILES_LOG_LEVEL
 ).upper()  # type: ignore[assignment]
 
-# Maximum timeout for model generation (seconds)
-DEFAULT_GENERATION_TIMEOUT: int = int(os.getenv("DEFAULT_GENERATION_TIMEOUT", "300"))
+# Maximum timeout for model generation (seconds).
+#
+# 1800, not the 300 this used to say. Two things were wrong with 300. It was
+# never read -- every generation path carried its own literal `300` default, so
+# setting this env var changed nothing and the only way to raise the limit was
+# to pass total_timeout on each request. And 300s cannot serve the context
+# lengths this service advertises: a 256K-token prefill was measured at ~320s,
+# so the request was guaranteed to be cut off before the first token.
+#
+# The ceiling is still here to stop a wedged request holding a connection
+# forever; it is just set where it catches a hang rather than a long prefill.
+DEFAULT_GENERATION_TIMEOUT: int = int(os.getenv("DEFAULT_GENERATION_TIMEOUT", "1800"))
 
 
 # Hard ceiling on generated tokens, applied to every request that reaches an
@@ -397,7 +407,14 @@ VLLM_OPENAI_API_KEY: str = os.getenv("VLLM_OPENAI_API_KEY", _DEFAULT_VLLM_OPENAI
 
 # Seconds to wait on the vLLM server health check (during load_model)
 # Env var: VLLM_HEALTH_TIMEOUT
-_DEFAULT_VLLM_HEALTH_TIMEOUT: float = 300.0
+# 1800, not 300. The health check waits for `vllm serve` to answer /v1/models,
+# and that wait covers weight loading *and* torch.compile. A BF16 model was
+# measured still compiling when a 300s budget expired, so the load was reported
+# as a failure while the server was working normally -- and the server was then
+# killed, throwing the compile away. A hung server is still caught; the error
+# now also reports how long the subprocess has been silent, which is what
+# separates "wedged" from "needed longer".
+_DEFAULT_VLLM_HEALTH_TIMEOUT: float = 1800.0
 VLLM_HEALTH_TIMEOUT: float = float(
     os.getenv("VLLM_HEALTH_TIMEOUT", str(_DEFAULT_VLLM_HEALTH_TIMEOUT))
 )
@@ -494,6 +511,38 @@ TIKTOKEN_CACHE_DIR: str = _get_env_path("TIKTOKEN_RS_CACHE_DIR", _DEFAULT_TIKTOK
 os.environ["HF_HOME"] = HF_HOME
 os.environ["TIKTOKEN_RS_CACHE_DIR"] = TIKTOKEN_CACHE_DIR
 
+# Whether model downloads may use Xet, Hugging Face's chunk-deduplicating transfer.
+# Env var: HF_XET_ENABLED
+#
+# Off by default, which is a deliberate trade of some download speed for the ability
+# to stop a download. Xet transfers inside a Rust extension that offers no way to
+# interrupt it, so with Xet on a cancel can only take effect between files: measured
+# here, stopping a 3B model mid-shard was still running 150 seconds later, while the
+# same cancel with Xet off took 2 seconds. Someone who registered the wrong model, or
+# left the file name blank and started fetching every quantisation in a repository,
+# is stuck until the shard in flight finishes.
+#
+# What it costs is real but was not measurable on the machine this was decided on:
+# the same 1.18 GB file took 562s with Xet and 586s without, a 4% difference on a link
+# saturated at 2 MB/s either way. On a fast connection, and on repeat downloads that
+# share chunks with what is already local, Xet wins by more. Set HF_XET_ENABLED=1
+# where downloads matter more than being able to stop them.
+#
+# HF_HUB_DISABLE_XET set explicitly wins over this, because someone who set
+# huggingface_hub's own switch has said what they want in its own terms.
+#
+# Applied by download_manager against huggingface_hub.constants rather than by setting
+# the environment variable here. The variable is read once, when huggingface_hub is
+# imported, and this module is not reliably imported first -- setting it here looked
+# right and did nothing: a cancel that should have taken two seconds still ran for the
+# 150 the old behaviour took. The constant itself is read per download, so assigning
+# to it works whatever the import order turns out to be.
+_DEFAULT_HF_XET_ENABLED: bool = False
+HF_XET_ENABLED: bool = (
+    not _parse_bool_env(os.environ["HF_HUB_DISABLE_XET"])
+    if os.environ.get("HF_HUB_DISABLE_XET") is not None
+    else _parse_bool_env(os.getenv("HF_XET_ENABLED"), _DEFAULT_HF_XET_ENABLED)
+)
 # ==================== Helper Functions ====================
 
 _LOGGING_CONFIGURED = False

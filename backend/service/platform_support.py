@@ -15,7 +15,9 @@ asked for them:
   - **vLLM.** The engine manages its server with ``os.getpgid`` / ``os.killpg`` /
     ``SIGKILL``, none of which exist on Windows, and its isolated environment is
     only created by ``scripts/linux/setup_env.sh`` -- the PowerShell setup script
-    does not build one, so on Windows the venv it expects is simply absent.
+    does not build one, so on Windows the venv it expects is simply absent. On
+    Linux it is also only there with the CUDA build, so it is refused wherever it
+    is not installed, not only off Linux.
 
 Checking here means each feature is refused once, at the entry point, with a
 message that says which platform is required and which one this host is. The
@@ -29,8 +31,10 @@ runtime is in place (see scripts/xpu_smoke.py).
 
 from __future__ import annotations
 
+import importlib.util
 import platform
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config_models import InferenceEngine
 
@@ -76,15 +80,49 @@ def training_support() -> Support:
     )
 
 
+def vllm_installed() -> bool:
+    """
+    Whether vLLM is there to start, found without importing it.
+
+    Linux is necessary and not sufficient. setup_env installs the vllm extra only with
+    the CUDA build, so an Intel (XPU) host -- or one set up with TRUSTA_SETUP_VLLM=0 --
+    has no vLLM, and reporting it as supported offered an engine whose every load
+    failed. Checked where the engine will look: this interpreter, and the environment
+    under VLLM_SERVER_PROJECT_DIR, which is the same one unless an install moved it.
+    """
+    if importlib.util.find_spec("vllm") is not None:
+        return True
+    from .settings import VLLM_SERVER_PROJECT_DIR
+
+    venv = Path(VLLM_SERVER_PROJECT_DIR) / ".venv"
+    try:
+        return any(venv.glob("lib/python*/site-packages/vllm/__init__.py"))
+    except OSError:
+        return False
+
+
 def engine_support(engine: InferenceEngine | str) -> Support:
     """Whether a given inference engine can run on this host."""
     if InferenceEngine(engine) is not InferenceEngine.VLLM:
         return Support(supported=True)
-    return _linux_only(
+    on_linux = _linux_only(
         "The vLLM engine",
         "Use the transformers or llama_server engine instead, or run the backend "
         "on Linux (a WSL2 distro counts).",
     )
+    if not on_linux.supported:
+        return on_linux
+    if not vllm_installed():
+        return Support(
+            supported=False,
+            reason=(
+                "The vLLM engine is not installed here. It comes with the CUDA build on "
+                "Linux; on an Intel GPU it is opt-in (set TRUSTA_SETUP_VLLM=1 and run "
+                "setup again), and TRUSTA_SETUP_VLLM=0 leaves it out everywhere. Use "
+                "the transformers or llama_server engine instead."
+            ),
+        )
+    return on_linux
 
 
 def supported_engines() -> list[InferenceEngine]:

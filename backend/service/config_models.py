@@ -1,5 +1,6 @@
 """Configuration models for inference and training."""
 
+import os
 from enum import StrEnum
 from typing import Any, Literal, Optional
 
@@ -11,6 +12,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from .settings import DEFAULT_GENERATION_TIMEOUT
 
 
 class InferenceEngine(StrEnum):
@@ -133,6 +136,10 @@ class InferenceSharedFields(BaseModel):
         default=None,
         description="[vLLM] --cpu-offload-gb",
     )
+    vllm_cpu_offload_params: list[str] | None = Field(
+        default=None,
+        description="[vLLM] --cpu-offload-params: parameter-name segments to offload",
+    )
     vllm_tensor_parallel_size: int | None = Field(
         default=None,
         description="[vLLM] --tensor-parallel-size",
@@ -164,6 +171,10 @@ class InferenceSharedFields(BaseModel):
             "across all TP ranks, not per GPU)"
         ),
     )
+    vllm_kv_offloading_disk_path: str | None = Field(
+        default=None,
+        description="[vLLM] Directory of the disk (NVMe) KV offload tier behind the DRAM tier",
+    )
     vllm_hf_overrides: str | dict[str, Any] | None = Field(
         default=None,
         description="[vLLM] --hf-overrides",
@@ -194,28 +205,6 @@ class InferenceSharedFields(BaseModel):
         default=None,
         description="[vLLM] Extra `vllm serve` launch arguments, appended verbatim, "
         'e.g. ["--trust-remote-code", "--tool-call-parser", "hermes"]',
-    )
-
-    # Shared vLLM + LMCache fields
-    vllm_lmcache_enabled: bool | None = Field(
-        default=None,
-        description="[vLLM/LMCache] Whether the LMCacheConnectorV1 KV connector is enabled",
-    )
-    vllm_lmcache_max_local_cpu_size: float | None = Field(
-        default=None,
-        description="[vLLM/LMCache] CPU KV cache tier size (GB)",
-    )
-    vllm_lmcache_local_disk: str | None = Field(
-        default=None,
-        description="[vLLM/LMCache] Local disk KV cache directory",
-    )
-    vllm_lmcache_max_local_disk_size: float | None = Field(
-        default=None,
-        description="[vLLM/LMCache] Local disk KV cache tier size (GB)",
-    )
-    vllm_lmcache_chunk_size: int | None = Field(
-        default=None,
-        description="[vLLM/LMCache] KV cache chunk size in tokens",
     )
 
 
@@ -383,16 +372,48 @@ class VllmConfigFields(BaseModel):
     vllm_cpu_offload_gb: float = Field(
         default=0.0,
         ge=0.0,
-        description="[vLLM] --cpu-offload-gb",
+        description=(
+            "[vLLM] --cpu-offload-gb: GB of model weights kept in pinned CPU memory and "
+            "read by the GPU over PCIe on every forward pass"
+        ),
+    )
+    vllm_cpu_offload_params: list[str] | None = Field(
+        default=None,
+        description=(
+            "[vLLM] --cpu-offload-params: restrict vllm_cpu_offload_gb to parameters whose "
+            "dotted name contains one of these segments. ['experts'] offloads only the MoE "
+            "expert weights and keeps attention on the GPU, which is how a MoE model larger "
+            "than the card loads without also slowing attention. Matching is by whole name "
+            "segment: 'experts' matches mlp.experts.w13_qweight, 'expert' does not. Omit to "
+            "offload any weights, in order, until vllm_cpu_offload_gb is used up. Requires "
+            "vllm_cpu_offload_gb > 0"
+        ),
     )
     vllm_kv_offloading_size: float | None = Field(
         default=None,
         ge=0.0,
         description=(
-            "[vLLM] --kv-offloading-size (in GB; under multi-GPU TP this is the total "
-            "across all TP ranks, not per GPU)"
+            "[vLLM] --kv-offloading-size: GB of pinned CPU memory for the DRAM KV offload "
+            "tier (under multi-GPU TP this is the total across all TP ranks, not per GPU). "
+            "Prefix KV evicted from the GPU is kept here and loaded back instead of "
+            "recomputed; prefix caching is turned on with it. It is also the gateway for "
+            "vllm_kv_offloading_disk_path: a block on disk is copied into this tier before "
+            "the GPU can use it"
         ),
         validation_alias=AliasChoices("vllm_kv_offloading_size", "vllm_swap_space"),
+    )
+    vllm_kv_offloading_disk_path: str | None = Field(
+        default=None,
+        description=(
+            "[vLLM] Directory for a disk (NVMe) KV offload tier behind the DRAM tier. Every "
+            "block stored in DRAM is also written here, and a prefix evicted from DRAM is "
+            "loaded back from here. Loads pass through the DRAM tier, so "
+            "vllm_kv_offloading_size must hold the longest prefix to be reused, or the "
+            "disk is read and nothing is hit. Files survive a restart and are reused. The "
+            "directory has no size cap and is never pruned. Use an SSD; relative paths are "
+            "resolved against the service's working directory. Requires "
+            "vllm_kv_offloading_size > 0"
+        ),
     )
     vllm_tensor_parallel_size: int = Field(
         default=1,
@@ -497,77 +518,52 @@ class VllmConfigFields(BaseModel):
             return v
         raise ValueError("vllm_hf_overrides must be a dict, list, JSON string, or None")
 
-
-class VllmLmCacheConfigFields(BaseModel):
-    """The LMCache KV-offload tier, a vLLM add-on kept apart from plain vLLM settings."""
-
-    # vLLM + LMCache KV cache offloading. LMCache plugs in as a KV connector
-    # (LMCacheConnectorV1) and keeps prefix KV blocks in a CPU / local-disk tier, so a
-    # repeated prompt prefix is loaded back instead of recomputed.
-    # Sizing and trade-offs vs vllm_kv_offloading_size: docs/lmcache_benchmark.md
-    vllm_lmcache_enabled: bool = Field(
-        default=False,
-        description=(
-            "[vLLM/LMCache] Enable the LMCacheConnectorV1 KV connector, which offloads "
-            "prefix KV cache to CPU (and optionally local disk) for cross-request reuse. "
-            "Requires the lmcache package in the environment vLLM runs from; the load "
-            "is rejected up front when it is missing. Requires engine='vllm', and is "
-            "mutually exclusive with vllm_kv_offloading_size, vLLM's own KV offloading"
-        ),
-    )
-    vllm_lmcache_max_local_cpu_size: float = Field(
-        default=5.0,
-        gt=0.0,
-        description=(
-            "[vLLM/LMCache] CPU KV cache tier size in GB (LMCACHE_MAX_LOCAL_CPU_SIZE). "
-            "This is pinned host memory, so keep it well under free RAM"
-        ),
-    )
-    vllm_lmcache_local_disk: str | None = Field(
-        default=None,
-        description=(
-            "[vLLM/LMCache] Directory for the local disk KV cache tier "
-            "(LMCACHE_LOCAL_DISK), the spillover tier for when the working set outgrows "
-            "CPU. A capacity fix, not a speed fix, and it does not survive a restart -- "
-            "LMCache keeps its index in memory, so files left by a previous run are "
-            "neither read back nor counted against the budget; prune it yourself. Put "
-            "it on an SSD. A relative path is resolved against the service's working "
-            "directory, which differs between launchers, so prefer an absolute one. "
-            "Omit to keep the CPU tier only; when set, vllm_lmcache_max_local_disk_size "
-            "must be greater than 0"
-        ),
-    )
-    vllm_lmcache_max_local_disk_size: float = Field(
-        default=0.0,
-        ge=0.0,
-        description=(
-            "[vLLM/LMCache] Local disk KV cache tier size in GB "
-            "(LMCACHE_MAX_LOCAL_DISK_SIZE); only meaningful with vllm_lmcache_local_disk"
-        ),
-    )
-    vllm_lmcache_chunk_size: int = Field(
-        default=256,
-        ge=1,
-        description=(
-            "[vLLM/LMCache] KV cache chunk size in tokens (LMCACHE_CHUNK_SIZE); the "
-            "granularity at which prefixes are stored and matched"
-        ),
-    )
-
-    @field_validator("vllm_lmcache_local_disk", mode="before")
+    @field_validator("vllm_cpu_offload_params", mode="before")
     @classmethod
-    def _normalize_vllm_lmcache_local_disk(cls, v: Any) -> Any:  # noqa: ANN401 - pydantic pre-validator accepts arbitrary raw input
-        """Normalize an empty local disk path to None."""
+    def _normalize_vllm_cpu_offload_params(cls, v: Any) -> Any:  # noqa: ANN401 - pydantic pre-validator accepts arbitrary raw input
+        """
+        Accept a list or a comma/space separated string; drop blanks and repeats.
+
+        A form field naturally produces ``"experts"`` or ``"experts, shared_expert"``,
+        and an empty selection produces ``[]`` or ``""``. Both empty forms mean "no
+        restriction", which vLLM spells as leaving the flag out, so they become None.
+        """
+        if v is None:
+            return None
         if isinstance(v, str):
-            stripped = v.strip()
-            return stripped or None
-        return v
+            v = v.replace(",", " ").split()
+        if not isinstance(v, (list, tuple)):
+            return v  # not a list: let the list[str] type check reject it with a 422
+        out: list[str] = []
+        for item in v:
+            name = str(item).strip()
+            if name and name not in out:
+                out.append(name)
+        return out or None
+
+    @field_validator("vllm_kv_offloading_disk_path", mode="before")
+    @classmethod
+    def _normalize_vllm_kv_offloading_disk_path(cls, v: Any) -> Any:  # noqa: ANN401 - pydantic pre-validator accepts arbitrary raw input
+        """
+        Blank means no disk tier; anything else becomes an absolute path.
+
+        Resolved here, in the service process that also launches vLLM, so the path
+        reported by /inference/status is the one actually written to. A relative path
+        would otherwise depend on which launcher started the service.
+        """
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            return v  # not a string: let the str type check reject it with a 422
+        stripped = v.strip()
+        if not stripped:
+            return None
+        return os.path.abspath(os.path.expanduser(stripped))
 
 
 class InferenceConfig(
     LlamaServerConfigFields,
     VllmConfigFields,
-    VllmLmCacheConfigFields,
     InferenceSharedFields,
 ):
     """
@@ -657,58 +653,52 @@ class InferenceConfig(
         return self
 
     @model_validator(mode="after")
-    def _validate_vllm_lmcache(self) -> "InferenceConfig":
+    def _validate_vllm_offload(self) -> "InferenceConfig":
         """
-        Reject LMCache configs that would silently do nothing or fight another feature.
+        Reject offload settings that would load fine and quietly do nothing.
 
-        1. LMCache only exists on the vLLM engine; asking any other engine for it
-           gets an HTTP 200 and a status echoing ``vllm_lmcache_enabled: true`` for a
-           feature that was never wired up.
-        2. LMCache and ``vllm_kv_offloading_size`` both take ownership of KV
-           offloading; enabling both means two layers racing for the same blocks.
-        3. A disk path with a 0 GB budget looks configured but caches nothing, and a
-           budget with no path is the same mistake pointing the other way -- the size
-           is only ever read inside the branch the path opens.
+        1. ``vllm_cpu_offload_params`` only narrows ``vllm_cpu_offload_gb``; with a 0 GB
+           budget it names weights to offload and offloads none of them.
+        2. The disk tier is reached through the DRAM tier: vLLM copies a block from
+           disk into DRAM before the GPU can load it. With no DRAM tier there is no
+           connector at all, and the disk path would be ignored.
+        3. ``vllm_server_extra_args`` is appended last, so a repeated flag there wins.
+           ``--kv-transfer-config`` replaces the whole connector config, so the disk
+           tier would vanish while /inference/status kept reporting it; the same holds
+           for ``--cpu-offload-params``. And ``--no-enable-prefix-caching`` leaves the
+           offload tiers with no block hashes to store or look up.
         """
-        # Checked whether or not the connector is on: a half-filled disk tier is the
-        # same mistake either way, and catching it while it is still disabled is
-        # cheaper than catching it on the load that finally enables it.
-        if self.vllm_lmcache_max_local_disk_size > 0 and not self.vllm_lmcache_local_disk:
+        if self.vllm_cpu_offload_params and self.vllm_cpu_offload_gb <= 0:
             raise ValueError(
-                "vllm_lmcache_max_local_disk_size is set but vllm_lmcache_local_disk "
-                "is empty: the size is only read once a path exists, so this caches "
-                "nothing. Set a path, or drop the size"
+                "vllm_cpu_offload_params is set but vllm_cpu_offload_gb is 0: it only "
+                "chooses which weights the offload budget goes to, so nothing would be "
+                "offloaded. Set vllm_cpu_offload_gb, or drop vllm_cpu_offload_params"
             )
 
-        if not self.vllm_lmcache_enabled:
-            return self
-
-        if self.engine != InferenceEngine.VLLM:
+        kv_offload_on = bool(self.vllm_kv_offloading_size and self.vllm_kv_offloading_size > 0)
+        if self.vllm_kv_offloading_disk_path and not kv_offload_on:
             raise ValueError(
-                f"vllm_lmcache_enabled requires engine='vllm', got '{self.engine}'. "
-                "LMCache plugs into vLLM as a KV connector and has no effect on any "
-                "other engine"
+                "vllm_kv_offloading_disk_path needs vllm_kv_offloading_size > 0: blocks on "
+                "disk are loaded back through the DRAM tier, so without one the disk tier "
+                "is never used. Size it to hold the longest prefix you want to reuse"
             )
 
-        if self.vllm_kv_offloading_size:
-            raise ValueError(
-                "vllm_lmcache_enabled and vllm_kv_offloading_size are mutually exclusive: "
-                "both manage KV offloading. Pick by whether the working set fits the RAM "
-                "you can pin -- if it does, vllm_kv_offloading_size is faster; if it does "
-                "not, only LMCache can spill to its disk tier and keep reusing"
+        extra = [str(a).split("=", 1)[0] for a in (self.vllm_server_extra_args or [])]
+        conflicts = []
+        if self.vllm_kv_offloading_disk_path and "--kv-transfer-config" in extra:
+            conflicts.append("--kv-transfer-config replaces vllm_kv_offloading_disk_path")
+        if self.vllm_cpu_offload_params and "--cpu-offload-params" in extra:
+            conflicts.append("--cpu-offload-params overrides vllm_cpu_offload_params")
+        if kv_offload_on and "--no-enable-prefix-caching" in extra:
+            conflicts.append(
+                "--no-enable-prefix-caching leaves vllm_kv_offloading_size nothing to offload"
             )
-
-        if self.vllm_lmcache_local_disk and self.vllm_lmcache_max_local_disk_size <= 0:
+        if conflicts:
             raise ValueError(
-                "vllm_lmcache_local_disk is set but vllm_lmcache_max_local_disk_size is 0: "
-                "the disk tier would cache nothing. Set a size in GB, or drop the path"
+                "vllm_server_extra_args conflicts with the offload fields: "
+                + "; ".join(conflicts)
+                + ". Set it in one place only"
             )
-
-        # A mode="after" validator must hand the model back. Falling off the end
-        # returns None, which pydantic then treats as the validated model. Only
-        # the LMCache-enabled-and-valid path reaches here -- the disabled path
-        # returns early above -- so the defect is invisible until someone turns
-        # LMCache on with settings that pass every check.
         return self
 
 
@@ -726,8 +716,11 @@ class ChatRequest(BaseModel):
 
     # Timeout control
     total_timeout: int = Field(
-        default=300,
-        description="Total generation timeout in seconds; generation stops once exceeded",
+        default_factory=lambda: DEFAULT_GENERATION_TIMEOUT,
+        description=(
+            "Total generation timeout in seconds; generation stops once exceeded. "
+            "Defaults to the DEFAULT_GENERATION_TIMEOUT setting"
+        ),
         ge=10,
     )
 
@@ -817,7 +810,12 @@ class OpenAIChatCompletionRequest(BaseModel):
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     top_k: int = Field(default=50, ge=0)
     total_timeout: int | None = Field(
-        default=300, ge=10, description="Total generation timeout in seconds"
+        default_factory=lambda: DEFAULT_GENERATION_TIMEOUT,
+        ge=10,
+        description=(
+            "Total generation timeout in seconds; defaults to the "
+            "DEFAULT_GENERATION_TIMEOUT setting"
+        ),
     )
     max_tokens: int | None = Field(
         default=None,
@@ -856,6 +854,16 @@ class OpenAIChatCompletionRequest(BaseModel):
     # a fine-tune never saw a <|think|> prefix, so defaulting it on silently
     # changes the prompt out from under every adapter.
     enable_thinking: bool | None = Field(default=None)
+    # OpenAI's reasoning switch. Templates such as MiniCPM5's only know a boolean
+    # enable_thinking, so this is folded into it when neither of the explicit
+    # controls is given (see _resolve_enable_thinking).
+    reasoning_effort: str | None = Field(
+        default=None,
+        description=(
+            "OpenAI-compatible reasoning level; 'none'/'minimal' turn thinking off, "
+            "any other level turns it on, unless enable_thinking is given"
+        ),
+    )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
