@@ -251,6 +251,7 @@ def run(on_line: Callable[[str], None] | None = None,
     log.info("HF_HOME=%s", environment.get("HF_HOME"))
     log.info("output goes to %s", log_path)
 
+    progress.reset_plan()
     meter = progress.Meter(on_progress) if on_progress else None
 
     try:
@@ -292,6 +293,8 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phas
             del tail[:-40]
             if on_line:
                 on_line(line)
+            if meter:
+                progress.plan_from_line(line, environment)
 
             summary = ACCEL_SUMMARY.match(line)
             if summary:

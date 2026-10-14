@@ -18,6 +18,8 @@ would call a machine behind a proxy offline while every download on it worked.
 
 from __future__ import annotations
 
+import http.client
+import socket
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -56,20 +58,60 @@ class Result:
         return not self.unreachable
 
 
+def _connect_ipv4(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):  # noqa: ANN001, ANN202 - http.client's own signature
+    host, port = address
+    error: OSError | None = None
+    for family, kind, proto, _, sockaddr in socket.getaddrinfo(host, port, socket.AF_INET,
+                                                               socket.SOCK_STREAM):
+        sock = socket.socket(family, kind, proto)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            error = exc
+            sock.close()
+    raise error or OSError(f"no IPv4 address for {host}")
+
+
+class _IPv4HTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        super().__init__(*args, **kwargs)
+        self._create_connection = _connect_ipv4
+
+
+class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):  # noqa: ANN001, ANN201
+        return self.do_open(_IPv4HTTPSConnection, req, context=self._context)
+
+
+# A fallback over IPv4 only. urllib tries a host's addresses in order and moves to the
+# next only when a connection cannot be made; one that is made and then reset is a
+# failure. A Panther Lake laptop on two different networks had exactly that over IPv6 --
+# the handshake with download.pytorch.org reset six times in eight while IPv4 answered
+# every time -- and setup was stopped as "PyTorch unreachable" although uv, which falls
+# back by itself, would have downloaded everything.
+_ipv4_opener = urllib.request.build_opener(_IPv4HTTPSHandler())
+
+
 def _reachable(url: str) -> bool:
     for timeout in _TIMEOUTS_SECONDS:
-        request = urllib.request.Request(url, method="HEAD",
-                                         headers={"User-Agent": "AI-Scaler-Toolkit"})
-        try:
-            with urllib.request.urlopen(request, timeout=timeout):
+        for opener in (urllib.request.urlopen, _ipv4_opener.open):
+            request = urllib.request.Request(url, method="HEAD",
+                                             headers={"User-Agent": "AI-Scaler-Toolkit"})
+            try:
+                with opener(request, timeout=timeout):
+                    return True
+            except urllib.error.HTTPError:
+                # An answer is an answer: a 403 or 405 to a HEAD still proves the host is there.
                 return True
-        except urllib.error.HTTPError:
-            # An answer is an answer: a 403 or 405 to a HEAD still proves the host is there.
-            return True
-        except ValueError:
-            return False
-        except OSError:
-            continue
+            except ValueError:
+                return False
+            except OSError:
+                continue
     return False
 
 

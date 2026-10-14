@@ -14,6 +14,9 @@ shows elapsed time rather than inventing a number.
 from __future__ import annotations
 
 import os
+import re
+import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -24,18 +27,24 @@ from . import applog, config, state
 
 log = applog.get("progress")
 
-# Packages installed by a successful run, used as the denominator until a real one is
-# recorded. Measured on a CUDA install; the first run on any machine corrects it.
-# `uv sync` prints "Resolved 286 packages" but installs far fewer -- resolution covers
-# the whole graph including alternatives -- so the resolved count is not the total.
-#
-# Two numbers because the two platforms install different things: Linux gets the vllm
-# extra as well, which more than doubles the tree. One number for both meant a first
-# Linux run counted past its own denominator and showed "275 of ~143" -- a progress
-# bar that is full and still going is worse than no progress bar.
-EXPECTED_PACKAGES = 143 if config.IS_WINDOWS else 319
-
 POLL_SECONDS = 1.0
+
+# The denominator for the package count is what uv itself says this sync will install,
+# asked with the same extras setup_env announces just before it syncs. It used to be a
+# shipped constant, measured once on one machine, and every other accelerator ran past
+# it: "275 of ~143" on Linux, "182 of ~143" on an Intel Windows laptop. A dry run against
+# an environment that does not exist yet counts the whole install -- 182, 193 and 266 on
+# Windows XPU, Linux XPU and Linux CUDA with vLLM, each equal to what then landed.
+_SYNC_ANNOUNCED = re.compile(r"^\[setup_env\] uv sync (?P<extras>(?:--extra \S+ ?)+)")
+_WOULD_INSTALL = re.compile(r"Would install (\d+) packages?")
+# The dry run needs an interpreter, and on a first install the real sync is what
+# fetches it, seconds in. Downloads stay off here so the two never fetch it twice.
+_PLAN_ATTEMPTS = 12
+_PLAN_RETRY_SECONDS = 5.0
+
+_planned: int | None = None
+_planned_extras: tuple[str, ...] = ()
+_plan_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -69,25 +78,81 @@ def installed_packages() -> int:
         return 0
 
 
-def expected_packages() -> int:
-    recorded = state.get("package_count")
+def reset_plan() -> None:
+    global _planned, _planned_extras
+    with _plan_lock:
+        _planned, _planned_extras = None, ()
+
+
+def plan_from_line(line: str, environment: dict[str, str]) -> None:
+    """Start counting what the sync setup_env has just announced will install.
+
+    Counted in the background: the sync itself starts at once, and the bar shows the
+    installed count alone until the total is known.
+    """
+    global _planned_extras
+    announced = _SYNC_ANNOUNCED.match(line)
+    if not announced:
+        return
+    extras = tuple(announced.group("extras").split())
+    with _plan_lock:
+        # Linux syncs twice with the same extras (causal-conv1d is built in between).
+        if extras == _planned_extras:
+            return
+        _planned_extras = extras
+    threading.Thread(target=_count_planned, args=(extras, environment),
+                     name="package-plan", daemon=True).start()
+
+
+def _count_planned(extras: tuple[str, ...], environment: dict[str, str]) -> None:
+    global _planned
+    uv = config.uv_binary()
+    if uv is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="package-plan-") as scratch:
+        # An environment that does not exist, so the dry run counts the whole install
+        # rather than what the real sync, running alongside, has not reached yet.
+        env = {**environment, "UV_PROJECT_ENVIRONMENT": str(Path(scratch) / "env"),
+               "UV_PYTHON_DOWNLOADS": "never"}
+        for _ in range(_PLAN_ATTEMPTS):
+            try:
+                result = subprocess.run([str(uv), "sync", "--dry-run", "--frozen", *extras],
+                                        cwd=config.backend_dir(), env=env, capture_output=True,
+                                        text=True, encoding="utf-8", errors="replace",
+                                        timeout=60, creationflags=config.subprocess_flags())
+                found = _WOULD_INSTALL.search(result.stdout + result.stderr)
+                if result.returncode == 0 and found:
+                    with _plan_lock:
+                        if _planned_extras == extras:
+                            _planned = int(found.group(1))
+                    log.info("planned packages for %s: %s", " ".join(extras), found.group(1))
+                    return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            time.sleep(_PLAN_RETRY_SECONDS)
+    log.info("could not count the planned packages; showing the installed count alone")
+
+
+def _recorded_packages() -> int:
     try:
-        recorded = int(recorded)
+        return max(int(state.get("package_count")), 0)
     except (TypeError, ValueError):
-        recorded = 0
-    return recorded if recorded > 0 else EXPECTED_PACKAGES
+        return 0
 
 
 def _sync_progress() -> tuple[float | None, str]:
     done = installed_packages()
-    total = expected_packages()
     if done <= 0:
         return None, "resolving dependencies"
-    # The estimate can be low on a different accelerator or a newer lock file. Cap the
-    # bar rather than let it read past full, and keep counting in the text.
-    fraction = min(done / total, 0.99)
-    approx = "" if state.get("package_count") else "~"
-    return fraction, f"{done} of {approx}{total} packages"
+    with _plan_lock:
+        planned = _planned
+    # What a previous install on this machine ended with stands in until uv has
+    # answered; a newer lock file can make it short, so past it the total is dropped
+    # rather than shown as a bar that is full and still going.
+    total = planned or _recorded_packages()
+    if total <= 0 or done > total:
+        return None, f"{done} packages installed"
+    return min(done / total, 0.99), f"{done} of {total} packages"
 
 
 def _llama_download_bytes() -> int:
