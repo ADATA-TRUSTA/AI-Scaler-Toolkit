@@ -64,7 +64,7 @@ from .config_models import (
 )
 from .download_manager import DownloadTask, download_manager
 from .inference.engines.llama_server_engine import resolve_local_model_path
-from .inference.engines.vllm_engine import configured_reasoning_parser, sweep_stale_vllm_processes
+from .inference.engines.vllm_engine import effective_reasoning_parser, sweep_stale_vllm_processes
 from .inference.gguf_estimator import (
     RECOMMEND_SOLVED_KEYS,
     SWEEP_SOLVED_KEYS,
@@ -249,7 +249,7 @@ def _vllm_reasoning_parser_active() -> bool:
     config = model_manager.config
     if not config or str(getattr(config, "engine", "")) != InferenceEngine.VLLM:
         return False
-    return configured_reasoning_parser(config) is not None
+    return effective_reasoning_parser(config) is not None
 
 
 def _resolve_model_aware_generation_options(

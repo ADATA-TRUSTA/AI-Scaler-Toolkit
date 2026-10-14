@@ -4,6 +4,7 @@ import glob
 import ipaddress
 import json
 import os
+import platform
 import re
 import shutil
 import signal
@@ -56,6 +57,43 @@ def configured_reasoning_parser(config: object) -> str | None:
     if raw.lower() in _TOOL_PARSER_OFF_VALUES:
         return None
     return raw
+
+
+def _running_under_wsl() -> bool:
+    """Whether this is a WSL distribution, by the marker WSL's kernel puts in its release."""
+    return "microsoft" in platform.uname().release.lower()
+
+
+# Reasoning parsers for models where one has been checked against the model's own
+# thinking delimiter, used only when a load does not choose (vllm_reasoning_parser
+# unset). There is still no guessing for anything else.
+#
+# MiniCPM5's template prefills <think>, so without a parser vLLM streams the whole
+# reasoning as the answer and the chat shows a bare "</think>" in the middle of it --
+# the Linux starter model, loaded from the UI, did exactly that. qwen3 splits it:
+# loaded through the frontend (which sends enable_thinking) the reply came back as
+# "Thought for 6.3 seconds" plus a clean answer. deepseek_r1 filed the answer itself
+# as reasoning when the model skipped thinking.
+_REASONING_PARSER_DEFAULTS: tuple[tuple[str, str], ...] = (("minicpm5", "qwen3"),)
+
+
+def effective_reasoning_parser(config: object) -> str | None:
+    """
+    The reasoning parser a vLLM load runs with: the one it chose, else a known default.
+
+    An explicit value wins, "off" included. The launch flags and the chat path's
+    enable_thinking default both read this, so they always agree on whether a parser
+    is on.
+    """
+    if str(getattr(config, "vllm_reasoning_parser", None) or "").strip():
+        return configured_reasoning_parser(config)
+    ref = " ".join(
+        str(getattr(config, key, None) or "") for key in ("model_path", "model_name")
+    ).lower()
+    for marker, parser in _REASONING_PARSER_DEFAULTS:
+        if marker in ref:
+            return parser
+    return None
 
 
 # Name of the probe helper run under the interpreter vLLM runs from, and the marker
@@ -698,9 +736,13 @@ class VllmEngine(BaseEngine):
         Unlike the tool-call parser there is deliberately no ``auto``: a reasoning
         parser keys off a model-specific thinking delimiter that cannot be
         round-tripped as reliably as a tool call, so guessing risks mangling output.
-        ``off`` (the default) emits nothing; any other value is passed to vLLM as-is.
+        Unset uses a checked default for the few models listed in
+        _REASONING_PARSER_DEFAULTS and nothing otherwise; ``off`` emits nothing; any
+        other value is passed to vLLM as-is.
         """
-        parser = configured_reasoning_parser(config)
+        parser = effective_reasoning_parser(config)
+        if parser is not None and not configured_reasoning_parser(config):
+            logger.info("[Worker] vLLM reasoning parser %s: this model's default", parser)
         if parser is None:
             logger.info(
                 "[Worker] vLLM reasoning parser disabled by config (%s)",
@@ -1228,6 +1270,12 @@ class VllmEngine(BaseEngine):
         # restart names the same prompt differently: nothing written before it is
         # found again, and the directory keeps growing. An operator's own value wins.
         env.setdefault("PYTHONHASHSEED", "0")
+        # Under WSL2 vLLM turns pinned host memory off, and the engine core then fails
+        # at startup with "UVA is not available" -- every load, on a WSL2 distro this
+        # backend otherwise supports as Linux. vLLM's own switch turns it back on; an
+        # operator's own value wins.
+        if _running_under_wsl():
+            env.setdefault("VLLM_WSL2_ENABLE_PIN_MEMORY", "1")
 
         project_venv = os.path.join(self._resolve_vllm_server_dir(), ".venv")
         active_venv = env.get("VIRTUAL_ENV")

@@ -1190,13 +1190,13 @@ def test_explicit_thinking_controls_beat_reasoning_effort(monkeypatch):
     )
 
 
-def _vllm_config(monkeypatch, reasoning_parser):
+def _vllm_config(monkeypatch, reasoning_parser, model_name="openbmb/MiniCPM5-1B"):
     monkeypatch.setattr(
         "service.app.model_manager.config",
         SimpleNamespace(
             engine="vllm",
             model_path=None,
-            model_name="openbmb/MiniCPM5-1B",
+            model_name=model_name,
             vllm_reasoning_parser=reasoning_parser,
         ),
     )
@@ -1234,10 +1234,23 @@ def test_vllm_reasoning_parser_keeps_an_explicit_choice(monkeypatch):
     assert _resolve_thinking(False) is False
 
 
-@pytest.mark.parametrize("parser", [None, "off", "none"])
+@pytest.mark.parametrize("parser", ["off", "none"])
 def test_vllm_without_reasoning_parser_stays_opt_in(monkeypatch, parser):
     _vllm_config(monkeypatch, parser)
     assert _resolve_thinking(None) is None
+
+
+def test_vllm_unset_parser_on_a_model_without_a_default_stays_opt_in(monkeypatch):
+    _vllm_config(monkeypatch, None, model_name="Qwen/Qwen2.5-0.5B-Instruct")
+    assert _resolve_thinking(None) is None
+
+
+def test_vllm_minicpm5_default_parser_pins_thinking_like_an_explicit_one(monkeypatch):
+    """Unset on MiniCPM5 runs qwen3 (its checked default), so the chat path must treat
+    the parser as on: the same pin as an explicit qwen3, or replies come back empty."""
+    _vllm_config(monkeypatch, None)
+    assert _resolve_thinking(None) is False
+    assert _resolve_thinking(True) is True
 
 
 def test_llama_server_thinking_stays_opt_in(monkeypatch):

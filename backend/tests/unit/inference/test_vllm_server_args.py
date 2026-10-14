@@ -120,6 +120,32 @@ def test_reasoning_parser_value_is_trimmed():
     assert args[args.index("--reasoning-parser") + 1] == "qwen3"
 
 
+@pytest.mark.parametrize("as_snapshot_path", [False, True])
+def test_reasoning_parser_unset_on_minicpm5_defaults_to_qwen3(tmp_path, as_snapshot_path):
+    """MiniCPM5's template prefills <think>; without a parser the chat showed a bare
+    </think> in the middle of the answer. Matched by repo id or by a hub snapshot path
+    -- one under tmp_path, since the args are built by reading the model directory."""
+    model = "openbmb/MiniCPM5-1B"
+    if as_snapshot_path:
+        snapshot = tmp_path / "hub" / "models--openbmb--MiniCPM5-1B" / "snapshots" / "abc"
+        snapshot.mkdir(parents=True)
+        model = str(snapshot)
+    config = InferenceConfig(engine="vllm", model_name=model)
+    args = _engine()._template_args(config)
+    assert args[args.index("--reasoning-parser") + 1] == "qwen3"
+
+
+def test_reasoning_parser_explicit_off_beats_the_minicpm5_default():
+    config = InferenceConfig(engine="vllm", model_name="openbmb/MiniCPM5-1B", vllm_reasoning_parser="off")
+    assert "--reasoning-parser" not in _engine()._template_args(config)
+
+
+def test_reasoning_parser_explicit_value_beats_the_minicpm5_default():
+    config = InferenceConfig(engine="vllm", model_name="openbmb/MiniCPM5-1B", vllm_reasoning_parser="deepseek_r1")
+    args = _engine()._template_args(config)
+    assert args[args.index("--reasoning-parser") + 1] == "deepseek_r1"
+
+
 def test_tool_call_and_reasoning_parser_flags_coexist():
     """Both parsers are independent flags; there is no --enable-auto-* for reasoning."""
     config = InferenceConfig(
@@ -379,6 +405,29 @@ def test_build_server_env_sets_dev_mode_on_default_loopback_bind(monkeypatch):
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "127.0.0.1")
     env = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
     assert env["VLLM_SERVER_DEV_MODE"] == "1"
+
+
+def test_build_server_env_turns_pinned_memory_on_under_wsl(monkeypatch):
+    """Under WSL2 vLLM disables pinned memory and the engine core dies with
+    "UVA is not available" on every load."""
+    monkeypatch.delenv("VLLM_WSL2_ENABLE_PIN_MEMORY", raising=False)
+    monkeypatch.setattr(vllm_engine, "_running_under_wsl", lambda: True)
+    env = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
+    assert env["VLLM_WSL2_ENABLE_PIN_MEMORY"] == "1"
+
+
+def test_build_server_env_leaves_pinned_memory_alone_off_wsl(monkeypatch):
+    monkeypatch.delenv("VLLM_WSL2_ENABLE_PIN_MEMORY", raising=False)
+    monkeypatch.setattr(vllm_engine, "_running_under_wsl", lambda: False)
+    env = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
+    assert "VLLM_WSL2_ENABLE_PIN_MEMORY" not in env
+
+
+def test_build_server_env_keeps_an_operator_pinned_memory_choice(monkeypatch):
+    monkeypatch.setenv("VLLM_WSL2_ENABLE_PIN_MEMORY", "0")
+    monkeypatch.setattr(vllm_engine, "_running_under_wsl", lambda: True)
+    env = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
+    assert env["VLLM_WSL2_ENABLE_PIN_MEMORY"] == "0"
 
 
 def test_build_server_env_pins_the_prefix_hash_seed(monkeypatch):

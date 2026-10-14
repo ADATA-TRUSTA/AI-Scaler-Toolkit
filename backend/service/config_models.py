@@ -194,8 +194,9 @@ class InferenceSharedFields(BaseModel):
         default=None,
         description=(
             "[vLLM] Reasoning parser: separates reasoning_content from the final "
-            "content/tool_calls for thinking models. 'off' (default) serves without "
-            "reasoning separation; any other value (e.g. deepseek_r1/qwen3/"
+            "content/tool_calls for thinking models. Unset (default) uses a checked "
+            "default for the few models that have one (MiniCPM5: qwen3); 'off' serves "
+            "without reasoning separation; any other value (e.g. deepseek_r1/qwen3/"
             "openai_gptoss/glm45) is passed to vLLM as-is. No 'auto' mode: a reasoning "
             "parser keys off a model-specific thinking delimiter that cannot be "
             "round-tripped like a tool call, so it must be set explicitly"
@@ -482,15 +483,16 @@ class VllmConfigFields(BaseModel):
             "off and the reason is logged"
         ),
     )
-    vllm_reasoning_parser: str = Field(
-        default="off",
+    vllm_reasoning_parser: str | None = Field(
+        default=None,
         description=(
-            "[vLLM] Reasoning parser for thinking models. 'off' (default) emits no "
-            "--reasoning-parser flag; any other value (deepseek_r1/qwen3/openai_gptoss/"
-            "glm45...) is passed to vLLM as-is to split reasoning_content from the final "
-            "content/tool_calls. There is deliberately no 'auto' mode (unlike "
-            "vllm_tool_call_parser), because a reasoning parser cannot be reliably "
-            "auto-detected"
+            "[vLLM] Reasoning parser for thinking models. Unset (default) uses a "
+            "checked default for the few models that have one (MiniCPM5: qwen3) and "
+            "no parser otherwise; 'off' emits no --reasoning-parser flag; any other "
+            "value (deepseek_r1/qwen3/openai_gptoss/glm45...) is passed to vLLM as-is "
+            "to split reasoning_content from the final content/tool_calls. There is "
+            "deliberately no 'auto' mode (unlike vllm_tool_call_parser), because a "
+            "reasoning parser cannot be reliably auto-detected"
         ),
     )
 
