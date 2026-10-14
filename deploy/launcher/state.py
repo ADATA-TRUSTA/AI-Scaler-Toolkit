@@ -37,10 +37,13 @@ DEFAULTS: dict[str, Any] = {
     # crash -- so the next one can say it is carrying on rather than looking like a
     # fresh install of something the user thought was already installed.
     "setup_started": False,
-    # How many packages a complete install has on this machine. Used as the
-    # denominator for the setup progress bar; until a run records one, a shipped
-    # estimate stands in.
+    # How many packages a complete install has on this machine. The setup progress
+    # bar's denominator until uv's own count for the run arrives -- see progress.py.
     "package_count": None,
+    # A fingerprint of the backend's lock file as of the last successful setup. An
+    # update that changes the backend's dependencies changes it, and the next start
+    # brings the environment up to date before running the new backend on it.
+    "environment_lock": None,
     # How long setup took and on which accelerator. The completion screen no longer
     # waits to be dismissed, so this is where that information stays available.
     "last_setup": None,

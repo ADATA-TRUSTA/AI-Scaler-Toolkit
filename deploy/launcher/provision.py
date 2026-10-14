@@ -14,6 +14,7 @@ enough for a person to read.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import shutil
@@ -358,7 +359,8 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phas
         )
 
     progress.record_package_count()
-    state.save({"provisioned": True, "accelerator": accelerator or None})
+    state.save({"provisioned": True, "accelerator": accelerator or None,
+                "environment_lock": lock_fingerprint()})
     log.info("provisioning complete, accelerator=%s", accelerator or "unknown")
     return accelerator
 
@@ -396,6 +398,27 @@ def is_provisioned() -> bool:
     if not state.get("provisioned"):
         return False
     return (config.venv_dir() / ("Scripts" if config.IS_WINDOWS else "bin")).is_dir()
+
+
+def lock_fingerprint() -> str:
+    """The backend's lock file as this payload ships it, hashed; "" when there is none."""
+    try:
+        return hashlib.sha256((config.backend_dir() / "uv.lock").read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def environment_is_stale() -> bool:
+    """Set up, but for dependencies other than the ones this payload ships.
+
+    An update replaces the backend and leaves the environment it runs in as it was:
+    "provisioned" said nothing about which lock file. A machine upgraded from 0.4.8
+    went on running the new backend on packages from September. An install that
+    predates the fingerprint counts as stale once; setup_env installs only what
+    differs, so on an unchanged lock that costs a minute, not a reinstall.
+    """
+    current = lock_fingerprint()
+    return bool(current) and state.get("environment_lock") != current
 
 
 if __name__ == "__main__":

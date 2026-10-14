@@ -1277,6 +1277,9 @@ class Launcher:
             log.info("bootstrap: already provisioned = %s", provisioned)
             started_at = time.monotonic()
 
+            if provisioned and provision.environment_is_stale():
+                self._update_environment()
+
             if not provisioned:
                 # Before anything is downloaded, and before setup counts as started:
                 # a machine with no connection is told so in a sentence and closes,
@@ -1409,6 +1412,34 @@ class Launcher:
         except Exception as exc:
             log.exception("bootstrap failed")
             self._present_bootstrap_failure(exc, setting_up=not provision.is_provisioned())
+
+    def _update_environment(self) -> None:
+        """Bring an installed environment up to the dependencies this version ships.
+
+        Offline, the update waits: the environment that is there still runs, and a
+        machine that cannot reach PyPI must not lose an application it already had.
+        The fingerprint is only recorded by a setup that finishes, so the next start
+        with a connection tries again.
+        """
+        log.info("bootstrap: the environment was set up for other dependencies; updating it")
+        self._set_step("Checking the internet connection", None, "", 0)
+        reach = connectivity.check()
+        if not reach.ok:
+            log.warning("bootstrap: cannot reach %s; starting on the existing environment",
+                        ", ".join(host[0] for host in reach.unreachable))
+            return
+        # The service runs from that environment. On Windows its files are open, and
+        # uv cannot replace them under it.
+        if self.service.status() == "ours":
+            self._set_step("Stopping the service", None, "to update its packages", 0)
+            with contextlib.suppress(Exception):
+                self.service.stop()
+        self._set_step("Updating the environment", None, "this version changed its packages", 0)
+        provision.run(
+            on_phase=lambda key, _label: self._js(f"window.setPhase({_js_string(key)})"),
+            on_progress=self._report_progress,
+            on_phases=self._publish_phases,
+        )
 
     # ------------------------------------------------------------------ tray
 
@@ -1778,6 +1809,19 @@ def headless() -> int:
             accelerator = provision.run(on_phase=lambda _key, label: log.info("headless: %s", label))
             state.set("setup_started", False)
             log.info("headless: provisioned (%s)", accelerator or "no accelerator")
+        elif provision.environment_is_stale():
+            # As the windowed launcher does (see _update_environment): offline, run on
+            # what is there; otherwise stop the service using it and bring it up to date.
+            reach = connectivity.check()
+            if reach.ok:
+                log.info("headless: updating the environment to this version's dependencies")
+                stale_service = service_manager.ServiceManager()
+                if stale_service.status() == "ours":
+                    stale_service.stop()
+                provision.run(on_phase=lambda _key, label: log.info("headless: %s", label))
+            else:
+                log.warning("headless: cannot reach %s; starting on the existing environment",
+                            ", ".join(host[0] for host in reach.unreachable))
 
         service = service_manager.ServiceManager()
         if service.status() == "ours" and state.get("service_version") != config.app_version():
