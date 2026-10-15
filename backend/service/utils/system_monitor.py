@@ -98,6 +98,142 @@ def _bytes_to_gb(x: int) -> float:
     return round(x / (1024**3), 2)
 
 
+def _module_size(size_bytes: int) -> str:
+    """'16 GB' the way dmidecode writes it, so every platform's modules read alike."""
+    gb = size_bytes / (1024**3)
+    return f"{int(gb)} GB" if gb == int(gb) else f"{gb:.1f} GB"
+
+
+# Values firmware writes when it has nothing to say, in SMBIOS fields and through udev.
+_UNSTATED = {"", "unknown", "not specified", "none", "undefined", "other", "n/a"}
+
+# SMBIOS memory types (Win32_PhysicalMemory.SMBIOSMemoryType / MemoryType).
+_SMBIOS_MEMORY_TYPES = {
+    "20": "DDR",
+    "21": "DDR2",
+    "24": "DDR3",
+    "26": "DDR4",
+    "34": "DDR5",
+    "35": "LPDDR5",
+}
+
+_UDEV_DMI = "/sys/devices/virtual/dmi/id"
+_UDEV_MEMORY_KEY = re.compile(r"^MEMORY_DEVICE_(\d+)_([A-Z_]+)=(.*)$")
+
+
+def _parse_udev_memory_modules(properties: str) -> list[dict[str, Any]]:
+    """Memory modules from udev's MEMORY_DEVICE_<n>_* properties, empty slots left out."""
+    devices: dict[int, dict[str, str]] = {}
+    for line in properties.splitlines():
+        line = line.strip()
+        if line.startswith("E: "):
+            line = line[3:]
+        match = _UDEV_MEMORY_KEY.match(line)
+        if match:
+            devices.setdefault(int(match.group(1)), {})[match.group(2)] = match.group(3).strip()
+
+    modules: list[dict[str, Any]] = []
+    for index in sorted(devices):
+        fields = devices[index]
+        if fields.get("PRESENT") == "0":
+            continue
+        try:
+            size = int(fields.get("SIZE", "0"))
+        except ValueError:
+            continue
+        if size <= 0:
+            continue
+        module: dict[str, Any] = {"size": _module_size(size)}
+        mem_type = fields.get("TYPE", "")
+        if mem_type.lower() not in _UNSTATED:
+            module["type"] = mem_type
+        # The rated speed, as dmidecode's "Speed:" line reports it.
+        for key in ("SPEED_MTS", "CONFIGURED_SPEED_MTS"):
+            if fields.get(key, "").isdigit() and int(fields[key]) > 0:
+                module["speed_mhz"] = int(fields[key])
+                break
+        maker = fields.get("MANUFACTURER", "")
+        if maker.lower() not in _UNSTATED:
+            module["manufacturer"] = maker
+        modules.append(module)
+    return modules
+
+
+def _read_udev_memory_modules() -> list[dict[str, Any]]:
+    """
+    The memory modules as systemd-udev read them from SMBIOS at boot, without root.
+
+    dmidecode needs root, and the service runs as the desktop user: on every machine
+    without a passwordless sudo rule for it, the DRAM modules were simply missing
+    from the system information. udev's dmi_memory_id has already decoded the same
+    SMBIOS table and keeps it, readable by anyone, on the DMI device.
+    """
+    try:
+        result = subprocess.run(
+            ["udevadm", "info", "--query=property", f"--path={_UDEV_DMI}"],
+            text=True,
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT_SEC,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    return _parse_udev_memory_modules(result.stdout)
+
+
+def _parse_windows_memory_modules(data: Any) -> list[dict[str, Any]]:  # noqa: ANN401 - JSON from PowerShell
+    """Memory modules from Win32_PhysicalMemory, one entry per module."""
+    rows = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+    modules: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            size = int(row.get("Capacity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if size <= 0:
+            continue
+        module: dict[str, Any] = {"size": _module_size(size)}
+        smbios = str(row.get("SMBIOS") or "")
+        mem_type = _SMBIOS_MEMORY_TYPES.get(smbios) or _SMBIOS_MEMORY_TYPES.get(
+            str(row.get("Type") or "")
+        )
+        if mem_type:
+            module["type"] = mem_type
+        speed = row.get("Speed")
+        if isinstance(speed, int) and speed > 0:
+            module["speed_mhz"] = speed
+        maker = str(row.get("Mfg") or "").strip()
+        if maker.lower() not in _UNSTATED:
+            module["manufacturer"] = maker
+        modules.append(module)
+    return modules
+
+
+def _read_windows_memory_modules() -> list[dict[str, Any]]:
+    """
+    Every installed module, one entry each.
+
+    Reading only the first described a 2 x 16 GB machine as one 32 GB module, with the
+    first module's speed and maker for all of it.
+    """
+    cmd = (
+        "@(Get-CimInstance Win32_PhysicalMemory | ForEach-Object { @{"
+        "Capacity=$_.Capacity; Speed=$_.Speed; SMBIOS=$_.SMBIOSMemoryType; "
+        "Type=$_.MemoryType; Mfg=$_.Manufacturer } }) | ConvertTo-Json -Compress"
+    )
+    try:
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            text=True,
+            timeout=_PROBE_TIMEOUT_SEC,
+            creationflags=subprocess.CREATE_NO_WINDOW,  # pyright: ignore[reportAttributeAccessIssue]  # Windows-only flag
+        )
+        return _parse_windows_memory_modules(json.loads(out))
+    except Exception:
+        return []
+
+
 class SystemMonitor:
     """Singleton monitor for CPU, GPU, memory, and disk resources."""
 
@@ -1011,14 +1147,7 @@ class SystemMonitor:
             if not mtype or mtype == "0" or mtype == "null":
                 mtype = str(data.get("Type", ""))
 
-            mem_type_map = {
-                "20": "DDR",
-                "21": "DDR2",
-                "24": "DDR3",
-                "26": "DDR4",
-                "34": "DDR5",
-                "35": "LPDDR5",
-            }
+            mem_type_map = _SMBIOS_MEMORY_TYPES
             if mtype in mem_type_map:
                 res["type"] = mem_type_map[mtype]
             else:
@@ -1106,7 +1235,7 @@ class SystemMonitor:
                     if win_specs.get("type"):
                         memory_data["type"] = win_specs["type"]
 
-                    memory_data["modules"] = [
+                    memory_data["modules"] = _read_windows_memory_modules() or [
                         {
                             "size": f"{memory_data.get('total_gb', 0)} GB",
                             "speed_mhz": memory_data.get("speed_mhz"),
@@ -1114,6 +1243,13 @@ class SystemMonitor:
                             "manufacturer": win_specs.get("manufacturer"),
                         }
                     ]
+                elif udev_modules := _read_udev_memory_modules():
+                    memory_data["modules"] = udev_modules
+                    first = udev_modules[0]
+                    if first.get("type"):
+                        memory_data["type"] = first["type"]
+                    if first.get("speed_mhz"):
+                        memory_data["speed_mhz"] = first["speed_mhz"]
                 else:
                     # Run dmidecode via sudo with -n (non-interactive) so it NEVER
                     # blocks waiting for a password on the controlling terminal, which
