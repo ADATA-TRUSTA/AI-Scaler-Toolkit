@@ -23,7 +23,7 @@ import threading
 import time
 from collections.abc import Callable
 
-from . import applog
+from . import applog, config
 
 log = applog.get("instance")
 
@@ -142,8 +142,16 @@ def acquire(on_activate: Callable[[], None],
     deadline = time.monotonic() + _HANDOVER
     while True:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # The point here is that the second bind fails, and on Windows SO_REUSEADDR
+        # would let it succeed -- so never there. On Linux it does not: a port with a
+        # listener stays refused, and what it admits is a port whose last owner left
+        # connections in TIME_WAIT. Without it, a launch made while a copy was quitting
+        # waited for the handover, could not bind the port that copy had just freed,
+        # took it for a stranger's and started unguarded -- and a second click did the
+        # same, so two copies ran, each with its own service.
+        if not config.IS_WINDOWS:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            # Deliberately not SO_REUSEADDR: the point here is that the second bind fails.
             server.bind((HOST, PORT))
             break
         except OSError:
