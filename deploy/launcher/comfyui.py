@@ -164,8 +164,12 @@ class Device:
 
 def _run(command: list[str], timeout: float = 15) -> str | None:
     try:
+        # UTF-8 because that is what both callers produce: the adapter query sets
+        # PowerShell's output to UTF-8, and nvidia-smi writes it. Read in the Windows
+        # codepage, a "™" in an adapter name arrived as mojibake in the card.
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout,
-                                errors="replace", creationflags=config.subprocess_flags())
+                                encoding="utf-8", errors="replace",
+                                creationflags=config.subprocess_flags())
     except (OSError, subprocess.SubprocessError):
         return None
     return result.stdout if result.returncode == 0 else None

@@ -1217,6 +1217,20 @@ def _hermes_command(program: str) -> list[str]:
     return [program]
 
 
+def _run_hermes(program: str, args: list[str]) -> subprocess.CompletedProcess:
+    """Run a Hermes command, its output decoded by _decode.
+
+    Not text=True: that reads in the Windows codepage, and Hermes is a Python program
+    run with -I, which ignores PYTHONIOENCODING -- so whether it writes UTF-8 or the
+    codepage is up to its own runtime. Decoded strictly the wrong way, a model name
+    outside the codepage raised past the callers' except clauses.
+    """
+    result = subprocess.run(_hermes_command(program) + args, capture_output=True,
+                            timeout=120, creationflags=config.subprocess_flags())
+    return subprocess.CompletedProcess(result.args, result.returncode,
+                                       _decode(result.stdout or b""), _decode(result.stderr or b""))
+
+
 # What _hermes_config_get returns when the question could not be put to Hermes at all,
 # as distinct from a key that is simply not set. They are not the same answer, and the
 # guard in point_hermes_here acts on the difference: not set means nobody has chosen,
@@ -1228,9 +1242,7 @@ UNKNOWN = object()
 def _hermes_config_get(program: str, key: str) -> str | None | object:
     """The value, None when the key is not set, UNKNOWN when it could not be read."""
     try:
-        result = subprocess.run(_hermes_command(program) + ["config", "get", key],
-                                capture_output=True, text=True, timeout=120,
-                                creationflags=config.subprocess_flags())
+        result = _run_hermes(program, ["config", "get", key])
     except (OSError, subprocess.SubprocessError):
         return UNKNOWN
     if result.returncode != 0:
@@ -1243,9 +1255,7 @@ def _hermes_config_get(program: str, key: str) -> str | None | object:
 
 def _hermes_config_set(program: str, key: str, value: str) -> tuple[bool, str]:
     try:
-        result = subprocess.run(_hermes_command(program) + ["config", "set", key, value],
-                                capture_output=True, text=True, timeout=120,
-                                creationflags=config.subprocess_flags())
+        result = _run_hermes(program, ["config", "set", key, value])
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     if result.returncode != 0:
