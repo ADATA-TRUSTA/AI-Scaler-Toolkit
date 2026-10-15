@@ -1954,7 +1954,7 @@ def main(argv: list[str] | None = None) -> int:
     # Before anything else is created. A second launch should raise the window that is
     # already open, not add a tray icon and a second manager for one service -- where
     # "Quit" on either would stop the service under the other.
-    if not single_instance.acquire(lambda: launcher.show_window()):
+    if not single_instance.acquire(launcher.show_window, on_quit=launcher.quit):
         log.info("another copy is already running; exiting")
         return 0
 

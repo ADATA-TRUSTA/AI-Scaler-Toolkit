@@ -8,6 +8,11 @@ stops the service under the other, leaving a window that can no longer reach a b
 The mechanism is a loopback socket, which is what most desktop toolkits use for this:
 binding it is the lock, and connecting to it is how a second launch says "you are
 already running, show yourself". A mutex would only do the first half.
+
+The same socket also takes "quit". The build host is someone's desktop, and the copy
+open there holds this port and the service's: the release pipeline's test could not
+start its own. The pipeline runs as another account, which cannot stop this one's
+processes, so it asks -- and the copy quits the way the tray's Quit does.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ PORT = 48571
 # Exchanged so that a port held by something else is not mistaken for another copy of
 # this application. Being wrong in that direction would mean refusing to start at all.
 HELLO = b"ai-scaler-toolkit/1 activate\n"
+QUIT = b"ai-scaler-toolkit/1 quit\n"
 ACK = b"ai-scaler-toolkit/1 ok\n"
 # Answered while this copy is on its way out. A launch that arrives then must not be
 # told "already running, I will come forward" -- the copy answering is closing and will
@@ -43,10 +49,12 @@ _HANDOVER = 20.0
 
 
 class _Listener(threading.Thread):
-    def __init__(self, server: socket.socket, on_activate: Callable[[], None]) -> None:
+    def __init__(self, server: socket.socket, on_activate: Callable[[], None],
+                 on_quit: Callable[[], None] | None) -> None:
         super().__init__(name="single-instance", daemon=True)
         self._server = server
         self._on_activate = on_activate
+        self._on_quit = on_quit
         self._stop = threading.Event()
         self._quitting = threading.Event()
 
@@ -59,7 +67,8 @@ class _Listener(threading.Thread):
             with conn:
                 try:
                     conn.settimeout(_TIMEOUT)
-                    if conn.recv(len(HELLO)) != HELLO:
+                    message = conn.recv(len(HELLO))
+                    if message != HELLO and not (message == QUIT and self._on_quit):
                         continue
                     if self._quitting.is_set():
                         conn.sendall(BYE)
@@ -68,6 +77,13 @@ class _Listener(threading.Thread):
                     conn.sendall(ACK)
                 except OSError:
                     continue
+            if message == QUIT and self._on_quit:
+                log.info("asked to quit over the single-instance port")
+                try:
+                    self._on_quit()
+                except Exception:
+                    log.exception("could not quit when asked")
+                continue
             log.info("another launch asked us to come forward")
             try:
                 self._on_activate()
@@ -113,12 +129,13 @@ def _ask_running_instance() -> str:
     return "none"
 
 
-def acquire(on_activate: Callable[[], None]) -> bool:
+def acquire(on_activate: Callable[[], None],
+            on_quit: Callable[[], None] | None = None) -> bool:
     """Claim the single-instance slot.
 
     True means this process owns it and should carry on starting. False means another
     copy is already running, has been asked to show its window, and this process should
-    exit quietly.
+    exit quietly. `on_quit` is what a "quit" request runs; without one it is ignored.
     """
     global _listener
 
@@ -152,7 +169,7 @@ def acquire(on_activate: Callable[[], None]) -> bool:
         return True
 
     server.listen(4)
-    _listener = _Listener(server, on_activate)
+    _listener = _Listener(server, on_activate, on_quit)
     _listener.start()
     log.info("single-instance guard held on %s:%d", HOST, PORT)
     return True
