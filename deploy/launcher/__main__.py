@@ -713,15 +713,19 @@ class SettingsApi:
         port = self._launcher.service.port
         model = self._loaded_model_id(port)
         if not model:
+            log.info("did not point Hermes here: no model is loaded")
             return {"ok": False, "error": "Load a model first; there is nothing to "
                                           "point Hermes at yet.",
                     "kind": components.BLOCKED}
         refusal = self._tool_calling_refusal(port)
         if refusal:
+            log.warning("did not point Hermes here: the service refuses tools: %s", refusal)
             return {"ok": False, "error": f"Hermes sends tools with every request, and "
                                           f"this service will not take them. {refusal}",
                     "kind": components.BLOCKED}
         ok, message, kind = components.point_hermes_here(config.openai_base_url(port), model)
+        if not ok:
+            log.warning("did not point Hermes here: %s", message.splitlines()[0])
         return {"ok": ok, "error": "" if ok else message,
                 "detail": message if ok else "", "kind": kind}
 

@@ -1095,8 +1095,10 @@ HERMES_PROVIDER_NAME = "TRUSTA AST"
 HERMES_MODEL_ALIAS = "trusta-ast-default"
 
 # Providers Hermes ships selected. Finding one of these means nobody has chosen yet;
-# anything else is a decision, and is not ours to overwrite.
-HERMES_STOCK_PROVIDERS = ("openrouter", "custom")
+# anything else is a decision, and is not ours to overwrite. Newer Hermes installs
+# ship "auto" (pick by whichever API key is present); without it here, a fresh
+# install was taken for a deliberate choice and the button refused to touch it.
+HERMES_STOCK_PROVIDERS = ("openrouter", "custom", "auto")
 
 
 def hermes_provider(service_url: str) -> dict[str, object]:
