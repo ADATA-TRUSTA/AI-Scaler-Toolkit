@@ -55,7 +55,7 @@ def test_falls_back_to_name_when_arch_unreadable(monkeypatch):
 
 
 def test_name_fallback_does_not_collide_on_separator_stripping(monkeypatch):
-    """"Qwen3-5B" must not be read as "qwen3.5" once separators are gone."""
+    """ "Qwen3-5B" must not be read as "qwen3.5" once separators are gone."""
     monkeypatch.setattr(model_family, "read_model_arch", lambda _p: None)
     assert is_qwen35_family(model_name="Qwen3-5B-Instruct") is False
 
@@ -91,9 +91,7 @@ def test_repo_id_resolves_through_the_hf_cache(tmp_path, monkeypatch):
         assert repo_id == "google/gemma-4-E4B-it"
         return str(cached) if filename == "chat_template.jinja" else None
 
-    monkeypatch.setattr(
-        "huggingface_hub.try_to_load_from_cache", _fake_cache_lookup, raising=False
-    )
+    monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", _fake_cache_lookup, raising=False)
     model_family._resolve_cached_repo_file.cache_clear()
 
     assert read_chat_template("google/gemma-4-E4B-it") == "<|tool_call>call:f{}<tool_call|>"
@@ -131,3 +129,103 @@ def test_read_model_arch_cache_invalidates_on_file_change(tmp_path):
     stat = os.stat(tmp_path)
     os.utime(tmp_path, (stat.st_atime + 10, stat.st_mtime + 10))
     assert read_model_arch(str(tmp_path)) == "qwen3_5_moe"
+
+
+def _write_gguf(path, arch: str, *, vocab: int = 0, arch_first: bool = True) -> None:
+    """A minimal GGUF written by gguf's own writer, with an optional tokenizer."""
+    gguf = pytest.importorskip("gguf")
+    writer = gguf.GGUFWriter(str(path), arch=arch if arch_first else "placeholder")
+    if not arch_first:
+        # Ahead of general.architecture: a string array, the slow kind to skip.
+        writer.kv_data[0].pop("general.architecture", None)
+        writer.add_array("tokenizer.ggml.tokens", [f"t{i}" for i in range(vocab or 10)])
+        writer.add_string("general.architecture", arch)
+    elif vocab:
+        writer.add_token_list([f"tok{i}" for i in range(vocab)])
+        writer.add_token_scores([0.0] * vocab)
+    writer.add_uint32("test.answer", 42)
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+
+
+def test_gguf_arch_read_from_the_header(tmp_path):
+    path = tmp_path / "m.gguf"
+    _write_gguf(path, "qwen35moe", vocab=5)
+    assert model_family._scan_gguf_string_key(str(path), "general.architecture") == "qwen35moe"
+    assert read_model_arch(str(path)) == "qwen35moe"
+
+
+def test_gguf_arch_found_after_a_string_array(tmp_path):
+    path = tmp_path / "late.gguf"
+    _write_gguf(path, "llama", vocab=1000, arch_first=False)
+    assert model_family._scan_gguf_string_key(str(path), "general.architecture") == "llama"
+
+
+def test_gguf_arch_does_not_parse_the_tokenizer(tmp_path):
+    """The reason for the quick reader: a large vocabulary must not cost anything."""
+    import time
+
+    path = tmp_path / "big.gguf"
+    _write_gguf(path, "qwen35moe", vocab=250_000)
+    started = time.perf_counter()
+    assert model_family._scan_gguf_string_key(str(path), "general.architecture") == "qwen35moe"
+    assert time.perf_counter() - started < 0.5
+
+
+def test_gguf_quick_reader_agrees_with_gguf_reader(tmp_path):
+    gguf = pytest.importorskip("gguf")
+    from service.inference.gguf_inspect import _field_value
+
+    path = tmp_path / "same.gguf"
+    _write_gguf(path, "gemma3", vocab=50)
+    full = _field_value(gguf.GGUFReader(str(path)), "general.architecture", "")
+    assert model_family._scan_gguf_string_key(str(path), "general.architecture") == full
+
+
+def test_gguf_unusual_header_falls_back_to_the_full_reader(tmp_path, monkeypatch):
+    path = tmp_path / "odd.gguf"
+    _write_gguf(path, "qwen3", vocab=5)
+
+    def unreadable(_path, _key):
+        raise model_family._GGUFHeaderUnreadable("pretend")
+
+    monkeypatch.setattr(model_family, "_scan_gguf_string_key", unreadable)
+    assert model_family._read_gguf_arch(str(path)) == "qwen3"
+
+
+def test_not_a_gguf_reads_as_no_arch(tmp_path):
+    path = tmp_path / "junk.gguf"
+    path.write_bytes(b"not a gguf at all")
+    assert model_family._read_gguf_arch(str(path)) is None
+
+
+def test_concurrent_callers_share_one_read(tmp_path, monkeypatch):
+    """Polls arriving during the first read wait for it instead of reading again."""
+    import threading
+    import time
+
+    path = tmp_path / "shared.gguf"
+    _write_gguf(path, "qwen35moe", vocab=5)
+    model_family._read_arch_cached.cache_clear()
+    calls = []
+    real = model_family._read_gguf_arch
+
+    def slow(p):
+        calls.append(p)
+        time.sleep(0.3)
+        return real(p)
+
+    monkeypatch.setattr(model_family, "_read_gguf_arch", slow)
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(read_model_arch(str(path))))
+        for _ in range(8)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results == ["qwen35moe"] * 8
+    assert len(calls) == 1

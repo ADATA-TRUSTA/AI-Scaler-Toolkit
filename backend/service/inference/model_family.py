@@ -18,6 +18,8 @@ that no longer exists, a corrupt header).
 import json
 import os
 import re
+import struct
+import threading
 from functools import lru_cache
 from typing import Any
 
@@ -44,16 +46,85 @@ def normalize_arch(value: Any) -> str:  # noqa: ANN401 - accepts whatever metada
     return _NON_ALNUM.sub("", str(value or "").strip().lower())
 
 
+# Sizes of the GGUF scalar value types, by type id; 8 is a string, 9 an array.
+_GGUF_SCALAR_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+_GGUF_STRING, _GGUF_ARRAY = 8, 9
+
+
+class _GGUFHeaderUnreadable(Exception):
+    """The header is not one the quick reader understands; use gguf.GGUFReader."""
+
+
+def _scan_gguf_string_key(path: str, wanted: str) -> str | None:
+    """
+    One string from a GGUF header's key/value section, read straight from the file.
+
+    gguf.GGUFReader builds every field before answering, the tokenizer included: on a
+    Qwen3.6-35B GGUF that is a quarter of a million vocabulary entries, each one a
+    numpy view, for a key that is the first one written. On a machine short of memory
+    one read took minutes, and every /v1/models poll started another, so the settings
+    page never learned a model was loaded. This walks the keys in order, skips each
+    value by its size, and stops at the one asked for -- normally at once.
+    """
+    with open(path, "rb") as f:
+        if f.read(4) != b"GGUF":
+            raise _GGUFHeaderUnreadable("not a GGUF file")
+        (version,) = struct.unpack("<I", f.read(4))
+        if version not in (2, 3):  # 1 used 32-bit counts; anything else may be big-endian
+            raise _GGUFHeaderUnreadable(f"GGUF version {version}")
+        _tensors, kv_count = struct.unpack("<QQ", f.read(16))
+
+        def read_string() -> bytes:
+            (length,) = struct.unpack("<Q", f.read(8))
+            data = f.read(length)
+            if len(data) != length:
+                raise _GGUFHeaderUnreadable("truncated string")
+            return data
+
+        def skip(value_type: int) -> None:
+            if value_type in _GGUF_SCALAR_SIZES:
+                f.seek(_GGUF_SCALAR_SIZES[value_type], 1)
+            elif value_type == _GGUF_STRING:
+                (length,) = struct.unpack("<Q", f.read(8))
+                f.seek(length, 1)
+            elif value_type == _GGUF_ARRAY:
+                item_type, count = struct.unpack("<IQ", f.read(12))
+                if item_type in _GGUF_SCALAR_SIZES:
+                    f.seek(_GGUF_SCALAR_SIZES[item_type] * count, 1)
+                else:
+                    for _ in range(count):
+                        skip(item_type)
+            else:
+                raise _GGUFHeaderUnreadable(f"value type {value_type}")
+
+        for _ in range(kv_count):
+            key = read_string().decode("utf-8", "replace")
+            (value_type,) = struct.unpack("<I", f.read(4))
+            if key == wanted:
+                if value_type != _GGUF_STRING:
+                    return None
+                return read_string().decode("utf-8", "replace")
+            skip(value_type)
+    return None
+
+
 def _read_gguf_arch(path: str) -> str | None:
     """Read ``general.architecture`` from a GGUF header (header only, no tensor data)."""
     try:
+        from .gguf_inspect import resolve_shards
+
+        first = resolve_shards(path)[0]
+        try:
+            return _scan_gguf_string_key(first, "general.architecture") or None
+        except (_GGUFHeaderUnreadable, struct.error):
+            pass  # an unusual header: let the full reader have it
+
         import gguf
 
-        from .gguf_inspect import _field_value, register_extra_ggml_types, resolve_shards
+        from .gguf_inspect import _field_value, register_extra_ggml_types
 
         register_extra_ggml_types(gguf)
-        shards = resolve_shards(path)
-        reader = gguf.GGUFReader(shards[0])
+        reader = gguf.GGUFReader(first)
         arch = _field_value(reader, "general.architecture", "") or ""
         return str(arch) or None
     except Exception as e:
@@ -160,7 +231,14 @@ def read_model_arch(model_path: str | None) -> str | None:
         mtime = os.path.getmtime(path)
     except OSError:
         return None
-    return _read_arch_cached(path, mtime)
+    # One reader at a time. lru_cache only stores a result once it exists, so callers
+    # arriving during the first read each started their own: /v1/models is polled,
+    # and on a slow read the polls piled up into a dozen threads parsing one file.
+    with _ARCH_READ_LOCK:
+        return _read_arch_cached(path, mtime)
+
+
+_ARCH_READ_LOCK = threading.Lock()
 
 
 @lru_cache(maxsize=64)
