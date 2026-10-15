@@ -2046,9 +2046,15 @@ def main(argv: list[str] | None = None) -> int:
             if autostart.refresh():
                 log.info("autostart pointed at another copy; repointed it here")
 
+    # Not private on Linux. pywebview's private mode turns WebKitGTK's localStorage
+    # off altogether, and the WebUI keeps its chat session id there: every message
+    # threw before its request was sent, so the answer never came and Stop did
+    # nothing. WebView2's private mode keeps localStorage, so Windows is left as is.
+    storage = {} if config.IS_WINDOWS else {
+        "private_mode": False, "storage_path": str(config.data_dir() / "webview")}
     log.info("entering the window loop")
     try:
-        webview.start(launcher.bootstrap, debug=False)
+        webview.start(launcher.bootstrap, debug=False, **storage)
     finally:
         # After the windows are gone, so nobody is looking at a frozen one while the
         # backend is terminated. The loop only ends on Quit, and if it ever ends for
