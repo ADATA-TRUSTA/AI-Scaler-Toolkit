@@ -1238,9 +1238,16 @@
           el("component-list").querySelectorAll("[data-point]"), function (b) {
             b.addEventListener("click", function () {
               var id = b.getAttribute("data-point");
+              var label = b.textContent;
+              // Several seconds, and nearly all of it Hermes: each setting is one run
+              // of its command line (about 0.7 s apiece, seven of them). Said at once,
+              // so the click does not look like it did nothing.
               b.disabled = true;
+              b.textContent = "Configuring…";
+              say(id, "Writing this machine's endpoint into Hermes's settings…", "");
               api.point_component_here(id).then(function (r) {
                 b.disabled = false;
+                b.textContent = label;
                 say(id, r.ok ? r.detail : r.error, r.kind);
               });
             });
