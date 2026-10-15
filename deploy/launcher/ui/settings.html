@@ -386,6 +386,13 @@
 
   function el(id) { return document.getElementById(id); }
 
+  // A build is X.Y.Z.B; the releases page says vX.Y.Z, so that is what is shown. The
+  // build number stays in the logs and the installer's file properties.
+  function displayVersion(version) {
+    var parts = String(version || "").split(".");
+    return parts.length === 4 ? parts.slice(0, 3).join(".") : version;
+  }
+
   function facts(id, rows) {
     el(id).innerHTML = rows.map(function (r) {
       return '<li><span class="k">' + escapeHtml(r[0]) + '</span>' +
@@ -440,9 +447,9 @@
     api.get_state().then(function (s) {
       el("autostart").checked = s.autostart;
       el("port").value = s.service_port;
-      el("version").textContent = "Installed version " + (s.installed_version || "unknown");
+      el("version").textContent = "Installed version " + (displayVersion(s.installed_version) || "unknown");
       if (s.updated_from) {
-        el("update-hint").textContent = "Update finished — updated from " + s.updated_from + ".";
+        el("update-hint").textContent = "Update finished — updated from " + displayVersion(s.updated_from) + ".";
       }
       if (s.platform !== "win32") {
         el("autostart-label").textContent = "Start automatically when you log in";
