@@ -348,6 +348,27 @@ class ServiceManager:
     def is_running(self) -> bool:
         return self.status() == "ours"
 
+    # How long a service whose process is still alive may go without answering before
+    # it counts as gone. A busy one misses probes: it blocks its event loop while a
+    # model loads, and on a loaded machine /health can take longer than the probe
+    # waits. One miss used to be enough -- the release's acceptance run reported the
+    # service "stopped by itself" while it was answering requests, and a 20 GB model
+    # load had the window say the service was lost.
+    UNANSWERED_GRACE_SEC = 60.0
+
+    def has_stopped(self, unanswered_since: float) -> bool:
+        """Whether a service that has not answered since `unanswered_since` is gone.
+
+        Gone at once if the process we started has exited or the port is free;
+        otherwise only after UNANSWERED_GRACE_SEC without an answer. An adopted
+        service has no process to look at, so only the time and the port count.
+        """
+        if self._process is not None and self._process.poll() is not None:
+            return True
+        if self.status() == "free":
+            return True
+        return time.monotonic() - unanswered_since >= self.UNANSWERED_GRACE_SEC
+
     def start(self, wait_sec: int = 900, on_wait: Callable[[int], None] | None = None) -> None:  # noqa: D401
         """Start the service, or adopt one that is already answering.
 
@@ -522,8 +543,16 @@ class ServiceManager:
                 if status == "ours":
                     continue
                 # One missed probe is not a death: the service blocks its event loop
-                # briefly while a model loads. Confirm before saying anything.
-                if self._watch_stop.wait(3.0) or self.status() == "ours":
+                # while a model loads. Keep asking until it answers or has_stopped().
+                unanswered_since = time.monotonic()
+                answered = False
+                while not self._watch_stop.wait(3.0):
+                    if self.status() == "ours":
+                        answered = True
+                        break
+                    if self.has_stopped(unanswered_since):
+                        break
+                if answered or self._watch_stop.is_set():
                     continue
 
                 code = self._process.poll() if self._process is not None else None

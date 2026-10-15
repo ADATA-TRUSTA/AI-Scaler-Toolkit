@@ -1885,8 +1885,16 @@ def headless() -> int:
         return 3
 
     try:
-        while service.is_running():
+        unanswered_since: float | None = None
+        while True:
             time.sleep(5)
+            if service.is_running():
+                unanswered_since = None
+                continue
+            if unanswered_since is None:
+                unanswered_since = time.monotonic()
+            if service.has_stopped(unanswered_since):
+                break
         log.error("headless: the service stopped by itself")
         return 1
     except KeyboardInterrupt:
