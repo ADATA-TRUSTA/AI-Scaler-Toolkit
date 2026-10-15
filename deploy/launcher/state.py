@@ -85,7 +85,10 @@ def load() -> dict[str, Any]:
     stored = None
     for attempt in range(3):
         try:
-            stored = json.loads(path.read_text(encoding="utf-8"))
+            # utf-8-sig: a file saved by Notepad or Windows PowerShell's Set-Content starts
+            # with a byte-order mark, which json rejects -- and an unreadable state file
+            # reads as "not provisioned", so one hand edit sent the machine to setup again.
+            stored = json.loads(path.read_text(encoding="utf-8-sig"))
             break
         except json.JSONDecodeError:
             # Almost certainly a read that landed mid-replace. Falling straight back to
