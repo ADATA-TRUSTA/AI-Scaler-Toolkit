@@ -183,8 +183,23 @@ ensure_launcher_env() {
   # Both inputs, because a rebuilt gi with unchanged requirements is still a different
   # environment, and reusing the old one would keep an extension built for another
   # interpreter in place.
-  want="$( { sha256sum "$REQUIREMENTS"; find "$GI_DIR" -type f -exec sha256sum {} + 2>/dev/null; } \
-           | sort | sha256sum | cut -d' ' -f1)"
+  #
+  # Hashed from inside APP_ROOT, so the names are relative. sha256sum prints the name
+  # it was given beside each hash, and APP_ROOT is a fresh /tmp/.mount_XXXXXX on every
+  # start -- so with absolute names the fingerprint changed every time, no stamp ever
+  # matched, and every start deleted the environment and installed it again. Online
+  # that cost a few seconds nobody saw. Offline it worked only while uv's copy of the
+  # index was fresh, about ten minutes after the last start; after that the reinstall
+  # failed, the environment was already gone, and the application would not open
+  # without a network. Measured on the Linux VM: the same AppImage mounted twice gave
+  # two different fingerprints.
+  #
+  # __pycache__ left out: the mount is read-only, but an extracted AppImage is not, and
+  # there Python writes bytecode into launcher-gi on the first start -- which changed
+  # the fingerprint again on the second.
+  want="$( { cd "$APP_ROOT" && sha256sum launcher-requirements.txt &&
+             find launcher-gi -type f -not -path '*/__pycache__/*' -exec sha256sum {} +; } 2>/dev/null \
+           | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
 
   if [[ -x "$VENV/bin/python" && -n "$want" && -f "$stamp" ]] \
      && [[ "$(cat "$stamp")" == "$want" ]]; then
@@ -193,10 +208,37 @@ ensure_launcher_env() {
     return $?
   fi
 
-  ensure_uv || return 1
-
+  # Built beside the old one and swapped in only once it is complete. Deleting first
+  # meant a build that failed -- no network, no space -- left nothing to start on, when
+  # the old environment would have opened the window perfectly well.
+  local next="$VENV.new"
+  if ! ensure_uv || ! build_launcher_env "$next"; then
+    rm -rf "$next"
+    if [[ -x "$VENV/bin/python" ]] && "$VENV/bin/python" -c 'import webview' >/dev/null 2>&1; then
+      # Not stamped, so the next start with a connection tries again.
+      printf '%s\n' "$APP_TITLE: could not update its window environment; starting on the existing one" >&2
+      link_bundled_gi
+      return $?
+    fi
+    # Empty when ensure_uv was what failed: it has already said so.
+    [[ -n "$LAUNCHER_ENV_PROBLEM" ]] && report_problem "$LAUNCHER_ENV_PROBLEM"
+    return 1
+  fi
   rm -rf "$VENV"
-  mkdir -p "$(dirname "$VENV")"
+  mv "$next" "$VENV"
+
+  link_bundled_gi || return 1
+  printf '%s' "$want" > "$stamp"
+}
+
+# What build_launcher_env could not do, in a sentence for the user. Set by it, shown by
+# the caller only when there is no older environment to fall back on.
+LAUNCHER_ENV_PROBLEM=""
+
+build_launcher_env() {
+  local dir="$1"
+  rm -rf "$dir"
+  mkdir -p "$(dirname "$dir")"
   # No --system-site-packages: the distribution's packages are built for its own
   # interpreter, and mixing them into this one is what this arrangement exists to stop.
   #
@@ -206,8 +248,11 @@ ensure_launcher_env() {
   # had it cached and the distribution's 3.12.3 on one that did not. Both load the
   # carried gi and select the same wheels, so nothing visibly breaks -- which is what
   # makes it worth pinning rather than leaving to chance.
-  if ! uv venv --python "$LAUNCHER_PYTHON" --python-preference only-managed "$VENV" >/dev/null 2>&1; then
-    report_problem "$APP_TITLE could not create its Python environment at
+  #
+  # --relocatable, because it is built under another name and moved into place.
+  if ! uv venv --relocatable --python "$LAUNCHER_PYTHON" --python-preference only-managed \
+       "$dir" >/dev/null 2>&1; then
+    LAUNCHER_ENV_PROBLEM="$APP_TITLE could not create its Python environment at
 
   $VENV
 
@@ -215,15 +260,16 @@ It needs to download Python $LAUNCHER_PYTHON the first time. Check the network
 connection and that there is space in your home directory."
     return 1
   fi
-  if ! uv pip install --python "$VENV/bin/python" --quiet -r "$REQUIREMENTS" >/dev/null 2>&1; then
-    report_problem "$APP_TITLE could not install the packages it needs to draw its window.
+  # Offline as a second try: what has been downloaded before is still in uv's cache,
+  # and --offline uses it however old uv's copy of the index is. Without it, a machine
+  # with every wheel on disk was refused for want of a network.
+  if ! uv pip install --python "$dir/bin/python" --quiet -r "$REQUIREMENTS" >/dev/null 2>&1 &&
+     ! uv pip install --offline --python "$dir/bin/python" --quiet -r "$REQUIREMENTS" >/dev/null 2>&1; then
+    LAUNCHER_ENV_PROBLEM="$APP_TITLE could not install the packages it needs to draw its window.
 
 Check the network connection and try again."
     return 1
   fi
-
-  link_bundled_gi || return 1
-  printf '%s' "$want" > "$stamp"
 }
 
 # Point the environment at the gi this AppImage carries. Rewritten on every start, not
