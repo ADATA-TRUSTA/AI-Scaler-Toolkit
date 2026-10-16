@@ -170,15 +170,10 @@ POST /inference/estimate_memory # 預估 VRAM 需求
 
 ## 🚀 快速開始
 
-### 基本配置
-```bash
-# 安裝環境（Linux + CUDA 範例；Windows 請用 backend/scripts/windows/ 底下的腳本）
-cp backend/.env.example backend/.env
-TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
-
-# 啟動服務（服務埠由 .env 的 SERVICE_PORT 控制，預設 8000）
-bash backend/scripts/linux/run_service.sh
-```
+### 安裝
+從 GitHub 的 Releases 頁面安裝桌面應用程式（Windows 用 `Setup.exe`，Linux 用 AppImage）；第一次啟動會依找到的 GPU
+設定好環境。之後服務在 `http://127.0.0.1:8571`。要從原始碼執行，見 `docs/installation.md`（這時 port 由
+`backend/.env` 的 `SERVICE_PORT` 決定，`.env.example` 是 `8000`）。
 
 > 注意：引擎與模型**不是**用環境變數指定，而是在 `POST /inference/load_model`
 > 請求的 body 中以 `engine` / `model_name` 欄位指定；沒有 `pip install trusta-ast-service` 套件。
@@ -188,7 +183,7 @@ bash backend/scripts/linux/run_service.sh
 import requests
 
 response = requests.post(
-    "http://localhost:8000/v1/chat/completions",
+    "http://127.0.0.1:8571/v1/chat/completions",
     json={
         "model": "Qwen/Qwen3-4B",
         "messages": [{"role": "user", "content": "你好"}],

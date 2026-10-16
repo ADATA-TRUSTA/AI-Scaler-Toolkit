@@ -170,15 +170,11 @@ unload as needed, then switch to a different engine:
 
 ## 🚀 Quick Start
 
-### Basic Configuration
-```bash
-# Install the environment (Linux + CUDA example; on Windows use the scripts under backend/scripts/windows/)
-cp backend/.env.example backend/.env
-TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
-
-# Start the service (the service port is controlled by SERVICE_PORT in .env, default 8000)
-bash backend/scripts/linux/run_service.sh
-```
+### Install
+Install the desktop application from the GitHub Releases page (`Setup.exe` on Windows, the AppImage on Linux); its
+first launch sets up the environment for the GPU it finds. The service then listens on `http://127.0.0.1:8571`. To
+run from source instead, see `docs/installation.en.md` (the port then comes from `SERVICE_PORT` in `backend/.env`,
+`8000` in `.env.example`).
 
 > Note: the engine and model are **not** specified via environment variables, but rather via the `engine` / `model_name` fields in the body of the `POST /inference/load_model`
 > request; there is no `pip install trusta-ast-service` package.
@@ -188,7 +184,7 @@ bash backend/scripts/linux/run_service.sh
 import requests
 
 response = requests.post(
-    "http://localhost:8000/v1/chat/completions",
+    "http://127.0.0.1:8571/v1/chat/completions",
     json={
         "model": "Qwen/Qwen3-4B",
         "messages": [{"role": "user", "content": "Hello"}],

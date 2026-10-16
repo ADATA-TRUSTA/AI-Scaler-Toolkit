@@ -2,98 +2,85 @@
 
 [← 回到 README](../README.zh-TW.md)
 
-## 維護更新
+## 保持最新
 
-每次從 GitHub 拉新版本後，建議重新同步依賴。
+**應用程式**：AST 的 Settings → Updates → **Check now**，再按 **Update now**。見[安裝 → 更新](installation.md#更新)。
 
-### Linux
-
-```bash
-cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh
-```
-
-若改用 CUDA：
+**原始碼**：`git pull` 之後再跑一次 `setup_env`，讓環境跟上新的相依套件。它只會裝有變動的部分：
 
 ```bash
-cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh      # Intel 用 TRUSTA_ACCEL=xpu
 ```
 
-### Windows
-
 ```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\backend\scripts\windows\setup_env.ps1 -Accel xpu
-```
-
-若改用 CUDA：
-
-```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\backend\scripts\windows\setup_env.ps1 -Accel cuda
+.\backend\scripts\windows\setup_env.ps1 -Accel cuda            # Intel 用 -Accel xpu
 ```
 
 ---
 
 ## 常見問題
 
-### Q1. 執行啟動腳本時出現找不到 `.venv`
+### Q1. 第一次啟動要等很久
 
-代表尚未建立 Python 環境，請先執行：
+它要下載並安裝約 6-10 GB：對應 GPU 的 Python 套件與 llama.cpp 執行環境（Linux 上還要編譯 llama.cpp）。5-15 分鐘是正常的，網路慢會更久。視窗會顯示每個步驟。如果中途關掉視窗或重開機，再開一次應用程式即可：它會顯示「Resuming setup」，已經完成的部分幾秒就跳過。
 
-- Linux：`TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh`
-- Windows：`.\backend\scripts\windows\setup_env.ps1 -Accel xpu`
+### Q2. 設定失敗
 
-### Q2. 新機器下載後，模型快取還指到舊路徑
+視窗會顯示錯誤。完整的輸出在 log 資料夾的 `provision.log`（Windows `%LOCALAPPDATA%\AIScalerToolkit\logs\`，Linux `~/.local/share/ai-scaler-toolkit/logs/`）。大部分失敗是網路問題：再開一次應用程式就會繼續。如果每次都卡在同一步，用 Settings → Environment → **Reinstall the environment**。
 
-請優先檢查 `.env`：
+### Q3. Linux 上雙擊 AppImage 沒有反應
 
-```dotenv
-HF_HOME=<你的快取路徑>
-TIKTOKEN_RS_CACHE_DIR=<你的專案根目錄>
+把它設成可執行：`chmod +x AIScalerToolkit-*-x86_64.AppImage`，或在檔案內容勾選「允許以程式執行檔案」。如果接著出現 `fusermount: not found`，安裝 FUSE 3：`sudo apt install fuse3`。
+
+### Q4. Linux 上為什麼要輸入密碼？
+
+只有第一次啟動會問一次，用來安裝需要的系統套件：畫視窗用的 WebKitGTK、針對你的 CPU 編譯 llama.cpp 用的 `build-essential` 與 `cmake`，有 Intel GPU 時還有它的執行環境套件。它用的是桌面系統自己的密碼視窗。沒有桌面的機器，請自己先裝好，再用 `--headless`（見[安裝](installation.md#沒有桌面linux-伺服器)）。
+
+### Q5. Linux 上沒有用到 Intel GPU
+
+請用 Ubuntu 24.04 以上：22.04 的套件庫沒有 Level Zero。較新的 Intel GPU（Lunar Lake、Panther Lake、Arc B 系列）還需要 Intel 的顯示套件來源，因為 Ubuntu 套件庫裡的驅動太舊、看不到它。加入後再開一次應用程式：
+
+```bash
+sudo add-apt-repository -y ppa:kobuk-team/intel-graphics
 ```
 
-### Q3. API 已經啟動，但首頁沒有前端畫面
+### Q6. 沒有用到 NVIDIA GPU，或載入時出現 CUDA 錯誤
 
-請先確認專案內的前端資料夾已有檔案：
+NVIDIA 版需要 compute capability 7.5 以上的顯卡（RTX 20／GTX 16 系列以後）與 580 以上的驅動。用 `nvidia-smi` 確認：最上面一行會顯示驅動版本與 `CUDA Version: 13.x`。到 NVIDIA 官網更新驅動後，再開一次應用程式。
 
-- `frontend/dist/index.html`
-- `frontend/dist/assets/`
+### Q7. 找不到 vLLM 或微調
 
-若 `dist` 內已有檔案，直接重新開啟 `http://127.0.0.1:8000/` 即可。
+兩者都只在 Linux 上。有 NVIDIA GPU 時會裝 vLLM；Intel GPU 預設不裝。微調在 Linux 上的 NVIDIA 或 Intel 都可以。Windows 上的引擎是 Transformers 與 llama.cpp。有 NVIDIA 顯卡的話，還是可以在 Windows 上用：在 WSL2（Ubuntu 發行版）裡執行 Linux 版，例如用 `--headless` 執行 AppImage（見[安裝](installation.md#沒有桌面linux-伺服器)）。
 
-### Q4. 只需要後端 API，不需要前端
+### Q8. 服務起不來：port 被佔用
 
-直接使用以下路徑即可：
+別的程式正在用 `8571`。到 Settings → Ports → Application port 改掉，或關掉那個程式。已經連到這裡的應用程式也要改成新的 port。
 
-- `/docs`
-- `/health`
-- `/v1/chat/completions`
+### Q9. 「Config AST Endpoint」是灰的，或按了 Hermes 沒變
 
-### Q5. Windows 上 `setup_env.ps1` 執行失敗
+它需要已經載入的模型：先載入一個，再按一次。如果 Hermes 已經設成你自己選的其他 provider，它會刻意不動，並顯示手動切換的指令。結果也會寫進 `launcher.log`。
 
-先確認：
+### Q10. 別台電腦連不到這台
 
-- 已安裝 Python 3.12+
-- 已安裝 `uv`
-- 若使用 XPU，已安裝 Intel oneAPI
+在設定的 Hermes 卡片上開啟 **Let another computer use this machine's model**，卡片會顯示要用的位址。還是連不上的話，通常是防火牆：卡片會提供新增規則的按鈕（Windows 會要求系統管理員同意）。服務沒有密碼，只在你信任的網路上開啟。
 
-必要時可先調整 PowerShell 執行原則：
+### Q11. 為什麼筆電顯示 8 條 4 GB 的記憶體？
 
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
+這是它記憶體的構造。記憶體焊在主機板上的筆電（LPDDR5），每個記憶體通道會各自回報成一個裝置，所以 32 GB 會顯示成 8 × 4 GB。Windows 也是這樣回報。
 
-### Q6. Windows 上 `-Accel cuda` 建環境失敗
+### Q12. 模型放在哪裡？解除安裝會刪掉嗎？
 
-請確認已安裝 CUDA Toolkit，且驅動版本相容。若不是 NVIDIA GPU，請改用：
+下載的模型在 `~/.cache/huggingface`（Windows：`%USERPROFILE%\.cache\huggingface`），是 Hugging Face 的標準快取位置，和其他 Hugging Face 工具共用。Windows 解除安裝時會問要不要刪；Linux 上要自己刪才會刪。重新安裝後檔案還在，但模型清單會重新開始：從 Models 頁面重新登錄即可（會從快取找到，不用重新下載）。入門模型會自己重新登錄。
 
-```powershell
-.\backend\scripts\windows\setup_env.ps1 -Accel xpu
-```
+### Q13. 我只需要 API，不需要視窗
 
-### Q7. 用 DeepSpeed 做 fine-tune 時出現 offload / buffer / swapper 類錯誤怎麼辦？
+API 在 `http://127.0.0.1:8571`，說明在 `/docs`。見[使用 → 連接其他應用程式](usage.md#連接其他應用程式)。Linux 伺服器上可以用 `--headless` 執行 AppImage。
+
+### Q14. 同時有 NVIDIA 和 Intel 顯卡，用的是哪一張？
+
+NVIDIA。設定時會先找 NVIDIA 顯卡，找到就裝 CUDA 版，所以有 NVIDIA 顯卡加 Intel 內顯（或 Arc 顯卡）的電腦會用 NVIDIA。要改用 Intel：替你的帳號設定環境變數 `TRUSTA_ACCEL=xpu`，打開應用程式，再用 Settings → Environment → **Reinstall the environment**。ComfyUI 另外選：在 Settings → Components 選它要用的顯示卡。
+
+### Q15. 用 DeepSpeed 做 fine-tune 時出現 offload / buffer / swapper 類錯誤怎麼辦？
 
 本專案內建的 DeepSpeed profile 位於：
 

@@ -2,381 +2,204 @@
 
 [← 回到 README](../README.zh-TW.md)
 
-## 用安裝檔安裝（一般使用者）
+> 有在用 AI 程式助理嗎？可以請它幫你裝：見 [AI_SETUP.md](AI_SETUP.md)。
 
-從 GitHub 的 [Releases](https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases) 下載自己平台的檔案。每個版本都有兩個檔案，各自對應一種架構：
+## 安裝發行版（一般使用者）
+
+到 GitHub 的 [Releases](https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases) 頁面下載你平台的檔案。每個版本有兩個，各對應一種架構：
 
 | 平台 | 檔案 | 需求 |
-|------|------|------|
-| Windows | `AIScalerToolkit-<版本>-x64-Setup.exe` | Windows 10／11，x64。不需要系統管理員權限 |
+|----------|------|----------|
+| Windows | `AIScalerToolkit-<版本>-x64-Setup.exe` | Windows 10/11，x64。不需要系統管理員權限 |
 | Linux | `AIScalerToolkit-<版本>-x86_64.AppImage` | x86_64，glibc 2.35 以上（例如 Ubuntu 22.04 以上） |
 
-**GPU**：NVIDIA 需 compute capability 7.5 以上（RTX 20 系列、GTX 16 系列以後）與 R580 以上的驅動；Intel Arc／iGPU 亦可。目前只提供 x64／x86_64，沒有 ARM 版本。
+**GPU**：NVIDIA 需要 compute capability 7.5 以上（RTX 20、GTX 16 系列以後）以及 R580 以上的驅動；Intel Arc 與內顯也可以。只有 x64／x86_64 版本，沒有 ARM 版。
 
-**Linux 執行前**：先給檔案執行權限（`chmod +x`，或在檔案管理員的「內容」勾選「允許作為程式執行」），雙擊才打得開。AppImage 透過 FUSE 掛載自己，用的是 Ubuntu 預設就有的 `fuse3`，不需要另外安裝 `libfuse2`；若出現 `fusermount: not found`，執行 `sudo apt install fuse3`。
+**磁碟**：第一次啟動會下載約 6-10 GB（Python 套件與 GPU 執行環境）；請至少留 20 GB，再加上你要下載的模型。
 
-**Linux 第一次啟動**：AppImage 會把缺少的系統套件一次裝好，只跳一次系統密碼視窗：
+每個 release 頁面都列出兩個檔案的 SHA-256。Windows 安裝檔由 ADATA Technology Co., Ltd. 簽章。
 
-- WebKitGTK（畫視窗用）、系統匣圖示
-- 編譯工具 `build-essential`、`cmake`：llama.cpp 會在你的電腦上編譯，針對這台 CPU 最佳化
-- **Intel 顯示卡**另外會裝：Level Zero 與 OpenCL（`libze1`、`libze-intel-gpu1`、`intel-opencl-icd`，PyTorch 用它們使用 GPU）、`libze-dev`（微調訓練要用）、`intel-ocloc`（vLLM 要用）、Vulkan 驅動與工具（`mesa-vulkan-drivers`、`vulkan-tools`），以及 llama.cpp 編 Vulkan 版所需的 `libvulkan-dev`、`glslc`、`spirv-headers`。Windows 上這些會隨 Intel 驅動一起裝好，Ubuntu 預設沒有
-- **新款 Intel 顯示卡（Lunar Lake、Panther Lake、Arc B 系列）要先加 Intel 的顯卡套件來源**：Ubuntu 24.04 內建的版本（2023 年）太舊，裝了也偵測不到 GPU。第一次啟動前先執行一次：
+### Windows
+
+執行 `Setup.exe`。它只裝給你自己的帳號，裝在 `%LOCALAPPDATA%\Programs\AIScalerToolkit`，並加入開始功能表（桌面捷徑可選）。從其中一個開啟 **AI Scaler Toolkit**。
+
+### Linux
+
+**第一次啟動前**：把檔案設成可執行（`chmod +x`，或在檔案內容勾選「允許以程式執行檔案」），否則雙擊不會有反應。把它放在之後不會移動的地方（例如 `~/Applications/`）：選單項目與開機自動啟動都指向這個檔案。AppImage 透過 FUSE 掛載自己，用的是 Ubuntu 預設就有的 `fuse3`，不需要 `libfuse2`。如果出現 `fusermount: not found`，執行 `sudo apt install fuse3`。
+
+**第一次啟動**：AppImage 會一次裝好缺少的系統套件，只問一次密碼：
+
+- WebKitGTK（畫視窗用）與系統匣圖示
+- 編譯工具 `build-essential` 與 `cmake`：llama.cpp 會在你的電腦上編譯，針對你的 CPU 最佳化
+- **有 Intel GPU 時**還有：Level Zero 與 OpenCL（`libze1`、`libze-intel-gpu1`、`intel-opencl-icd`，PyTorch 透過它們使用 GPU）、`libze-dev`（微調需要）、`intel-ocloc`、Vulkan 驅動與工具（`mesa-vulkan-drivers`、`vulkan-tools`），以及 llama.cpp 的 Vulkan 版編譯時要用的 `libvulkan-dev`、`glslc`、`spirv-headers`。Windows 上這些隨 Intel 驅動一起裝；乾淨的 Ubuntu 一個都沒有
+- **較新的 Intel GPU（Lunar Lake、Panther Lake、Arc B 系列）要先加入 Intel 的顯示套件來源**：Ubuntu 24.04 內建的版本（2023 年）太舊，完全看不到這些 GPU。第一次啟動前做一次：
 
   ```bash
   sudo add-apt-repository -y ppa:kobuk-team/intel-graphics
   ```
 
-  AppImage 不會替你加套件來源，因為它會影響之後整個系統的更新。Ubuntu 22.04 的套件庫沒有 Level Zero，Intel 顯示卡請用 24.04 以上
-- NVIDIA 顯示卡的驅動是專有軟體，要自己先裝好（`nvidia-smi` 能執行即可）
+  AppImage 不會替你加套件來源，因為那會改變之後每次系統更新會裝什麼。Ubuntu 22.04 的套件庫沒有 Level Zero，所以 Intel GPU 請用 24.04 以上
+- NVIDIA 驅動是專有軟體，要自己先裝好（`nvidia-smi` 要能執行）
 
-沒有圖形介面、或想先自己裝好時：
+### 第一次啟動做了什麼
+
+兩個平台的第一次啟動都會先顯示設定視窗，再開啟應用程式：
+
+1. 檢查電腦（磁碟空間、視窗執行環境、GPU）
+2. 安裝對應 GPU 的 Python 套件（NVIDIA 用 CUDA、Intel 用 XPU）與 llama.cpp 執行環境。同時有 NVIDIA 與 Intel 顯卡時會用 NVIDIA；要改用 Intel 見 [FAQ Q14](faq.md#q14-同時有-nvidia-和-intel-顯卡用的是哪一張)
+3. 啟動服務，並下載一個小的入門模型（MiniCPM5-1B），讓模型清單不是空的
+
+大約 5-15 分鐘，網路慢會更久。如果中途中斷，再開一次應用程式即可：它會從中斷的地方繼續，只裝缺少的部分。之後啟動只要幾秒。
+
+服務在 `http://127.0.0.1:8571`（只限這台電腦）。視窗、設定與 API 見[使用說明](usage.md)。
+
+### 更新
+
+AST 的 Settings → Updates → **Check now**，再按 **Update now**。應用程式會下載新版，用 release 公布的 SHA-256 檢查（Windows 另外檢查簽章），安裝後自動重新開啟。新版需要不同的 Python 套件時，它第一次啟動會把環境更新到位（幾秒到幾分鐘）。
+
+也可以直接下載較新的版本，照上面的方式安裝覆蓋舊版。模型與設定都會保留。
+
+### 解除安裝
+
+**Windows**：設定 → 應用程式 → AI Scaler Toolkit → 解除安裝。它會移除程式與它安裝的環境，並詢問是否一併刪除下載的模型。
+
+**Linux**：沒有解除安裝程式。先結束應用程式（系統匣圖示 → Quit），再刪除：
+
+- AppImage 本身
+- `~/.local/share/ai-scaler-toolkit`（環境）與 `~/.config/ai-scaler-toolkit`（設定）
+- `~/.local/share/applications/ai-scaler-toolkit*.desktop`、`~/.local/share/icons/hicolor/256x256/apps/ai-scaler-toolkit*.png`、`~/.config/autostart/ai-scaler-toolkit.desktop` 與 `~/Desktop/ai-scaler-toolkit.desktop`
+
+下載的模型留在 `~/.cache/huggingface`，要自己刪才會刪掉。
+
+### 檔案位置
+
+| | Windows | Linux |
+|---|---|---|
+| 程式 | `%LOCALAPPDATA%\Programs\AIScalerToolkit` | AppImage 本身 |
+| 環境、log | `%LOCALAPPDATA%\AIScalerToolkit`（`logs\launcher.log`、`provision.log`、`service.log`） | `~/.local/share/ai-scaler-toolkit`（`logs/…`） |
+| 設定 | `%LOCALAPPDATA%\AIScalerToolkit\state.json` | `~/.config/ai-scaler-toolkit/state.json` |
+| 下載的模型 | `%USERPROFILE%\.cache\huggingface` | `~/.cache/huggingface` |
+
+模型快取是 Hugging Face 的標準位置，所以和這台電腦上其他 Hugging Face 工具共用。
+
+### 沒有桌面（Linux 伺服器）
+
+`--headless` 不開視窗，直接設定並執行服務。它沒辦法問密碼，所以要先裝好系統套件：
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 gir1.2-ayatanaappindicator3-0.1 build-essential cmake
-# Intel 顯示卡再加上（新款先加上面的 PPA）：
+sudo apt install build-essential cmake
+# 有 Intel GPU 時（較新的 GPU 先加上面的 PPA）：
 sudo apt install libze1 libze-intel-gpu1 intel-opencl-icd libze-dev intel-ocloc mesa-vulkan-drivers vulkan-tools libvulkan-dev glslc spirv-headers
 chmod +x AIScalerToolkit-*-x86_64.AppImage
-./AIScalerToolkit-*-x86_64.AppImage
+./AIScalerToolkit-*-x86_64.AppImage --headless
 ```
 
-兩個平台第一次啟動都會下載 GPU 執行環境（數 GB），之後啟動就快了。
+第一次執行會完成設定，之後服務持續在 `127.0.0.1:8571` 執行，按 Ctrl+C 停止。沒有 FUSE 的機器，設定 `APPIMAGE_EXTRACT_AND_RUN=1`。
 
-以下是**從原始碼安裝**（開發者）的說明。
+---
 
-## 系統需求
+## 從原始碼安裝（開發者）
 
-### 基本需求（兩平台共同）
+這頁以下是給要改程式碼的人。原始碼直接執行後端：沒有設定視窗，`.env` 要自己寫，服務的 port 也由它決定（`.env.example` 是 `8000`）。
+
+### 需求
 
 | 工具 | 說明 |
-|------|------|
-| Git | 用於 clone 與安裝期抓取 llama.cpp |
-| Python 3.12+ | 執行服務本體 |
-| `uv` | Python 套件 / 環境管理 |
-| C/C++ 編譯工具鏈 | 編譯 llama.cpp 時需要 |
-| cmake | 編譯 llama.cpp 時需要 |
+|------|-------------|
+| Git | clone，以及設定時抓 llama.cpp 的轉檔腳本 |
+| `uv` | Python 與環境管理；它會自己裝 Python 3.12 |
+| Linux：`build-essential`、`cmake` | Linux 上的 llama.cpp 從原始碼編譯 |
 
-### Linux（Ubuntu / Debian）
+Linux（Ubuntu / Debian）：
 
 ```bash
 sudo apt update
-sudo apt install -y git curl build-essential cmake python3 python3-pip
+sudo apt install -y git curl build-essential cmake
 curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-安裝完成後重新登入 shell，或手動載入 `uv`：
-
-```bash
 source "$HOME/.local/bin/env"
 ```
 
-### Windows
-
-1. **Git for Windows**：<https://git-scm.com/download/win>
-2. **Python 3.12+**：<https://www.python.org/downloads/windows/>
-  - 安裝時勾選 **Add Python to PATH**
-3. **uv**（PowerShell）：
-  ```powershell
-  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-  ```
-4. **Visual Studio Build Tools 2022**（僅編譯 llama.cpp 時需要）
-5. 若使用 Intel XPU / iGPU，建議安裝 Intel oneAPI Runtime / Toolkit
-
-### 選配需求
-
-- NVIDIA GPU：需安裝對應驅動與 CUDA 執行環境
-- Intel XPU / iGPU：Linux / Windows 皆可，需安裝對應驅動與執行環境
-- 私有 Hugging Face 模型：需準備 `HF_TOKEN`
-
-> **注意**：vLLM 僅支援 **Linux + CUDA**；Windows 平台無法使用 vLLM engine。
->
-> **注意**：fine-tune 功能目前也僅支援 **Linux + CUDA**；Windows、Linux + XPU、純 CPU 環境皆不支援。
->
-> 前端靜態檔已包含在專案內，不需要另外安裝 Node.js 或重新建置前端。
-
----
-
-## 從 GitHub 下載專案
-
-一般 `git clone` 即可 —— 本專案已無 Git submodule。（`llama.cpp` 於安裝期抓取,見下方。）
-
-#### Linux
-
-```bash
-mkdir -p /home/test/project
-cd /home/test/project
-git clone <YOUR_GITHUB_REPOSITORY_URL> AI-Scaler-Toolkit
-cd AI-Scaler-Toolkit
-```
-
-#### Windows（PowerShell）
+Windows（PowerShell）：先裝 [Git for Windows](https://git-scm.com/download/win)，再裝 uv：
 
 ```powershell
-mkdir C:\Users\<user>\project
-cd C:\Users\<user>\project
-git clone <YOUR_GITHUB_REPOSITORY_URL> AI-Scaler-Toolkit
-cd AI-Scaler-Toolkit
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
----
+Windows 上的 llama.cpp 不用編譯：設定時會下載官方的預編版。
 
-## 第一次下載後必做設定
+> **功能支援**：vLLM 只在 **Linux** 上，NVIDIA（CUDA）預設安裝，Intel 要自己開啟（`TRUSTA_SETUP_VLLM=1`）。微調只在 **Linux** 上（CUDA 或 Intel XPU）。Windows 上的引擎是 Transformers 與 llama.cpp。要在有 NVIDIA 顯卡的 Windows 電腦上用 vLLM 或微調，可以在 WSL2（Ubuntu 發行版）裡執行 Linux 版：例如照上面的方式用 `--headless` 執行 AppImage。
+>
+> repo 已經包含前端的靜態檔，不需要 Node.js，也不用另外 build 前端。
 
-### 建立必要資料夾
+### 取得程式碼
 
-#### Linux
+一般的 `git clone` 就夠了，沒有 submodule。
 
 ```bash
-mkdir -p logs .cache/huggingface
-```
-
-#### Windows（PowerShell）
-
-```powershell
-New-Item -ItemType Directory -Force logs, .cache\huggingface
+git clone https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit.git
+cd AI-Scaler-Toolkit
 ```
 
 ### 建立 `.env`
 
-專案啟動時，`backend/service/settings.py` 會優先讀取 `backend/`(service/ 所在目錄)的 `.env`；如果 `.env` 不存在，才會退回 `.env.example`。
-
-**原則：請優先修改 `.env`，不要直接改 `backend/service/settings.py`。**
-
-#### Linux
+服務啟動時，`backend/service/settings.py` 會讀 `backend/.env`。檔案不存在時會改讀 `backend/.env.example`，也就是範例裡的值，包括放在專案裡面的模型快取。請複製一份，至少設好路徑：
 
 ```bash
-cp backend/.env.example backend/.env
+cp backend/.env.example backend/.env          # Windows：Copy-Item backend\.env.example backend\.env
 ```
-
-#### Windows（PowerShell）
-
-```powershell
-Copy-Item backend\.env.example backend\.env
-```
-
-接著用文字編輯器開啟 `.env`，至少建議確認以下內容：
-
-#### Linux 範例
 
 ```dotenv
 SERVICE_HOST=127.0.0.1
 SERVICE_PORT=8000
-UVICORN_RELOAD=false
 
-HF_HOME=/home/test/project/AI-Scaler-Toolkit/.cache/huggingface
-TIKTOKEN_RS_CACHE_DIR=/home/test/project/AI-Scaler-Toolkit
-LOG_DIR=/home/test/project/AI-Scaler-Toolkit/logs
+HF_HOME=/home/<user>/.cache/huggingface      # Windows：C:\Users\<user>\.cache\huggingface
+LOG_DIR=/home/<user>/AI-Scaler-Toolkit/logs
 
 LOG_TO_FILE=true
 LOG_FILE_NAME=service.log
 LOG_BACKUP_COUNT=14
-UVICORN_ACCESS_LOG=true
-UVICORN_USE_COLORS=true
 ```
 
-#### Windows 範例
+選填的設定在 `.env.example` 裡是註解掉的；要用的話，拿掉開頭的 `#` 填入值，例如私有的 Hugging Face 模型要設 `HF_TOKEN=hf_xxx`。路徑用 `/` 或 `\` 都可以。
 
-```dotenv
-SERVICE_HOST=127.0.0.1
-SERVICE_PORT=8000
-UVICORN_RELOAD=false
-
-HF_HOME=C:\Users\<user>\project\AI-Scaler-Toolkit\.cache\huggingface
-TIKTOKEN_RS_CACHE_DIR=C:\Users\<user>\project\AI-Scaler-Toolkit
-LOG_DIR=C:\Users\<user>\project\AI-Scaler-Toolkit\logs
-
-LOG_TO_FILE=true
-LOG_FILE_NAME=service.log
-LOG_BACKUP_COUNT=14
-UVICORN_ACCESS_LOG=true
-UVICORN_USE_COLORS=true
-```
-
-若要啟用 `.env.example` 中原本被註解掉的選配設定，請把行首的 `#` 拿掉，再填入實際值。例如：
-
-```dotenv
-HF_TOKEN=hf_xxxxxxxxxxxxx
-LLAMA_SERVER_URL=http://127.0.0.1:5001
-REDIS_HOST=127.0.0.1
-REDIS_PORT=6379
-REDIS_DB=0
-```
-
-`setup_env` 會把它驗證過的 llama 執行檔路徑寫進 `.env`，通常不需要手動設定。若要指向自己編譯的版本，可在 `.env` 補上：
-
-```dotenv
-LLAMA_SERVER_BINARY=./backend/service/utils/llama-bin/llama-server
-```
-
-Windows 範例：
-
-```dotenv
-LLAMA_SERVER_BINARY=./backend/service/utils/llama-bin/llama-server.exe
-```
-
-> 路徑可以用正斜線 `/` 或反斜線 `\`，Python 的 `pathlib` 兩者皆支援。
-
-### 常見需要手動調整的路徑設定
-
-| 變數 | 用途 | 預設值 |
+| 變數 | 用途 | 預設 |
 |------|------|--------|
 | `HF_HOME` | Hugging Face 模型與快取 | `<project>/.cache/huggingface` |
-| `TIKTOKEN_RS_CACHE_DIR` | TikToken / GPT-OSS 快取 | 專案根目錄 |
-| `LOG_DIR` | 日誌輸出目錄 | `<project>/logs` |
-| `LLAMA_SERVER_BINARY` | llama-server 可執行檔路徑 | `backend/service/utils/llama-bin/`，找不到才退回 PATH |
-| `VLLM_SERVER_PROJECT_DIR` | 其 `.venv` 裝有 vLLM 的專案目錄 | backend 專案根目錄（vLLM 已改由 `vllm` extra 裝進本專案環境，不再是獨立子專案） |
+| `LOG_DIR` | log 輸出目錄 | `<project>/logs` |
+| `LLAMA_SERVER_BINARY` | `llama-server` 執行檔 | 由 `setup_env` 寫入；`backend/service/utils/llama-bin/` |
+| `VLLM_SERVER_PROJECT_DIR` | 放 vLLM 的 `.venv` 的專案 | backend 專案本身（vLLM 透過 `vllm` extra 安裝） |
 
-### dmidecode 權限設定（Linux 選配）
+### 建立 Python 環境
 
-後端 `/system/resources` API 呼叫 `dmidecode` 取得 DRAM 規格。非 root 環境下若要完整資訊，可設定 sudoers 規則：
-
-```bash
-sudo visudo -f /etc/sudoers.d/ast-dmidecode
-```
-
-加入以下一行（將 `<user>` 替換成實際執行服務的帳號）：
-
-```
-<user> ALL=(root) NOPASSWD: /usr/sbin/dmidecode -t memory
-```
-
-若跳過此步驟，API 仍可正常運作，DRAM 規格欄位可能顯示為空。
-
-## 建立 Python 環境
-
-### Linux
-
-#### 建議：使用自動腳本
+Linux，NVIDIA：
 
 ```bash
-cd /home/test/project/AI-Scaler-Toolkit
 TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
 ```
 
-若主機沒有 NVIDIA CUDA 環境，可改用 XPU：
+Linux，Intel：`TRUSTA_ACCEL=xpu`。不裝 vLLM：`TRUSTA_SETUP_VLLM=0`。
 
-```bash
-cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh
-```
-
-跳過 vLLM 環境建置：
-
-```bash
-cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda TRUSTA_SETUP_VLLM=0 bash backend/scripts/linux/setup_env.sh
-```
-
-腳本會在 `backend/.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
-
-> **提醒**：若要使用 fine-tune，請使用 **Linux + CUDA** 安裝流程。
-
-### Windows
+Windows：
 
 ```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\backend\scripts\windows\setup_env.ps1 -Accel xpu
+.\backend\scripts\windows\setup_env.ps1 -Accel cuda      # Intel 用 -Accel xpu
 ```
 
-若要改用 CUDA：
+腳本會建立 `backend/.venv`（不用手動啟用）、把 llama.cpp 裝到 `backend/service/utils/llama-bin/` 並記進 `.env`、把 llama.cpp 的 GGUF 轉檔腳本抓到 `backend/service/utils/llama.cpp/`，有 Intel GPU 時還會實際檢查 GPU 能不能計算。每一部分只在缺少時才裝，所以重跑很快。
 
-```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\backend\scripts\windows\setup_env.ps1 -Accel cuda
-```
+**llama.cpp**：版本 `b10107`，可用 `TRUSTA_LLAMA_VERSION`（Linux）或 `-LlamaVersion`（Windows）改。使用哪個 build 與 torch 的加速器分開決定，用 `TRUSTA_LLAMA_BACKEND`（Linux）或 `-LlamaBackend`（Windows）：`auto`（預設）有 NVIDIA 顯卡時用 CUDA，否則用 Vulkan。重裝用 `TRUSTA_INSTALL_LLAMA=1` 或 `-Llama force`；跳過用 `TRUSTA_INSTALL_LLAMA=0` 或 `-Llama skip`。要用自己的 llama，把 `LLAMA_SERVER_BINARY` 指過去，設定就不會動它。
 
-腳本會在 `backend\.venv` 建立環境；**不需要另外手動啟動虛擬環境**。
-
-### 若要使用 llama-server
-
-安裝流程會取得**官方預編**的 `llama` 執行檔 —— 不需要編譯器，也沒有任何 C++ 建置步驟。
-此步驟**預設就會執行**，而且只補齊實際缺少的部分，所以直接執行 `setup_env` 即可：
-
-#### Linux
+### 啟動服務
 
 ```bash
-bash backend/scripts/linux/setup_env.sh
+bash backend/scripts/linux/run_service.sh          # Windows：.\backend\scripts\windows\run_service.bat
 ```
 
-#### Windows（PowerShell）
-
-```powershell
-.\backend\scripts\windows\setup_env.ps1
-```
-
-它會做兩件事：
-
-1. 透過官方的 `ggml-org/llama-install.sh` 安裝整合後的 `llama` 執行檔（以
-   `llama serve` / `llama quantize` 方式使用），Linux 安裝到 `~/.local/bin/llama`，
-   Windows 則是 `%LOCALAPPDATA%\Microsoft\WindowsApps\llama.exe`。可用 `.env` 中的
-   `LLAMA_SERVER_BINARY` 覆寫路徑。
-2. 以 sparse fetch 只取得 GGUF 轉換工具（`convert_hf_to_gguf.py`、
-   `convert_lora_to_gguf.py`、`conversion/`、`gguf-py`）到
-   `backend/service/utils/llama.cpp`，約 1.7 MB 的純 Python —— 因為這些腳本並不隨
-   預編執行檔一起發佈。C++ 原始碼不會被抓取。
-
-llama 的建置版本與 torch 的加速器**互相獨立**，由 `TRUSTA_LLAMA_BACKEND`（Linux）或
-`-LlamaBackend`（Windows）決定：`auto`（預設）在偵測到 NVIDIA 顯卡時選用原生 CUDA 版本，
-否則使用通用的 Vulkan 版本（Intel / AMD / NVIDIA 顯卡都能辨識）。若要在有 NVIDIA 顯卡的機器上
-強制使用通用版本，請傳入 `vulkan`。
-
-版本固定在 `b10107`，可用 `TRUSTA_LLAMA_VERSION`（Linux）或 `-LlamaVersion`（Windows）覆寫。
-
-兩個部分都只在缺少時才安裝，因此重複執行 `setup_env` 成本很低，也不會破壞既有環境：
-
-| 模式 | Linux | Windows | 行為 |
-|---|---|---|---|
-| auto *（預設）* | — | — | 只安裝缺少的部分 |
-| skip | `TRUSTA_INSTALL_LLAMA=0` | `-Llama skip` | 完全不做任何事 |
-| force | `TRUSTA_INSTALL_LLAMA=1` | `-Llama force` | 即使已存在也重新安裝 |
-
-執行檔的偵測會依序參考 `LLAMA_SERVER_BINARY`（環境變數或 `backend/.env`）、預設安裝位置、
-最後是 `PATH` 上的 `llama`。轉換工具則必須 `convert_hf_to_gguf.py`、
-`convert_lora_to_gguf.py` 與 `gguf-py/` 三者齊備才算存在，因此抓取到一半的 checkout 會被修復
-而不是跳過。
-
-> **已經有自己的 llama？** 只要把 `LLAMA_SERVER_BINARY` 指向它，auto 模式就會偵測到並完全不動它。
-> 只有 `force` 會覆蓋，而官方安裝程式寫入的是上述固定位置，所以被取代的是那一份。
-
-### 若要使用 vLLM engine（僅 Linux + CUDA）
-
-`setup_env.sh` 在 CUDA 主機上會自動建立 vLLM 隔離環境；Windows 不支援 vLLM engine。
-
-## 啟動服務
-
-### Linux
-
-```bash
-cd /home/test/project/AI-Scaler-Toolkit
-bash backend/scripts/linux/run_service.sh
-```
-
-若需要讓 `/system/resources` API 透過 `dmidecode` 讀取完整 DRAM 資訊，可改用具備權限的方式啟動：
-
-```bash
-cd /home/test/project/AI-Scaler-Toolkit
-sudo bash backend/scripts/linux/run_service.sh
-```
-
-> 建議優先依照前文設定 `sudoers`，只授權特定 `dmidecode` 指令；除非必要，不建議長期以 root 執行整個服務。
-
-
-### Windows
-
-```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\backend\scripts\windows\run_service.bat
-```
-
-啟動腳本會直接使用 `backend/.venv` 內的 Python；**不需要手動啟動虛擬環境**。
-
-### 預設服務位址
-
-| 位址 | 說明 |
+| 網址（`SERVICE_PORT=8000` 時） | 說明 |
 |------|------|
-| `http://127.0.0.1:8000/` | 前端首頁（若前端檔案存在，會自動轉到 `/frontend/`） |
+| `http://127.0.0.1:8000/` | 網頁介面（轉到 `/frontend/`） |
 | `http://127.0.0.1:8000/health` | 健康檢查 |
 | `http://127.0.0.1:8000/docs` | Swagger UI |
 | `http://127.0.0.1:8000/redoc` | ReDoc |
 
----
-
+要從原始碼執行桌面啟動器，見 [deploy/README.md](../deploy/README.md)。

@@ -120,6 +120,25 @@ believed they already had. Nothing resumes a download -- `setup_env` installs on
 is missing, so finished work goes past in seconds and the llama archive starts over.
 The flag exists to be honest about that, not to hide it.
 
+## One copy at a time, and a way to ask it to quit
+
+`launcher/single_instance.py` binds `127.0.0.1:48571`. Binding is the lock; connecting
+is how a second launch asks the running copy to bring its window forward
+(`ai-scaler-toolkit/1 activate`). A copy that is shutting down answers `closing`, and
+the new launch waits for it rather than appearing to do nothing.
+
+The same port takes `ai-scaler-toolkit/1 quit`, and the copy quits the way the tray's
+Quit does. The release pipeline uses it (`ci/scripts/free_app_ports.ps1` in
+trusta-ast-release): the build host is also someone's desktop, the copy open there
+holds this port and the service's, and the pipeline runs as another account that
+cannot stop it. Only `0.1.3` and later understand it.
+
+On Linux the port is bound with `SO_REUSEADDR`. Without it a launch made right after
+a copy quit could not bind the port that copy had just freed (its connections were
+still in TIME_WAIT), took it for someone else's and started unguarded, so two copies
+ran. On Linux the option still refuses a port with a listener; on Windows it would
+not, so it is not set there.
+
 ## One brand in the interface, another on the icon
 
 `BRAND_BY_PLATFORM` gives the Windows payload the ADATA frontend; `layout.ICON_BRAND`

@@ -26,16 +26,17 @@ By participating in this project you agree to abide by our
 
 ## Development Setup
 
-The project targets **Python 3.12+** and uses the setup scripts under
-`scripts/`. See [docs/installation.en.md](../docs/installation.en.md) for the
-full walkthrough. In short:
+The project targets **Python 3.12** and is managed with `uv`; the setup scripts
+under `backend/scripts/` create the environment. See
+[Installing from source](../docs/installation.en.md#installing-from-source-developers)
+for the full walkthrough. In short:
 
 ### Linux
 
 ```bash
 cp backend/.env.example backend/.env
 # Edit .env (HF_HOME, LOG_DIR, SERVICE_HOST, SERVICE_PORT)
-TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh      # Intel: TRUSTA_ACCEL=xpu
 bash backend/scripts/linux/run_service.sh
 ```
 
@@ -43,19 +44,25 @@ bash backend/scripts/linux/run_service.sh
 
 ```powershell
 Copy-Item backend\.env.example backend\.env
-notepad .env
-.\backend\scripts\windows\setup_env.ps1 -Accel xpu
+notepad backend\.env
+.\backend\scripts\windows\setup_env.ps1 -Accel cuda             # Intel: -Accel xpu
 .\backend\scripts\windows\run_service.bat
 ```
 
-> **Note**: Fine-tuning currently supports **Linux + CUDA** only.
+> **Note**: Fine-tuning and vLLM run on **Linux** only.
+> The desktop application and its installers live in `deploy/`; see
+> [deploy/README.md](../deploy/README.md) to run it from a checkout.
 
 ## Running Tests
 
-Tests use `pytest` (configured in `backend/pytest.ini`, `testpaths = tests`, run from `backend/`):
+Run the unit tests from `backend/` with the environment `setup_env` created.
+Use `--no-sync`: a bare `uv run` re-syncs to the lock's defaults and drops the
+GPU extras.
 
 ```bash
-cd backend && pytest
+cd backend
+uv run --no-sync pytest tests/unit -q                        # Linux, what CI runs
+uv run --no-sync pytest tests/unit -q -m "not linux_only"    # Windows
 ```
 
 Please make sure the test suite passes before opening a pull request, and add

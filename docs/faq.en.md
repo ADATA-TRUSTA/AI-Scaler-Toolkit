@@ -2,98 +2,85 @@
 
 [← Back to README](../README.md)
 
-## Maintenance Updates
+## Keeping it up to date
 
-Each time you pull a new version from GitHub, it is recommended to resync dependencies.
+**The application**: Settings → Updates → **Check now**, then **Update now**. See [Installation → Updating](installation.en.md#updating).
 
-### Linux
-
-```bash
-cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh
-```
-
-If switching to CUDA:
+**A source checkout**: after `git pull`, run `setup_env` again so the environment matches the new dependencies. It installs only what changed:
 
 ```bash
-cd /home/test/project/AI-Scaler-Toolkit
-TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh
+TRUSTA_ACCEL=cuda bash backend/scripts/linux/setup_env.sh      # or TRUSTA_ACCEL=xpu
 ```
 
-### Windows
-
 ```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\backend\scripts\windows\setup_env.ps1 -Accel xpu
-```
-
-If switching to CUDA:
-
-```powershell
-cd C:\Users\<user>\project\AI-Scaler-Toolkit
-.\backend\scripts\windows\setup_env.ps1 -Accel cuda
+.\backend\scripts\windows\setup_env.ps1 -Accel cuda            # or -Accel xpu
 ```
 
 ---
 
 ## FAQ
 
-### Q1. The startup script says `.venv` cannot be found
+### Q1. The first launch takes a long time
 
-This means the Python environment has not been created yet. Run:
+It downloads and installs about 6-10 GB: the Python packages for your GPU and the llama.cpp runtime (on Linux, llama.cpp is also compiled). 5-15 minutes is normal, longer on a slow connection. The window shows each step. If you close it or the PC restarts, start the application again: it says "Resuming setup", and finished parts go past in seconds.
 
-- Linux: `TRUSTA_ACCEL=xpu bash backend/scripts/linux/setup_env.sh`
-- Windows: `.\backend\scripts\windows\setup_env.ps1 -Accel xpu`
+### Q2. Setup failed
 
-### Q2. After moving to a new machine, the model cache still points to the old path
+The window shows the error. The full output is in `provision.log` in the logs folder (Windows `%LOCALAPPDATA%\AIScalerToolkit\logs\`, Linux `~/.local/share/ai-scaler-toolkit/logs/`). Most failures are the network: start the application again and it continues. If it keeps failing at the same step, use Settings → Environment → **Reinstall the environment**.
 
-Check `.env` first:
+### Q3. On Linux, double-clicking the AppImage does nothing
 
-```dotenv
-HF_HOME=<your cache path>
-TIKTOKEN_RS_CACHE_DIR=<your project root>
+Make it executable: `chmod +x AIScalerToolkit-*-x86_64.AppImage`, or tick "Allow executing file as program" in its properties. If it then says `fusermount: not found`, install FUSE 3: `sudo apt install fuse3`.
+
+### Q4. On Linux, why does it ask for my password?
+
+Only on the first launch, once, to install the system packages it needs: WebKitGTK for its window, `build-essential` and `cmake` to compile llama.cpp for your CPU, and with an Intel GPU its runtime packages. It asks through your desktop's own password dialog. On a machine with no desktop, install them yourself and use `--headless` (see [Installation](installation.en.md#no-desktop-linux-servers)).
+
+### Q5. My Intel GPU is not used on Linux
+
+Use Ubuntu 24.04 or newer: 22.04's archive has no Level Zero. A recent Intel GPU (Lunar Lake, Panther Lake, Arc B-series) also needs Intel's graphics package source, because the driver in Ubuntu's own archive is too old to see it. Add it, then start the application again:
+
+```bash
+sudo add-apt-repository -y ppa:kobuk-team/intel-graphics
 ```
 
-### Q3. The API is running, but the home page does not show the frontend
+### Q6. My NVIDIA GPU is not used, or loading fails with a CUDA error
 
-First verify that the frontend files exist in the project:
+The NVIDIA build needs a card with compute capability 7.5 or newer (RTX 20 / GTX 16 series and later) and driver 580 or newer. Check with `nvidia-smi`: the top line shows the driver version and `CUDA Version: 13.x`. Update the driver from NVIDIA, then start the application again.
 
-- `frontend/dist/index.html`
-- `frontend/dist/assets/`
+### Q7. vLLM or fine-tuning is missing
 
-If files already exist under `dist`, simply reopen `http://127.0.0.1:8000/`.
+Both run on Linux only. vLLM is installed with an NVIDIA GPU; on an Intel GPU it is not installed by default. Fine-tuning works on Linux with NVIDIA or Intel. On Windows the engines are Transformers and llama.cpp. With an NVIDIA GPU you can still use them on Windows by running the Linux version inside WSL2 (an Ubuntu distribution), for example the AppImage with `--headless` (see [Installation](installation.en.md#no-desktop-linux-servers)).
 
-### Q4. I only need the backend API, not the frontend
+### Q8. The service will not start: the port is in use
 
-Use these routes directly:
+Another program is using port `8571`. Change it in Settings → Ports → Application port, or quit the other program. Apps you connected to this one need the new port too.
 
-- `/docs`
-- `/health`
-- `/v1/chat/completions`
+### Q9. "Config AST Endpoint" is greyed out, or does not change Hermes
 
-### Q5. `setup_env.ps1` fails on Windows
+It needs a loaded model: load one first, then press it again. If Hermes is already set to another provider that you chose, it leaves that alone on purpose and shows the commands to switch by hand. The result is also written to `launcher.log`.
 
-Verify that:
+### Q10. Another computer cannot reach this one
 
-- Python 3.12+ is installed
-- `uv` is installed
-- If using XPU, Intel oneAPI is installed
+Turn on **Let another computer use this machine's model** on the Hermes card in Settings. The card shows the address to use. If it still cannot connect, a firewall is usually the reason: the card offers to add a rule (Windows asks for administrator approval). There is no password on the service, so do this only on a network you trust.
 
-If needed, first update the PowerShell execution policy:
+### Q11. Why does my laptop list eight 4 GB memory modules?
 
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
+That is how its memory is built. Laptops with memory soldered to the board (LPDDR5) report each memory channel as its own device, so 32 GB shows as 8 × 4 GB. Windows reports the same.
 
-### Q6. Building the environment with `-Accel cuda` fails on Windows
+### Q12. Where are my models, and are they kept when I uninstall?
 
-Make sure CUDA Toolkit is installed and the driver version is compatible. If you are not using an NVIDIA GPU, use:
+Downloaded models are in `~/.cache/huggingface` (Windows: `%USERPROFILE%\.cache\huggingface`), the standard Hugging Face cache, shared with other Hugging Face tools. Uninstalling on Windows asks whether to remove them; on Linux they stay until you delete them. After installing again the files are still there, but the model list starts over: register them again from the Models page (they are found in the cache, so nothing is downloaded twice). The starter model is registered again on its own.
 
-```powershell
-.\backend\scripts\windows\setup_env.ps1 -Accel xpu
-```
+### Q13. I only need the API, not the window
 
-### Q7. What should I do if fine-tuning with DeepSpeed hits offload / buffer / swapper errors?
+The API is at `http://127.0.0.1:8571`, documented at `/docs`. See [Usage → Connecting other applications](usage.en.md#connecting-other-applications). On a Linux server, run the AppImage with `--headless`.
+
+### Q14. I have an NVIDIA and an Intel GPU: which one is used?
+
+NVIDIA. Setup looks for an NVIDIA GPU first and installs the CUDA build when it finds one, so a PC with an NVIDIA card and an Intel iGPU (or Arc card) uses the NVIDIA card. To use the Intel GPU instead, set the environment variable `TRUSTA_ACCEL=xpu` for your account, start the application, and use Settings → Environment → **Reinstall the environment**. ComfyUI is chosen separately: pick its card in Settings → Components.
+
+### Q15. What should I do if fine-tuning with DeepSpeed hits offload / buffer / swapper errors?
 
 The built-in DeepSpeed profiles are located at:
 

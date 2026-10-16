@@ -2,65 +2,96 @@
 
 [← Back to README](../README.md)
 
-## How to Verify After Startup
+## The application
 
-### Health Check
+The window holds the web interface: chat, the model list (download, register, convert to GGUF) and, on Linux, fine-tuning. The **Show chat** button beside the settings column opens the chat panel.
 
-#### Linux
+Closing the window does **not** stop the service: the application keeps running in the tray (the notification area on Windows), because other applications may be using its API. The tray icon's menu:
+
+| Item | Does |
+|---|---|
+| Open window | Brings the window back |
+| Open full interface in browser | Opens the same interface in your browser |
+| Settings | The settings window (below) |
+| Quit | Stops the service and the application |
+
+Only one copy runs at a time; starting it again brings the existing window forward.
+
+### Settings
+
+| Section | What it is for |
+|---|---|
+| Startup | Start automatically with Windows / when you log in (on by default), so the service is there for other applications. It does nothing at login until the first setup has been completed |
+| Ports | The application port, `8571` by default. Change it if something else uses it |
+| Environment | **Reinstall the environment**: removes the installed Python packages and GPU runtime and sets them up again. Your models are kept. Use it when setup or a load fails in a way that a restart does not fix |
+| Updates | Shows the installed version. **Check now** asks GitHub for a newer release; **Update now** downloads it, checks it, installs it and reopens the application |
+| Components | Optional third-party tools, installed for your account (below) |
+
+### Components
+
+- **Hermes Agent**: an AI agent that can use this machine's model. **Install**, then **Open**. **Config AST Endpoint** writes this application's endpoint into Hermes's settings so Hermes uses whatever model is loaded here (load a model first). If you already chose another provider in Hermes, it leaves your choice alone and shows the commands to switch by hand.
+- **ComfyUI**: image and video generation. Pick the card it should run on and press **Use this card** (or **Install and use**); the CPU is listed last as a fallback. The image and video skills start ComfyUI themselves on `127.0.0.1:8188`.
+
+**Let another computer use this machine's model** (on the Hermes card): opens the service to your local network so other computers can use this model. **There is no password**: anyone on the network can then chat with it, and load or unload models. Turn it on only on a network you trust. If a firewall blocks it, the card offers to add a rule.
+
+---
+
+## Connecting other applications
+
+The service speaks the OpenAI API. In any app or coding agent that takes an "OpenAI-compatible" provider:
+
+| Setting | Value |
+|---|---|
+| Base URL | `http://127.0.0.1:8571/v1` |
+| Model | `trusta-ast-default` (whatever model is loaded), or the loaded model's own name from `/v1/models` |
+| API key | any string; the service does not check it |
+
+The service answers with the model that is loaded and ignores the name asked for, so `trusta-ast-default` keeps working when you load a different model.
+
+---
+
+## Checking it from the command line
+
+The examples use the application's port, `8571`. A service started from source uses `SERVICE_PORT` from its `.env` (`8000` in `.env.example`).
+
+### Health check
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8571/health
 ```
-
-#### Windows (PowerShell)
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod http://127.0.0.1:8571/health
 ```
 
-### View the Available Model List
-
-#### Linux
+### Registered models
 
 ```bash
-curl http://127.0.0.1:8000/config/models
+curl http://127.0.0.1:8571/config/models
 ```
 
-#### Windows (PowerShell)
+### Load a model, then chat
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/config/models
-```
-
-### Load a Model First, Then Send a Chat Request
-
-Before chatting, call `/inference/load_model` to load a model. If the model has not finished loading, chat requests may return a model-not-ready response.
-
-#### Linux
+Loading runs in the background: `POST /inference/load_model` returns at once, and `GET /inference/status` reports `"loaded": true` when it is ready. A Hugging Face model:
 
 ```bash
-curl http://127.0.0.1:8000/inference/load_model \
+curl http://127.0.0.1:8571/inference/load_model \
   -H "Content-Type: application/json" \
-  -d '{
-    "model_name": "Qwen/Qwen3-4B"
-  }'
+  -d '{"model_name": "Qwen/Qwen3-4B"}'
 ```
 
-#### Windows (PowerShell)
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/inference/load_model `
-  -Method POST `
-  -ContentType "application/json" `
-  -Body '{"model_name":"Qwen/Qwen3-4B"}'
-```
-
-After confirming the model is fully loaded, send a chat request:
-
-#### Linux
+A GGUF file, with llama.cpp:
 
 ```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
+curl http://127.0.0.1:8571/inference/load_model \
+  -H "Content-Type: application/json" \
+  -d '{"model_path": "/path/to/model.gguf", "model_name": "my-model", "engine": "llama_server", "n_gpu_layers": -1, "n_ctx": 8192}'
+```
+
+Then:
+
+```bash
+curl http://127.0.0.1:8571/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "trusta-ast-default",
@@ -69,29 +100,30 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
-#### Windows (PowerShell)
+PowerShell:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions `
+Invoke-RestMethod http://127.0.0.1:8571/v1/chat/completions `
   -Method POST `
   -ContentType "application/json" `
   -Body '{"model":"trusta-ast-default","messages":[{"role":"user","content":"Hello"}],"stream":false}'
 ```
 
+The full API, with request bodies, is at `http://127.0.0.1:8571/docs`.
+
 ---
 
-## Common API Routes
+## API routes
 
 ### Basic
 
 - `GET /`
 - `GET /health`
-- `GET /v1/models`
+- `GET /v1/models` — the loaded model, under its own name
+- `GET /v1/models/{model}` — one model; accepts `trusta-ast-default` and the model's other aliases
 - `POST /v1/chat/completions`
 
-`/v1/models` returns the completion alias `trusta-ast-default` when a model is loaded. Use the same alias in `/v1/chat/completions` requests.
-
-### Inference Management
+### Inference management
 
 - `POST /inference/load_model`
 - `POST /inference/unload_model`
@@ -102,9 +134,9 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions `
 - `POST /inference/force_cleanup_gpu`
 - `POST /inference/chat` — **deprecated**, returns HTTP 410; use `/v1/chat/completions`
 
-### Memory Estimation
+### Memory estimation
 
-- `POST /inference/estimate_memory` — parameter-count based, for HF checkpoints
+- `POST /inference/estimate_memory` — parameter-count based, for Hugging Face checkpoints
 - `GET /inference/estimate_memory/{model_name}`
 - `POST /inference/estimate_memory/gguf` — GGUF / llama.cpp sizing
 - `POST /inference/estimate_memory/gguf/check`
@@ -114,7 +146,7 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions `
 
 For GGUF models use the `gguf` family; `/inference/estimate_memory` is parameter-count based and is not the right tool for them.
 
-### Training Management
+### Training (Linux)
 
 - `POST /training/start`
 - `GET /training/status`
@@ -125,7 +157,7 @@ For GGUF models use the `gguf` family; `/inference/estimate_memory` is parameter
 - `GET /training/{job_id}/log` — structured event backfill
 - `GET /training/{job_id}/log/stream` — SSE live log
 
-### Enumerations and Config Examples
+### Enumerations and config examples
 
 - `GET /config/quantization_types`
 - `GET /config/offload_types`
@@ -134,53 +166,39 @@ For GGUF models use the `gguf` family; `/inference/estimate_memory` is parameter
 - `GET /examples/training`
 - `GET /examples/conversion`
 
-### Model Configuration and Downloading
+### Models: configuration, download, conversion
 
 - `GET /config/models`
 - `POST /config/models/download`
 - `GET /config/models/download/{task_id}`
+- `POST /config/models/download/{task_id}/cancel`
 - `GET /config/models/downloads` — all download tasks
 - `DELETE /config/models/{label}` — accepts `?delete_files=`
 - `POST /config/models/refresh_context_lengths`
 - `POST /config/models/convert`
 - `GET /config/models/convert/{job_id}`
 
-### System Information
+### Documents (RAG)
 
-- `GET /system/resources`
+- `POST /rag/docs`
+- `GET /rag/docs`
+- `DELETE /rag/docs/{doc_id}`
+- `GET /rag/search`
 
----
+### System information
 
-## Frontend Notes
-
-The project already contains static frontend assets:
-
-- `frontend/dist`
-- `frontend/dist_client`
-
-The backend currently mounts `frontend/dist` at `/frontend/`, and the root path `/` automatically redirects to `/frontend/` when `index.html` exists.
-
-Therefore:
-
-- Node.js is not required
-- No separate frontend build is required
-- As long as the service starts successfully, you can directly open `http://127.0.0.1:8000/`
+- `GET /system/resources` — CPU, memory (with each DRAM module), GPUs and disks
 
 ---
 
-## Logging Configuration
+## Logs
 
-```dotenv
-LOG_TO_FILE=true
-LOG_DIR=<project>/logs
-LOG_FILE_NAME=service.log
-LOG_BACKUP_COUNT=14
-```
+| | Windows | Linux |
+|---|---|---|
+| Application | `%LOCALAPPDATA%\AIScalerToolkit\logs\` | `~/.local/share/ai-scaler-toolkit/logs/` |
 
-When enabled, this generates:
+- `launcher.log` — the application: startup, updates, components
+- `provision.log` — the last setup run
+- `service.log`, rotated daily as `service.log.YYYY-MM-DD` — the service and the engines it runs
 
-- `service.log`
-- `service.log.YYYY-MM-DD` (daily rotation)
-
----
-
+A service started from source writes `service.log` to the `LOG_DIR` in its `.env`.
