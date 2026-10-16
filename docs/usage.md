@@ -23,16 +23,17 @@
 |---|---|
 | Startup | 開機／登入時自動啟動（預設開啟），讓服務隨時可供其他應用程式使用。第一次設定完成前，登入時不會做任何事 |
 | Ports | 應用程式的 port，預設 `8571`。被別的程式佔用時可以改 |
+| Network | **Let another computer use this machine's model**，以及別台電腦要用的 API key（見下） |
 | Environment | **Reinstall the environment**：移除已安裝的 Python 套件與 GPU 執行環境，再重新安裝。模型會保留。設定或載入模型失敗、重開也沒用時使用 |
 | Updates | 顯示目前版本。**Check now** 向 GitHub 查有沒有新版；**Update now** 下載、檢查、安裝，並重新開啟應用程式 |
 | Components | 選用的第三方工具，裝在你自己的帳號底下（見下） |
 
+**Let another computer use this machine's model**（Settings → Network）：把服務開放給區域網路，讓其他電腦也能用這裡的模型。其他電腦只能使用 API，而且要帶那裡顯示的 **API key**；網頁介面和 API 文件只有這台電腦能開。第一次開啟時會自動產生 key。可以按 **Copy** 複製、按 **Use my own key…** 改成自己設定的 key（至少 12 個字元，可用英文字母、數字與 `. _ ~ + / = -`），或在 key 外流時按 **Make a new key** 重新產生；換了之後，還在用舊 key 的電腦要改成新的才能連。拿到 key 的人都能和模型對話、載入或卸載模型，所以只在你信任的網路上開啟。如果被防火牆擋住，那裡的 **Cannot connect?** 會提供新增規則的按鈕。
+
 ### 元件（Components）
 
-- **Hermes Agent**：可以使用這台電腦模型的 AI agent。按 **Install**，再按 **Open**。**Config AST Endpoint** 會把這個應用程式的端點寫進 Hermes 的設定，讓 Hermes 使用這裡目前載入的模型（要先載入模型）。如果你已經在 Hermes 選了別的 provider，它不會覆蓋你的選擇，而是顯示手動切換的指令。
+- **Hermes Agent**：可以使用這台電腦模型的 AI agent。按 **Install**，再按 **Open**。**Config AST Endpoint** 會把這個應用程式的端點寫進 Hermes 的設定，讓 Hermes 使用這裡目前載入的模型（要先載入模型）。如果你已經在 Hermes 選了別的 provider，它不會覆蓋你的選擇，而是顯示手動切換的指令。要讓另一台電腦的 Hermes 使用，先開啟 Settings → Network，卡片就會顯示要在那台電腦執行的指令，位址和 key 都已經帶好。
 - **ComfyUI**：圖片與影片生成。選它要跑在哪張顯示卡上，按 **Use this card**（或 **Install and use**）；CPU 列在最後，作為備用。圖片與影片的技能會自己在 `127.0.0.1:8188` 啟動 ComfyUI。
-
-**Let another computer use this machine's model**（在 Hermes 卡片上）：把服務開放給區域網路，讓其他電腦也能用這裡的模型。其他電腦只能使用 API，而且要帶卡片上顯示的 **API key**；網頁介面和 API 文件只有這台電腦能開。第一次開啟時會自動產生 key。可以按 **Copy** 複製、按 **Use my own key…** 改成自己設定的 key（至少 12 個字元，可用英文字母、數字與 `. _ ~ + / = -`），或在 key 外流時按 **Make a new key** 重新產生；換了之後，還在用舊 key 的電腦要改成新的才能連。卡片上給另一台電腦 Hermes 用的指令已經帶好 key。拿到 key 的人都能和模型對話、載入或卸載模型，所以只在你信任的網路上開啟。如果被防火牆擋住，卡片上會提供新增規則的按鈕。
 
 ---
 
@@ -44,7 +45,7 @@
 |---|---|
 | Base URL | `http://127.0.0.1:8571/v1` |
 | 模型 | `trusta-ast-default`（代表目前載入的模型），或 `/v1/models` 回傳的模型名稱 |
-| API key | 本機填任何字串（本機不需要 key）；從別台電腦連，填 Hermes 卡片上顯示的 key |
+| API key | 本機填任何字串（本機不需要 key）；從別台電腦連，填 Settings → Network 顯示的 key |
 
 服務一律用目前載入的模型回答，不看請求裡指定的名稱，所以換了模型 `trusta-ast-default` 照樣能用。
 

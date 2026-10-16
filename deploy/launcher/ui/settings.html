@@ -182,26 +182,24 @@
      one, so it should not read as one more sentence about the card above it. */
   .component .remote { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
   .component .remote .label { font-size: 13px; }
-  /* The same shape as a Settings row -- sentence on the left, switch on the right --
-     because that is what it is, moved to the card it belongs to. */
+
+  /* The network switch on the Settings tab: a Settings row's shape -- sentence on the
+     left, switch on the right -- with everything it has to say underneath. */
+  .network { padding: 20px 0; border-bottom: 1px solid var(--line); }
   /* Top-aligned, not centred. The right-hand column grows when a confirmation
      appears under the switch, and centring re-centres the whole row against the new
      height -- so turning the switch on moved the switch, which is the one thing on
      the row that should not move when it is used. */
-  .component .remote-head {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 24px;
+  .network .net-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 32px;
   }
-  .component .remote-head > div:first-child { flex: 1; min-width: 0; }
-  /* Everything the switch has to say, under it and across the whole card. It is one
-     area rather than two because it was two, and both were the wrong shape: a status
-     in a 108px column beside the switch, where each of its three sentences wrapped,
-     and a block of commands that only existed while the switch was on. */
-  .component .remote-result { margin-top: 12px; }
-  .component .remote-result .status {
-    text-align: left; margin-top: 0; font-size: 13px;
-  }
-  .component .remote-result .status:empty { display: none; }
-  .component .remote-result > .hint { margin-top: 6px; }
+  .network .net-head > div:first-child { flex: 1; min-width: 0; }
+  /* Everything the switch has to say, under it and across the whole width, rather
+     than in a narrow column beside it where every sentence wrapped. */
+  .network .net-result { margin-top: 12px; }
+  .network .net-result .status { text-align: left; margin-top: 0; font-size: 13px; }
+  .network .net-result .status:empty { display: none; }
+  .network .net-result > .hint { margin-top: 6px; }
   code {
     font-family: ui-monospace, Consolas, monospace; font-size: 12px;
     background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
@@ -333,13 +331,18 @@
         </div>
       </div>
 
-      <!-- The switch that opens the service to the network lives on the Hermes card
-           under Components, not here: it exists to be turned on while setting Hermes
-           up on another computer, and it is useless without the two commands that go
-           with it. -->
 
       <ul class="facts" id="inference-ports"></ul>
       <p class="hint" id="inference-note"></p>
+
+      <!-- Opening the service to the network, and the key other computers then need.
+           Here rather than on the Hermes card: it opens the whole API, to any
+           OpenAI-compatible tool on another computer, and someone who has not
+           installed Hermes should not have to look under it to find the switch. The
+           Hermes card keeps the commands for another computer's Hermes, and points
+           here while the switch is off. -->
+      <h2>Network</h2>
+      <div class="network" id="network"><div class="hint">Loading…</div></div>
 
       <h2>Environment</h2>
       <ul class="facts" id="environment"></ul>
@@ -434,6 +437,7 @@
       el("tab-settings").setAttribute("aria-selected", String(name === "settings"));
       el("tab-components").setAttribute("aria-selected", String(name === "components"));
       if (name === "components") { refreshComponents(); }
+      if (name === "settings") { refreshNetwork(); }
     }
     el("tab-settings").addEventListener("click", function () { showView("settings"); });
     el("tab-components").addEventListener("click", function () { showView("components"); });
@@ -452,10 +456,16 @@
       if (poller) { return; }
       if (el("tab-components").getAttribute("aria-selected") === "true") {
         refreshComponents();
+      } else if (!el("api-key-form") || el("api-key-form").hidden) {
+        // Not while a key is being typed: someone who switched away to copy one in
+        // would come back to an empty field.
+        refreshNetwork();
       }
     });
 
     // --------------------------------------------------------------- settings
+    // The Network block is on this tab, which is the one the window opens on.
+    refreshNetwork();
     api.get_state().then(function (s) {
       el("autostart").checked = s.autostart;
       el("port").value = s.service_port;
@@ -672,8 +682,9 @@
           "</div>" +
           // The same wiring, done by hand, for a Hermes that is not on this computer.
           // The button above can only reach the local one; everyone else has to type
-          // it, so the commands live next to the button rather than in Settings.
-          (c.can_point_here ? remoteHtml() : "") +
+          // it, so the commands live next to the button. The switch that makes them
+          // work is in Settings -> Network.
+          (c.can_point_here ? hermesRemoteHtml() : "") +
           '<div class="outcome" id="outcome-' + escapeHtml(c.id) + '"></div>' +
           '<pre class="log" id="log-' + escapeHtml(c.id) + '" hidden></pre>' +
         "</div>";
@@ -1025,8 +1036,8 @@
           paintFirewall();
         } else if (fwHasRule) {
           // Asked in the background, with nothing on screen waiting. Repainting on a
-          // "no" would rebuild the cards seconds after every visit, to change nothing.
-          refreshComponents();
+          // "no" would redraw the block seconds after every visit, to change nothing.
+          paintNetwork();
         }
       }, function () {
         fwAsking = false;
@@ -1054,14 +1065,11 @@
       return firewallHtml();
     }
 
-    function remoteHtml() {
-      if (!netInfo) { return ""; }
-      // One place the switch reports from, holding both what it did and what to do
-      // next. They used to be two: a status wedged under the switch in a 108px column
-      // where every one of its three sentences wrapped to two lines, and a block of
-      // commands that existed only while the switch was on. So turning it on moved
-      // the switch, and turning it off left the gap where the commands had been.
-      // Down here there is a full line to write on and nothing above to push.
+    // The Network block on the Settings tab: the switch, what it means, and what
+    // follows from it -- the address and key while it is on, a leftover firewall rule
+    // while it is off.
+    function networkHtml() {
+      if (!netInfo) { return '<div class="hint">Could not read the network.</div>'; }
       var body;
       if (!netInfo.lan_access) {
         // Off, but a rule we added may still be open. It is not removed with the
@@ -1070,49 +1078,85 @@
         // removes it. A rule left standing means whatever binds this port next is
         // reachable from the network, which is not a thing to leave unsaid.
         body = leftoverRuleHtml();
-      } else if (netInfo.commands && netInfo.commands.length) {
-        // One copy button per line rather than one for the block. They are separate
-        // commands and are re-run separately -- the first again after the address
-        // changes, the second after switching Hermes to something else -- and the
-        // first carries quoted JSON, which is the line most likely to arrive damaged
-        // if it is pasted in with others.
-        body = apiKeyHtml() +
-          "Run these on the other computer, where Hermes is installed:" +
-          netInfo.commands.map(function (c, i) {
-            return '<div class="cmd"><code>' + escapeHtml(c) + "</code>" +
-              '<button class="copy" data-copy="' + i + '">Copy</button></div>';
-          }).join("") + fwBlockHtml();
+      } else if (netInfo.base_url) {
+        body = "Other computers use <code>" + escapeHtml(netInfo.base_url) + "</code>" +
+          apiKeyHtml() +
+          "To set up Hermes on another computer, see the commands on the Hermes card " +
+          "under Components." + fwBlockHtml();
       } else {
         // On, but this machine has no address another one could use -- loopback only,
         // or no network at all. Saying so beats showing a URL that cannot work.
         body = "It is on, but this computer has no network address others could reach.";
       }
       return '' +
-        '<div class="remote">' +
-          '<div class="remote-head">' +
-            '<div><div class="label">Let another computer use this machine&#39;s model</div>' +
-            // Said plainly, and above the switch rather than below it: what another
-            // computer gets, what it needs, and what it never gets. The key is not
-            // the whole of it -- anyone given the key can use the model and load or
-            // unload others -- so the network still matters.
-            '<div class="hint">Off, the service answers only this computer. On, other ' +
-            'computers on the same network can use its API with the <strong>API key' +
-            '</strong> below — anyone with the key can use the model you have loaded, ' +
-            'and load or unload others. This settings page and the web interface stay ' +
-            'on this computer. Turn it on for a network you trust.</div></div>' +
-            '<div class="control"><label class="switch">' +
-              '<input type="checkbox" id="lan-access"' +
-              (netInfo.lan_access ? " checked" : "") + ">" +
-              '<span class="slider"></span></label></div>' +
-          "</div>" +
-          '<div class="remote-result">' +
-            // Never empty: off is a state worth naming, and an empty area here is
-            // where the commands used to be, which read as something missing.
-            '<div class="status ' + lanState(netInfo.lan_access).cls +
-            '" id="lan-status">' + lanState(netInfo.lan_access).text + "</div>" +
-            (body ? '<div class="hint">' + body + "</div>" : "") +
-          "</div>" +
+        '<div class="net-head">' +
+          '<div><div class="label">Let another computer use this machine&#39;s model</div>' +
+          // Said plainly, and above the switch rather than below it: what another
+          // computer gets, what it needs, and what it never gets. The key is not the
+          // whole of it -- anyone given the key can use the model and load or unload
+          // others -- so the network still matters.
+          '<div class="hint">Off, the service answers only this computer. On, other ' +
+          'computers on the same network can use its API with the <strong>API key' +
+          '</strong> shown here — anyone with the key can use the model you have ' +
+          'loaded, and load or unload others. This settings page and the web ' +
+          'interface stay on this computer. Turn it on for a network you trust.</div></div>' +
+          '<div class="control"><label class="switch">' +
+            '<input type="checkbox" id="lan-access"' +
+            (netInfo.lan_access ? " checked" : "") + ">" +
+            '<span class="slider"></span></label></div>' +
+        "</div>" +
+        '<div class="net-result">' +
+          // Never empty: off is a state worth naming.
+          '<div class="status ' + lanState(netInfo.lan_access).cls +
+          '" id="lan-status">' + lanState(netInfo.lan_access).text + "</div>" +
+          (body ? '<div class="hint">' + body + "</div>" : "") +
         "</div>";
+    }
+
+    function paintNetwork() {
+      el("network").innerHTML = networkHtml();
+      var lan = el("lan-access");
+      if (lan) { lan.addEventListener("change", toggleLan); }
+      wireApiKey();
+      wireFirewall();
+    }
+
+    function refreshNetwork() {
+      return api.network_details().then(function (n) {
+        netInfo = n || null;
+        servedModel = (n && n.model) || "";
+        paintNetwork();
+      }, function () {
+        netInfo = null;
+        paintNetwork();
+      });
+    }
+
+    // On the Hermes card: the commands for a Hermes on another computer, which carry
+    // the address and the key. While the switch is off there is nothing they could
+    // reach, so the card says where the switch is instead.
+    function hermesRemoteHtml() {
+      if (!netInfo) { return ""; }
+      var body;
+      if (!netInfo.lan_access) {
+        body = "To use this model from Hermes on another computer, first turn on " +
+          '<button class="link" data-goto="settings">Settings → Network</button>.';
+      } else if (netInfo.commands && netInfo.commands.length) {
+        // One copy button per line rather than one for the block. They are separate
+        // commands and are re-run separately -- the first again after the address or
+        // key changes, the second after switching Hermes to something else -- and the
+        // first carries quoted JSON, which is the line most likely to arrive damaged
+        // if it is pasted in with others.
+        body = "Run these on the other computer, where Hermes is installed:" +
+          netInfo.commands.map(function (c, i) {
+            return '<div class="cmd"><code>' + escapeHtml(c) + "</code>" +
+              '<button class="copy" data-copy="' + i + '">Copy</button></div>';
+          }).join("");
+      } else {
+        body = "This computer has no network address another computer could reach.";
+      }
+      return '<div class="remote"><div class="label">Hermes on another computer</div>' +
+        '<div class="hint">' + body + "</div></div>";
     }
 
     // The key, a copy button, and the two ways to change it. Changing it restarts the
@@ -1145,8 +1189,8 @@
           setStatus("api-key-status", r.error, "err");
           return;
         }
-        // Redrawn, because the commands below carry the key too.
-        refreshComponents().then(function () {
+        // Redrawn, because the address and key above come from the same answer.
+        refreshNetwork().then(function () {
           setStatus("api-key-status",
                     "Changed. Give the new key to the other computers using this one.", "warn");
         });
@@ -1256,10 +1300,9 @@
         // would be another three and a half seconds for something already known.
         fwHasRule = !!r.has_rule;
         if (netInfo && !netInfo.lan_access) {
-          // The whole notice has to go, not just the button inside it, so the card is
-          // rebuilt. Affordable again now that reading the network no longer waits on
-          // the firewall -- which is the only reason that read was ever expensive.
-          refreshComponents();
+          // The whole notice has to go, not just the button inside it, so the block
+          // is redrawn.
+          paintNetwork();
           return;
         }
         paintFirewall();
@@ -1282,12 +1325,12 @@
           setStatus("lan-status", r.error, "err");
           return;
         }
-        // The commands under the switch are exactly what the switch decides, so the
-        // block is redrawn -- which replaces the switch as well. The redraw already
-        // writes the state below it, from the same lanState, so there is nothing left
-        // to say here: a line written afterwards could only differ from the one the
-        // page would show if it were reopened, which is how the two came to disagree.
-        refreshComponents();
+        // What is under the switch is exactly what the switch decides, so the block is
+        // redrawn -- which replaces the switch as well. The redraw already writes the
+        // state below it, from the same lanState, so there is nothing left to say
+        // here: a line written afterwards could only differ from the one the page
+        // would show if it were reopened, which is how the two came to disagree.
+        refreshNetwork();
       });
     }
 
@@ -1339,16 +1382,16 @@
         // Re-wired on every render rather than once at load: the card it lives on is
         // rebuilt from scratch each time, so the element the last listener was bound
         // to is no longer in the page.
-        var lan = el("lan-access");
-        if (lan) { lan.addEventListener("change", toggleLan); }
+        Array.prototype.forEach.call(
+          el("component-list").querySelectorAll("[data-goto]"), function (b) {
+            b.addEventListener("click", function () { showView(b.getAttribute("data-goto")); });
+          });
         Array.prototype.forEach.call(
           el("component-list").querySelectorAll("[data-copy]"), function (b) {
             b.addEventListener("click", function () {
               copyCommand(b, netInfo.commands[Number(b.getAttribute("data-copy"))]);
             });
           });
-        wireFirewall();
-        wireApiKey();
         if (el("comfy-body")) { loadComfy(false); }
         // A page opened while an install is already running picks it up rather than
         // showing a stale idle card.

@@ -23,16 +23,17 @@ Only one copy runs at a time; starting it again brings the existing window forwa
 |---|---|
 | Startup | Start automatically with Windows / when you log in (on by default), so the service is there for other applications. It does nothing at login until the first setup has been completed |
 | Ports | The application port, `8571` by default. Change it if something else uses it |
+| Network | **Let another computer use this machine's model**, and the API key other computers need (below) |
 | Environment | **Reinstall the environment**: removes the installed Python packages and GPU runtime and sets them up again. Your models are kept. Use it when setup or a load fails in a way that a restart does not fix |
 | Updates | Shows the installed version. **Check now** asks GitHub for a newer release; **Update now** downloads it, checks it, installs it and reopens the application |
 | Components | Optional third-party tools, installed for your account (below) |
 
+**Let another computer use this machine's model** (Settings → Network): opens the service to your local network so other computers can use this model. Other computers get the API only, and only with the **API key** shown there; the web interface and the API docs stay on this computer. The key is made the first time you turn this on. **Copy** it, **Use my own key…** to set one you choose (at least 12 characters: letters, digits and `. _ ~ + / = -`), or **Make a new key** if it was shared too widely; other computers using the old key then stop working until they get the new one. Anyone with the key can chat with the model and load or unload models, so turn this on only on a network you trust. If a firewall blocks it, **Cannot connect?** there offers to add a rule.
+
 ### Components
 
-- **Hermes Agent**: an AI agent that can use this machine's model. **Install**, then **Open**. **Config AST Endpoint** writes this application's endpoint into Hermes's settings so Hermes uses whatever model is loaded here (load a model first). If you already chose another provider in Hermes, it leaves your choice alone and shows the commands to switch by hand.
+- **Hermes Agent**: an AI agent that can use this machine's model. **Install**, then **Open**. **Config AST Endpoint** writes this application's endpoint into Hermes's settings so Hermes uses whatever model is loaded here (load a model first). If you already chose another provider in Hermes, it leaves your choice alone and shows the commands to switch by hand. For Hermes on another computer, turn on Settings → Network; the card then shows the commands to run there, with the address and key already in them.
 - **ComfyUI**: image and video generation. Pick the card it should run on and press **Use this card** (or **Install and use**); the CPU is listed last as a fallback. The image and video skills start ComfyUI themselves on `127.0.0.1:8188`.
-
-**Let another computer use this machine's model** (on the Hermes card): opens the service to your local network so other computers can use this model. Other computers get the API only, and only with the **API key** the card shows; the web interface and the API docs stay on this computer. The key is made the first time you turn this on. **Copy** it, **Use my own key…** to set one you choose (at least 12 characters: letters, digits and `. _ ~ + / = -`), or **Make a new key** if it was shared too widely; other computers using the old key then stop working until they get the new one. The commands the card shows for another computer's Hermes already include the key. Anyone with the key can chat with the model and load or unload models, so turn this on only on a network you trust. If a firewall blocks it, the card offers to add a rule.
 
 ---
 
@@ -44,7 +45,7 @@ The service speaks the OpenAI API. In any app or coding agent that takes an "Ope
 |---|---|
 | Base URL | `http://127.0.0.1:8571/v1` |
 | Model | `trusta-ast-default` (whatever model is loaded), or the loaded model's own name from `/v1/models` |
-| API key | any string on this computer, which needs none; from another computer, the key shown on the Hermes card |
+| API key | any string on this computer, which needs none; from another computer, the key shown in Settings → Network |
 
 The service answers with the model that is loaded and ignores the name asked for, so `trusta-ast-default` keeps working when you load a different model.
 
