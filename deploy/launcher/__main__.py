@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -393,6 +394,22 @@ class WindowApi:
         self._launcher.open_settings()
 
 
+# What a key may be made of. Sent as an HTTP header and pasted into a single-quoted
+# shell argument on the other computer, so no spaces, no quotes, nothing a shell or a
+# header would mangle -- the characters token_urlsafe uses, plus a few more people type.
+_API_KEY_CHARS = re.compile(r"[A-Za-z0-9._~+/=-]+")
+API_KEY_MIN_LENGTH = 12
+
+
+def _api_key_problem(value: str) -> str:
+    """Why a key the user typed cannot be used, or "" when it can."""
+    if len(value) < API_KEY_MIN_LENGTH:
+        return f"Use at least {API_KEY_MIN_LENGTH} characters."
+    if not _API_KEY_CHARS.fullmatch(value):
+        return "Use letters, digits and . _ ~ + / = - only, without spaces or quotes."
+    return ""
+
+
 class SettingsApi:
     """Bridge exposed to the settings page. Every method is called from JavaScript."""
 
@@ -558,15 +575,17 @@ class SettingsApi:
         The service binds where .env says, so this rewrites that one key and restarts
         it -- a listening socket's address cannot be changed under it.
 
-        There is no authentication on this API. Anyone who can reach the port can use
-        the loaded model, read the settings and load or unload. That is the user's call
-        to make, which is why this exists, and why the page states it plainly rather
-        than describing the switch as "network mode".
+        Other machines get the API only, and only with the key: the service checks
+        both (service/remote_access.py in the backend). The key is made here the first
+        time the switch goes on, so there is never a moment the port is open without
+        one.
         """
         enabled = bool(enabled)
         previous = bool(state.get("lan_access"))
         if enabled == previous:
             return {"ok": True, **self.network_details()}
+        if enabled and not state.get("api_key"):
+            state.set("api_key", config.new_api_key())
 
         # Written first because bind_host reads them, and put back if the restart does
         # not happen. A failure that leaves them written is not a failure: the page
@@ -592,6 +611,44 @@ class SettingsApi:
                  "enabled" if enabled else "disabled", config.bind_host())
         return {"ok": True, **self.network_details()}
 
+    def regenerate_api_key(self) -> dict[str, Any]:
+        """Replace the key with a new random one -- for a key that has been shared too
+        widely. Every other computer set up with the old one has to be given the new."""
+        return self._change_api_key(config.new_api_key())
+
+    def set_api_key(self, value: str) -> dict[str, Any]:
+        """Use a key the user chose, for one they already have on the other computers."""
+        value = str(value or "").strip()
+        problem = _api_key_problem(value)
+        if problem:
+            return {"ok": False, "error": problem, **self.network_details()}
+        return self._change_api_key(value)
+
+    def _change_api_key(self, value: str) -> dict[str, Any]:
+        """Store the key, and restart the service if it is the one in force.
+
+        The service reads it from its environment, which only a restart replaces. While
+        the switch is off nothing is listening for it, so nothing is restarted.
+        """
+        previous = str(state.get("api_key") or "")
+        if value == previous:
+            return {"ok": True, **self.network_details()}
+        state.set("api_key", value)
+        if state.get("lan_access"):
+            try:
+                self._launcher.service.restart()
+            except Exception as exc:  # noqa: BLE001 - reported, not raised at the page
+                log.exception("could not restart the service after changing the API key")
+                # Put back, for the same reason set_lan_access does: the old key is the
+                # one still in force if the service did not come back with the new.
+                state.set("api_key", previous)
+                with contextlib.suppress(Exception):
+                    self._launcher.service.restart()
+                return {"ok": False, "error": f"Could not restart the service: {exc}",
+                        **self.network_details()}
+        log.info("API key for other computers changed")
+        return {"ok": True, **self.network_details()}
+
     def network_details(self) -> dict[str, Any]:
         """What another machine would need, and whether it can be used yet.
 
@@ -604,8 +661,12 @@ class SettingsApi:
         address = config.lan_address()
         enabled = bool(state.get("lan_access"))
         base = f"http://{address}:{port}/v1" if address else None
+        api_key = str(state.get("api_key") or "")
         return {
             "lan_access": enabled,
+            # Shown on this machine's own settings page, which only this machine can
+            # open: the service refuses the web interface to everyone else.
+            "api_key": api_key if enabled else "",
             "address": address or "",
             "base_url": base or "",
             # What a component pointed here would be given. Reported so the card can
@@ -617,7 +678,7 @@ class SettingsApi:
             "model": self._loaded_model_id(port) or "",
             # Built from the same definition the button writes, so the two cannot
             # describe different endpoints again -- see components.hermes_provider.
-            "commands": components.hermes_commands(base) if base and enabled else [],
+            "commands": components.hermes_commands(base, api_key) if base and enabled else [],
             # Only ever about the rule this application adds, never about whether the
             # port can be reached -- nothing on this side can establish that. See
             # launcher/firewall.py for the measurements behind that.

@@ -64,7 +64,7 @@ Point any app that accepts an "OpenAI-compatible" provider at:
 |---|---|
 | Base URL | `http://127.0.0.1:8571/v1` |
 | Model | `trusta-ast-default` (whatever model is loaded) |
-| API key | any string |
+| API key | any string on this computer; from another computer, the key shown in Settings |
 
 Hermes Agent, once installed from Settings → Components, is set up with one button: **Config AST Endpoint**. More in [Usage](docs/usage.en.md).
 

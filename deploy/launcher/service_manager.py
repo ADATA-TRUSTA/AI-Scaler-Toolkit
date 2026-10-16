@@ -427,9 +427,18 @@ class ServiceManager:
             # this machine, where loopback answers.
             "SERVICE_HOST": config.bind_host(),
             "SERVICE_PORT": str(self.port),
+            # Only in the environment, never written to the .env: the key lives in the
+            # launcher's state, and a copy in a second file is one that goes stale when
+            # it is changed in Settings. The process environment wins over the .env,
+            # which the backend loads without override.
+            "SERVICE_API_KEY": config.service_api_key(),
         }
         merged = os.environ.copy()
         merged.update({k: v for k, v in env.items() if v})
+        # Set even when empty. Skipped like the others, a SERVICE_API_KEY left in the
+        # launcher's own environment would reach the service and open it with a key
+        # nobody here chose.
+        merged["SERVICE_API_KEY"] = env["SERVICE_API_KEY"]
 
         # The pip-installed CUDA toolkit, for vLLM's first-use kernel compilation --
         # see config.wheel_cuda_home. In the environment rather than the .env: it is

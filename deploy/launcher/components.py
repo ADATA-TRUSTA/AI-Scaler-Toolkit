@@ -1101,7 +1101,7 @@ HERMES_MODEL_ALIAS = "trusta-ast-default"
 HERMES_STOCK_PROVIDERS = ("openrouter", "custom", "auto")
 
 
-def hermes_provider(service_url: str) -> dict[str, object]:
+def hermes_provider(service_url: str, api_key: str = "") -> dict[str, object]:
     """The endpoint this application asks Hermes to keep, as Hermes stores it.
 
     One definition, written twice over: once by the button, a key at a time through
@@ -1115,13 +1115,22 @@ def hermes_provider(service_url: str) -> dict[str, object]:
     is serving on every request, so the model below is a stable name for "whatever is
     loaded there" rather than the id of whatever happened to be loaded when this was
     written.
+
+    api_key is for a Hermes on another computer, which the service asks for one. The
+    button on this machine passes none: loopback needs no key, and a key written into
+    this machine's Hermes would be one more copy to go stale when it is changed.
     """
-    return {
+    provider: dict[str, object] = {
         "name": HERMES_PROVIDER_NAME,
         "base_url": service_url,
         "discover_models": True,
         "model": HERMES_MODEL_ALIAS,
     }
+    if api_key:
+        # Hermes sends it as "Authorization: Bearer", on chat and on the /v1/models
+        # probe discover_models makes -- read from hermes_cli/config_providers.py.
+        provider["api_key"] = api_key
+    return provider
 
 
 def hermes_selection() -> list[tuple[str, str]]:
@@ -1141,7 +1150,7 @@ def _as_config_value(value: object) -> str:
     return str(value).lower() if isinstance(value, bool) else str(value)
 
 
-def hermes_commands(service_url: str) -> list[str]:
+def hermes_commands(service_url: str, api_key: str = "") -> list[str]:
     """The same endpoint, as commands to run on a Hermes somewhere else.
 
     Three, not six: `hermes config set` takes one key and one value, but the value may
@@ -1155,7 +1164,7 @@ def hermes_commands(service_url: str) -> list[str]:
     """
     import json
 
-    provider = json.dumps(hermes_provider(service_url), separators=(",", ":"))
+    provider = json.dumps(hermes_provider(service_url, api_key), separators=(",", ":"))
     return [f"hermes config set providers.{HERMES_PROVIDER_ID} '{provider}'",
             *(f"hermes config set {key} {value}" for key, value in hermes_selection())]
 

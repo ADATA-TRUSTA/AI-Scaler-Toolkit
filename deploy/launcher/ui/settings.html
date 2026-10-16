@@ -212,6 +212,18 @@
   .cmd { display: flex; align-items: flex-start; gap: 8px; margin-top: 5px; }
   .cmd code { flex: 1; min-width: 0; margin-top: 0; }
   .cmd .copy { flex: none; padding: 2px 10px; font-size: 12px; min-width: 66px; }
+  /* The key other computers send. Its own block above the commands, which already
+     carry it, because it is also what any other OpenAI-style client needs. */
+  .api-key { margin: 4px 0 10px; }
+  .api-key .component-actions { margin-top: 6px; }
+  .api-key .key-edit { display: flex; gap: 8px; margin-top: 6px; }
+  .api-key .key-edit input {
+    flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--bg); color: var(--fg); font-family: ui-monospace, Consolas, monospace;
+    font-size: 12px;
+  }
+  .api-key .key-edit input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+  .api-key .status { text-align: left; margin-top: 6px; }
   /* Closed by default: on most machines there is nothing to do here, and an open
      block of administrator commands would read as a step rather than a remedy. */
   .troubleshoot { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
@@ -1064,7 +1076,8 @@
         // changes, the second after switching Hermes to something else -- and the
         // first carries quoted JSON, which is the line most likely to arrive damaged
         // if it is pasted in with others.
-        body = "Run these on the other computer, where Hermes is installed:" +
+        body = apiKeyHtml() +
+          "Run these on the other computer, where Hermes is installed:" +
           netInfo.commands.map(function (c, i) {
             return '<div class="cmd"><code>' + escapeHtml(c) + "</code>" +
               '<button class="copy" data-copy="' + i + '">Copy</button></div>';
@@ -1078,15 +1091,15 @@
         '<div class="remote">' +
           '<div class="remote-head">' +
             '<div><div class="label">Let another computer use this machine&#39;s model</div>' +
-            // Said plainly, and above the switch rather than below it. There is no
-            // password on this API: whoever can reach the port can use the loaded
-            // model and load or unload it. Calling this "network mode" and leaving
-            // that in a tooltip would be the kind of wording that gets someone's
-            // machine used by a stranger.
-            '<div class="hint">Off, the service answers only this computer. On, any ' +
-            'computer on the same network can use it — <strong>there is no password' +
-            '</strong>, so anyone who can reach it can use the model you have loaded, ' +
-            'and load or unload others. Turn it on for a network you trust.</div></div>' +
+            // Said plainly, and above the switch rather than below it: what another
+            // computer gets, what it needs, and what it never gets. The key is not
+            // the whole of it -- anyone given the key can use the model and load or
+            // unload others -- so the network still matters.
+            '<div class="hint">Off, the service answers only this computer. On, other ' +
+            'computers on the same network can use its API with the <strong>API key' +
+            '</strong> below — anyone with the key can use the model you have loaded, ' +
+            'and load or unload others. This settings page and the web interface stay ' +
+            'on this computer. Turn it on for a network you trust.</div></div>' +
             '<div class="control"><label class="switch">' +
               '<input type="checkbox" id="lan-access"' +
               (netInfo.lan_access ? " checked" : "") + ">" +
@@ -1100,6 +1113,77 @@
             (body ? '<div class="hint">' + body + "</div>" : "") +
           "</div>" +
         "</div>";
+    }
+
+    // The key, a copy button, and the two ways to change it. Changing it restarts the
+    // service and breaks every other computer still using the old one, which is why
+    // neither happens on a single click of something that looks like "Copy".
+    function apiKeyHtml() {
+      return '<div class="api-key">API key — other computers send it as ' +
+        '<code>Authorization: Bearer</code>; this computer does not need it.' +
+        '<div class="cmd"><code id="api-key-value">' + escapeHtml(netInfo.api_key || "") +
+        '</code><button class="copy" id="api-key-copy">Copy</button></div>' +
+        '<div class="component-actions">' +
+          '<button id="api-key-edit">Use my own key…</button>' +
+          '<button id="api-key-new">Make a new key</button></div>' +
+        '<div class="key-edit" id="api-key-form" hidden>' +
+          '<input type="text" id="api-key-input" spellcheck="false" autocomplete="off" ' +
+          'placeholder="At least 12 characters: letters, digits, . _ ~ + / = -">' +
+          '<button id="api-key-save">Save</button>' +
+          '<button id="api-key-cancel">Cancel</button></div>' +
+        '<div class="status" id="api-key-status"></div></div>';
+    }
+
+    function changeApiKey(call, busyText) {
+      Array.prototype.forEach.call(
+        document.querySelectorAll(".api-key button"), function (b) { b.disabled = true; });
+      setStatus("api-key-status", busyText, "muted");
+      call().then(function (r) {
+        if (!r.ok) {
+          Array.prototype.forEach.call(
+            document.querySelectorAll(".api-key button"), function (b) { b.disabled = false; });
+          setStatus("api-key-status", r.error, "err");
+          return;
+        }
+        // Redrawn, because the commands below carry the key too.
+        refreshComponents().then(function () {
+          setStatus("api-key-status",
+                    "Changed. Give the new key to the other computers using this one.", "warn");
+        });
+      }, function () {
+        Array.prototype.forEach.call(
+          document.querySelectorAll(".api-key button"), function (b) { b.disabled = false; });
+        setStatus("api-key-status", "Nothing was changed.", "err");
+      });
+    }
+
+    function wireApiKey() {
+      if (!el("api-key-copy")) { return; }
+      el("api-key-copy").addEventListener("click", function () {
+        copyCommand(el("api-key-copy"), netInfo.api_key || "");
+      });
+      el("api-key-edit").addEventListener("click", function () {
+        el("api-key-form").hidden = false;
+        el("api-key-input").focus();
+      });
+      el("api-key-cancel").addEventListener("click", function () {
+        el("api-key-form").hidden = true;
+        el("api-key-input").value = "";
+        setStatus("api-key-status", "", "muted");
+      });
+      el("api-key-save").addEventListener("click", function () {
+        var value = el("api-key-input").value.trim();
+        changeApiKey(function () { return api.set_api_key(value); }, "Restarting the service…");
+      });
+      el("api-key-input").addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { el("api-key-save").click(); }
+      });
+      el("api-key-new").addEventListener("click", function () {
+        if (!window.confirm("Make a new key? Other computers using the current one will " +
+                            "stop working until they are given the new one.")) { return; }
+        changeApiKey(function () { return api.regenerate_api_key(); },
+                     "Restarting the service…");
+      });
     }
 
     // Two ways of copying, because this page runs inside two different embedded
@@ -1264,6 +1348,7 @@
             });
           });
         wireFirewall();
+        wireApiKey();
         if (el("comfy-body")) { loadComfy(false); }
         // A page opened while an install is already running picks it up rather than
         // showing a stale idle card.

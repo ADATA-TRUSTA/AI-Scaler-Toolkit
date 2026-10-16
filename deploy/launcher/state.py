@@ -59,11 +59,15 @@ DEFAULTS: dict[str, Any] = {
     "compact_size": None,
     "expanded_size": None,
     # Whether the service accepts connections from other machines on the network.
-    # Off, and deliberately: the API has no authentication, so binding it beyond
-    # loopback hands everyone on the network the model, the settings and the ability
-    # to load and unload. That is a reasonable thing to want and not a reasonable
-    # default, so it is a decision the user makes once, knowing what it means.
+    # Off, and deliberately: even with the key below, opening a port is a decision
+    # the user makes once, knowing what it means, not a default.
     "lan_access": False,
+    # The key another machine must send (Authorization: Bearer) while lan_access is
+    # on. Made the first time the switch is turned on and kept after it is turned
+    # off, so turning it back on does not break the other computers already set up
+    # with it. The user can replace it with one of their own, or have a new one made.
+    # This machine never needs it: the service lets loopback through without one.
+    "api_key": "",
     # The label of the starter model once it is registered here -- see
     # starter_model.py. Set once and never cleared, so a model the user deletes stays
     # deleted instead of coming back on the next start.

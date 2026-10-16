@@ -64,7 +64,7 @@ Install AI Scaler Toolkit on this PC for me: https://github.com/ADATA-TRUSTA/AI-
 |---|---|
 | Base URL | `http://127.0.0.1:8571/v1` |
 | 模型 | `trusta-ast-default`（代表目前載入的模型） |
-| API key | 任何字串 |
+| API key | 本機填任何字串；從別台電腦連，填設定頁顯示的 key |
 
 Hermes Agent 從 Settings → Components 裝好後，按一個按鈕就設定完成：**Config AST Endpoint**。更多內容見[使用說明](docs/usage.md)。
 

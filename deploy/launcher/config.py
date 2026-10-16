@@ -524,6 +524,35 @@ def bind_host() -> str:
     return "0.0.0.0" if state.get("lan_access") else SERVICE_HOST  # noqa: S104 - the point
 
 
+def new_api_key() -> str:
+    """A random key: 32 bytes, URL-safe, with a prefix that says what it is for."""
+    import secrets
+
+    return "ast-" + secrets.token_urlsafe(32)
+
+
+def service_api_key() -> str:
+    """The key the service demands from other machines, or "" while it is not open to them.
+
+    Empty while the switch is off: the service then listens on loopback alone, and an
+    empty key is what makes it refuse anything else anyway -- so a key left in state
+    from an earlier session cannot open anything by itself.
+
+    Made here when the switch is on and there is none, which is what an update from a
+    version without keys looks like. Without it, every other computer would be
+    refused until someone found the switch and turned it off and on again.
+    """
+    from . import state
+
+    if not state.get("lan_access"):
+        return ""
+    key = str(state.get("api_key") or "")
+    if not key:
+        key = new_api_key()
+        state.set("api_key", key)
+    return key
+
+
 def lan_address() -> str | None:
     """This machine's address on the network, or None when it has none.
 

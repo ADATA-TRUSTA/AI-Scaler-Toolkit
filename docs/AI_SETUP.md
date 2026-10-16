@@ -13,9 +13,9 @@ Work through the steps in order. Tell the user what you are doing in plain words
   system packages, in a dialog on their screen. Ask the user to answer it. Do not run `sudo` yourself unless the user
   explicitly asks you to and types the password themselves.
 - **Do not install or change GPU drivers** without asking. A driver update can break other software on the PC.
-- **Do not open the service to the network.** It listens on `127.0.0.1` only, and it has no password: anyone who can
-  reach it can use the model and load or unload models. Leave "Let another computer use this machine's model" off
-  unless the user asks for it, and if they do, tell them that.
+- **Do not open the service to the network.** It listens on `127.0.0.1` only. Leave "Let another computer use this
+  machine's model" off unless the user asks for it. If they do, tell them that other computers then need the API key
+  shown on the Hermes card, and that anyone with that key can use the model and load or unload models.
 - **Tell the user about the download first.** The installer is small (about 30 MB on Windows, 160 MB on Linux), but
   the first launch downloads the GPU runtime and Python packages, about 6-10 GB, plus a small starter model. Confirm
   that is fine, especially on a metered connection.
@@ -125,7 +125,7 @@ continues where it stopped; it installs only what is missing.
 - **Other apps and coding agents** can use it as an OpenAI-compatible provider:
   - base URL: `http://127.0.0.1:8571/v1`
   - model: `trusta-ast-default` (whatever model is loaded) or the loaded model's name
-  - API key: any string; the service does not check it
+  - API key: any string on this computer; another computer needs the key shown on the Hermes card
 - **Hermes Agent and ComfyUI** can be installed from Settings → Components. "Config AST Endpoint" points Hermes at
   this machine's model.
 - **Updates**: Settings → Updates → Check now, then Update now.
