@@ -288,6 +288,28 @@ window.__hostOpenSettings = function () {
 window.dispatchEvent(new Event("hostready"));
 """
 
+# F5 and Ctrl+R reload the page, as they do in a browser. Neither webview does it on its
+# own: WebView2 has its browser shortcuts off unless pywebview runs in debug mode, and
+# pywebview binds nothing to them under WebKitGTK -- so in the window the keys did
+# nothing, while the same interface in a browser reloaded. Guarded so a page that gets
+# this twice (every load re-injects it) still reloads once.
+#
+# Not on the setup screen. It is a local file the launcher writes progress into as it
+# goes, and reloading it would wipe what it shows until the next update arrived.
+RELOAD_KEYS = """
+(function () {
+  if (window.__hostReloadKeys) { return; }
+  window.__hostReloadKeys = true;
+  window.addEventListener("keydown", function (e) {
+    var reload = e.key === "F5" ||
+      ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "r" || e.key === "R"));
+    if (!reload) { return; }
+    e.preventDefault();
+    window.location.reload();
+  }, true);
+})();
+"""
+
 log = applog.get("main")
 
 
@@ -1021,6 +1043,12 @@ class Launcher:
     def _inject_host_hook(self) -> None:
         """Re-injected on every page load, because navigation clears it."""
         self._js(HOST_HOOK)
+        # The interface only: the window starts on the setup screen, a file, and is
+        # navigated to the service once it answers -- see RELOAD_KEYS.
+        with contextlib.suppress(Exception):
+            url = self.window.get_current_url() if self.window is not None else ""
+            if str(url or "").startswith(("http://", "https://")):
+                self._js(RELOAD_KEYS)
 
     def show_window(self) -> None:
         if self.window is None:
@@ -1098,6 +1126,11 @@ class Launcher:
                 window.evaluate_js(
                     f"window.setBrandBackground({_js_string(brand.page_background())})"
                 )
+            # The settings page rebuilds itself from the bridge on load, so reloading it
+            # is safe -- and is how someone gets it to look again after a change made
+            # elsewhere.
+            with contextlib.suppress(Exception):
+                window.evaluate_js(RELOAD_KEYS)
 
         window.events.loaded += _paint
 
@@ -2125,6 +2158,12 @@ def main(argv: list[str] | None = None) -> int:
     # nothing. WebView2's private mode keeps localStorage, so Windows is left as is.
     storage = {} if config.IS_WINDOWS else {
         "private_mode": False, "storage_path": str(config.data_dir() / "webview")}
+    # The interface exports configurations as downloads (inference and training
+    # settings, as JSON). pywebview refuses every download unless this is set -- on
+    # Windows it cancels them, under WebKitGTK it never attaches a handler -- so
+    # Export did nothing in the window and worked in a browser. With it, pywebview asks
+    # where to save with the system's own dialog, starting in Downloads.
+    webview.settings["ALLOW_DOWNLOADS"] = True
     log.info("entering the window loop")
     try:
         webview.start(launcher.bootstrap, debug=False, **storage)
