@@ -22,9 +22,11 @@ prompt, on a click, for one command the user can read first.
 from __future__ import annotations
 
 import base64
+import os
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 from . import applog, config
 
@@ -79,29 +81,135 @@ def has_rule(port: int) -> bool:
     return out is not None and out.strip() == "yes"
 
 
-def add_command(port: int, *, temporary: bool = False) -> str:
+# The rules that stand in for a block rule Windows made on the service's interpreter --
+# see add_command. Grouped, so they are found again by what they are rather than by a
+# name a person might also have used.
+GROUP = "AI Scaler Toolkit"
+_NARROWED = "AI Scaler Toolkit: keeps blocking"
+
+
+def service_programs() -> list[str]:
+    """The executables Windows sees listening when the service runs, lower case.
+
+    The service runs from a virtual environment, whose python.exe only starts the
+    interpreter it was made from -- that one is the process holding the port, and the
+    one a firewall rule names. Both spellings are returned, the path pyvenv.cfg records
+    and the path it resolves to: uv records a version directory and also keeps a
+    shorter name linked to it, and the rule Windows made named the resolved one.
+    """
+    found: list[str] = []
+    try:
+        cfg = (config.venv_dir() / "pyvenv.cfg").read_text(encoding="utf-8")
+    except OSError:
+        return found
+    match = re.search(r"^home\s*=\s*(.+?)\s*$", cfg, re.MULTILINE)
+    if not match:
+        return found
+    exe = Path(match.group(1)) / "python.exe"
+    for candidate in (str(exe), os.path.realpath(exe)):
+        lowered = candidate.lower()
+        if lowered not in found:
+            found.append(lowered)
+    return found
+
+
+def _undo_narrowing() -> str:
+    """Put back the block rules add_command stood in for, and remove its stand-ins."""
+    return (f'Get-NetFirewallRule -Group "{GROUP}" -ErrorAction SilentlyContinue | '
+            f'Where-Object {{ $_.DisplayName -like "{_NARROWED}*" }} | ForEach-Object {{ '
+            "if ($_.Description) { Enable-NetFirewallRule -Name $_.Description "
+            "-ErrorAction SilentlyContinue }; Remove-NetFirewallRule -Name $_.Name }")
+
+
+def _narrow_blocks(port: int, programs: list[str]) -> str:
+    """Make room for this port in any block rule on the service's interpreter.
+
+    Cancelling the prompt Windows raises the first time a program listens is not a
+    neutral answer: Windows records it as an inbound block rule on that program, and a
+    block rule beats every allow rule -- so the port rule this application adds did
+    nothing, and the button said "allowed" on a machine nobody could reach. Measured on
+    the Windows test VM: two such rules on uv's python.exe, TCP and UDP, on the Public
+    profile, and with them in place another computer got no answer at all.
+
+    Removing the rule would be simplest, and wrong: the interpreter is uv's, shared with
+    anything else run on that Python -- Hermes among them -- and the person said no to
+    all of it listening. So the TCP block is replaced with one that blocks every port
+    but this one, same program, same profiles, and the original is disabled rather than
+    deleted, its name kept on the stand-in so removing our rule can put it back. Only
+    rules on any port are touched; one somebody wrote for particular ports was a
+    decision, not an answer to a prompt.
+    """
+    if not programs:
+        return ""
+    targets = ",".join(_quote(p) for p in programs)
+    ranges = []
+    if port > 1:
+        ranges.append(f"'1-{port - 1}'")
+    if port < 65535:
+        ranges.append(f"'{port + 1}-65535'")
+    return (
+        f"$targets = @({targets}); "
+        "Get-NetFirewallRule -Direction Inbound -Action Block -Enabled True "
+        "-ErrorAction SilentlyContinue | ForEach-Object { "
+        "$rule = $_; "
+        "$program = ($rule | Get-NetFirewallApplicationFilter).Program; "
+        "if (-not $program) { return }; "
+        "$program = [Environment]::ExpandEnvironmentVariables($program).ToLowerInvariant(); "
+        "if ($targets -notcontains $program) { return }; "
+        "$ports = $rule | Get-NetFirewallPortFilter; "
+        "if ($ports.LocalPort -ne 'Any') { return }; "
+        "if ($ports.Protocol -ne 'TCP' -and $ports.Protocol -ne 'Any') { return }; "
+        f'New-NetFirewallRule -DisplayName "{_NARROWED} $($rule.DisplayName) except {port}" '
+        f'-Group "{GROUP}" -Description $rule.Name -Direction Inbound -Action Block '
+        f"-Program $program -Protocol TCP -LocalPort {','.join(ranges)} "
+        "-Profile $rule.Profile | Out-Null; "
+        "if ($ports.Protocol -eq 'Any') { "
+        f'New-NetFirewallRule -DisplayName "{_NARROWED} $($rule.DisplayName) (UDP)" '
+        f'-Group "{GROUP}" -Description $rule.Name -Direction Inbound -Action Block '
+        "-Program $program -Protocol UDP -Profile $rule.Profile | Out-Null }; "
+        "Disable-NetFirewallRule -Name $rule.Name }"
+    )
+
+
+def add_command(port: int, *, temporary: bool = False,
+                programs: list[str] | None = None) -> str:
     """The command a button runs.
 
     Legible on purpose, because the administrator prompt Windows raises names this
     command and the reader is entitled to understand what they are agreeing to.
+
+    Three steps: undo any earlier stand-ins (the port may have changed since), add the
+    allow rule, and make room for the port in a block rule Windows made on the
+    service's interpreter -- without that last one the allow rule does nothing on a
+    machine where the first prompt was cancelled. See _narrow_blocks.
     """
+    if programs is None:
+        programs = service_programs()
     name = rule_name(port, temporary=temporary)
-    add = (f'New-NetFirewallRule -DisplayName "{name}" -Direction Inbound '
-           f"-LocalPort {port} -Protocol TCP -Action Allow")
+    # Only when missing: pressed twice, it used to leave two identical rules.
+    add = (f'if (-not (Get-NetFirewallRule -DisplayName "{name}" -ErrorAction SilentlyContinue)) '
+           f'{{ New-NetFirewallRule -DisplayName "{name}" -Direction Inbound '
+           f"-LocalPort {port} -Protocol TCP -Action Allow | Out-Null }}")
+    steps = [_undo_narrowing(), add, _narrow_blocks(port, programs)]
+    command = "; ".join(step for step in steps if step)
     if not temporary:
-        return add
+        return command
     # The rule lives as long as the window does, which is the only honest way to make
     # a firewall rule temporary: Windows has no expiry for them, and an application
     # that promised to remove one later would be promising across its own crash.
     # try/finally covers Enter and Ctrl+C. Closing the window with the X kills the
-    # shell, and the rule stays -- said plainly on the button rather than hidden.
-    return (f"{add} | Out-Null; "
+    # shell, and the rule stays -- said plainly on the button rather than hidden. The
+    # stand-ins go with it, and the block rules they replaced come back.
+    return (f"{command}; "
             "try { Read-Host 'Allowed. Press Enter to remove the rule' | Out-Null } "
-            f"finally {{ Remove-NetFirewallRule -DisplayName \"{name}\" }}")
+            f"finally {{ Remove-NetFirewallRule -DisplayName \"{name}\"; "
+            f"{_undo_narrowing()} }}")
 
 
 def remove_command(port: int) -> str:
-    return f'Remove-NetFirewallRule -DisplayName "{rule_name(port)}"'
+    """Remove the allow rule, and give back any block rule add_command stood in for."""
+    return (f'Remove-NetFirewallRule -DisplayName "{rule_name(port)}" '
+            f"-ErrorAction SilentlyContinue; {_undo_narrowing()}")
 
 
 def _encoded(command: str) -> str:
