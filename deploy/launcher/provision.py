@@ -400,12 +400,36 @@ def is_provisioned() -> bool:
     return (config.venv_dir() / ("Scripts" if config.IS_WINDOWS else "bin")).is_dir()
 
 
-def lock_fingerprint() -> str:
-    """The backend's lock file as this payload ships it, hashed; "" when there is none."""
+def pinned_llama_version() -> str:
+    """The llama.cpp build this payload's setup_env installs, e.g. "b11701"; "" if unknown.
+
+    Read from the setup script itself, which is where the pin lives (both scripts name the
+    same build; the backend's tests hold them to it).
+    """
+    script = (config.backend_dir() / "scripts" /
+              ("windows/setup_env.ps1" if config.IS_WINDOWS else "linux/setup_env.sh"))
     try:
-        return hashlib.sha256((config.backend_dir() / "uv.lock").read_bytes()).hexdigest()[:16]
+        text = script.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return ""
+    match = re.search(r'^\s*(?:\$LlamaVersionDefault|LLAMA_VERSION_DEFAULT)\s*=\s*"(b\d+)"',
+                      text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def lock_fingerprint() -> str:
+    """What the environment was set up for, hashed; "" when the lock file is missing.
+
+    The lock file, and the llama.cpp build the setup script pins. The lock alone left a
+    llama upgrade out: a release that moved only the pin did not count as a change, setup
+    did not run, and every machine already set up kept the old build.
+    """
+    try:
+        lock = (config.backend_dir() / "uv.lock").read_bytes()
+    except OSError:
+        return ""
+    llama = pinned_llama_version().encode("ascii")
+    return hashlib.sha256(lock + b"\0llama=" + llama).hexdigest()[:16]
 
 
 def environment_is_stale() -> bool:

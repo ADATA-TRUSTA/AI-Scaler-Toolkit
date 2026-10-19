@@ -187,7 +187,7 @@ Windows：
 
 腳本會建立 `backend/.venv`（不用手動啟用）、把 llama.cpp 裝到 `backend/service/utils/llama-bin/` 並記進 `.env`、把 llama.cpp 的 GGUF 轉檔腳本抓到 `backend/service/utils/llama.cpp/`，有 Intel GPU 時還會實際檢查 GPU 能不能計算。每一部分只在缺少時才裝，所以重跑很快。
 
-**llama.cpp**：版本 `b10107`，可用 `TRUSTA_LLAMA_VERSION`（Linux）或 `-LlamaVersion`（Windows）改。使用哪個 build 與 torch 的加速器分開決定，用 `TRUSTA_LLAMA_BACKEND`（Linux）或 `-LlamaBackend`（Windows）：`auto`（預設）有 NVIDIA 顯卡時用 CUDA，否則用 Vulkan。重裝用 `TRUSTA_INSTALL_LLAMA=1` 或 `-Llama force`；跳過用 `TRUSTA_INSTALL_LLAMA=0` 或 `-Llama skip`。要用自己的 llama，把 `LLAMA_SERVER_BINARY` 指過去，設定就不會動它。
+**llama.cpp**：版本 `b11701`；更新到改了版本的 app 後，下次啟動會自動安裝新版。可用 `TRUSTA_LLAMA_VERSION`（Linux）或 `-LlamaVersion`（Windows）改。使用哪個 build 與 torch 的加速器分開決定，用 `TRUSTA_LLAMA_BACKEND`（Linux）或 `-LlamaBackend`（Windows）：`auto`（預設）有 NVIDIA 顯卡時用 CUDA，否則用 Vulkan。重裝用 `TRUSTA_INSTALL_LLAMA=1` 或 `-Llama force`；跳過用 `TRUSTA_INSTALL_LLAMA=0` 或 `-Llama skip`。要用自己的 llama，把 `LLAMA_SERVER_BINARY` 指過去，設定就不會動它。
 
 ### 啟動服務
 

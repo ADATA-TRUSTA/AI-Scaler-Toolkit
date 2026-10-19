@@ -187,7 +187,7 @@ Windows:
 
 The script creates `backend/.venv` (you do not need to activate it), installs llama.cpp into `backend/service/utils/llama-bin/` and records it in `.env`, fetches llama.cpp's GGUF conversion scripts into `backend/service/utils/llama.cpp/`, and with an Intel GPU runs a check that the GPU really computes. Each part is installed only when missing, so running it again is cheap.
 
-**llama.cpp**: version `b10107`, overridable with `TRUSTA_LLAMA_VERSION` (Linux) or `-LlamaVersion` (Windows). The build is chosen separately from the torch accelerator with `TRUSTA_LLAMA_BACKEND` (Linux) or `-LlamaBackend` (Windows): `auto` (default) uses CUDA when an NVIDIA card is present and Vulkan otherwise. To reinstall it, `TRUSTA_INSTALL_LLAMA=1` or `-Llama force`; to skip it, `TRUSTA_INSTALL_LLAMA=0` or `-Llama skip`. To use a llama of your own, point `LLAMA_SERVER_BINARY` at it and setup leaves it alone.
+**llama.cpp**: version `b11701`; an update that moves it installs the new build on its next start. Overridable with `TRUSTA_LLAMA_VERSION` (Linux) or `-LlamaVersion` (Windows). The build is chosen separately from the torch accelerator with `TRUSTA_LLAMA_BACKEND` (Linux) or `-LlamaBackend` (Windows): `auto` (default) uses CUDA when an NVIDIA card is present and Vulkan otherwise. To reinstall it, `TRUSTA_INSTALL_LLAMA=1` or `-Llama force`; to skip it, `TRUSTA_INSTALL_LLAMA=0` or `-Llama skip`. To use a llama of your own, point `LLAMA_SERVER_BINARY` at it and setup leaves it alone.
 
 ### Start the service
 
