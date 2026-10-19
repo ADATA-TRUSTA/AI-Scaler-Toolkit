@@ -527,7 +527,15 @@
       api.set_port(parseInt(el("port").value, 10)).then(function (r) {
         button.disabled = false;
         setStatus("port-status", r.ok ? "Saved" : r.error, r.ok ? "ok" : "err");
-        if (r.ok) { setTimeout(function () { setStatus("port-status", ""); }, 2500); }
+        if (r.ok) {
+          setTimeout(function () { setStatus("port-status", ""); }, 2500);
+          // The Network block describes the old port until it is asked again: the
+          // address other computers use, and whether our firewall rule is in place --
+          // a rule for the old port is not one for the new. Without this it went on
+          // offering to remove a rule the new port did not have.
+          fwHasRule = null;
+          refreshNetwork().then(function () { if (fwOpen) { askFirewallOnce(); } });
+        }
       });
     });
 

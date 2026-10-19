@@ -191,6 +191,14 @@ def add_command(port: int, *, temporary: bool = False,
            f'{{ New-NetFirewallRule -DisplayName "{name}" -Direction Inbound '
            f"-LocalPort {port} -Protocol TCP -Action Allow | Out-Null }}")
     steps = [_undo_narrowing(), add, _narrow_blocks(port, programs)]
+    if not temporary:
+        # A permanent rule of ours for a port the service has since moved off. Left
+        # behind, it kept that port open to the network with nothing of ours on it,
+        # and nothing on the page mentions it once the port has changed.
+        steps.insert(1, (
+            f'Get-NetFirewallRule -DisplayName "{PERMANENT_RULE} *" -ErrorAction SilentlyContinue | '
+            f"Where-Object {{ $_.DisplayName -match '^{PERMANENT_RULE} \\d+$' "
+            f'-and $_.DisplayName -ne "{name}" }} | Remove-NetFirewallRule'))
     command = "; ".join(step for step in steps if step)
     if not temporary:
         return command
@@ -207,9 +215,16 @@ def add_command(port: int, *, temporary: bool = False,
 
 
 def remove_command(port: int) -> str:
-    """Remove the allow rule, and give back any block rule add_command stood in for."""
-    return (f'Remove-NetFirewallRule -DisplayName "{rule_name(port)}" '
-            f"-ErrorAction SilentlyContinue; {_undo_narrowing()}")
+    """Remove our allow rules, and give back any block rule add_command stood in for.
+
+    Every port's, not only this one's: the port can change after a rule was added, and
+    a remove that looked for the current port alone left the old one open with nothing
+    of ours listening on it. There is one service, so every such rule is its.
+    """
+    del port  # kept for the callers; the rules are found by name, whatever their port
+    return (f'Get-NetFirewallRule -DisplayName "{PERMANENT_RULE} *" -ErrorAction SilentlyContinue | '
+            f"Where-Object {{ $_.DisplayName -match '^{PERMANENT_RULE} \\d+$' }} | "
+            f"Remove-NetFirewallRule; {_undo_narrowing()}")
 
 
 def _encoded(command: str) -> str:
@@ -288,21 +303,59 @@ def run_elevated(command: str, *, keep_open: bool) -> tuple[bool, str]:
 def linux_hint(port: int) -> str:
     """What to do on a Linux desktop that does have a firewall running, or "".
 
-    Read as an ordinary user, and silent when the answer needs root: a machine whose
-    firewall cannot be read is not a machine to give instructions about.
+    Read as an ordinary user. Whether a firewall is on can always be found out that
+    way; whether it already allows the port sometimes cannot, and then the command is
+    offered regardless, since running it again changes nothing.
     """
-    if shutil.which("firewall-cmd"):
-        state = _run(["firewall-cmd", "--state"])
-        if state and "running" in state:
-            ports = _run(["firewall-cmd", "--list-ports"]) or ""
-            if not _mentions_port(ports, port):
-                return (f"sudo firewall-cmd --add-port={port}/tcp --permanent && "
-                        "sudo firewall-cmd --reload")
-    if shutil.which("ufw"):
+    if shutil.which("firewall-cmd") and _firewalld_running():
+        # Same as ufw below: the port list may be closed to us, and then the command
+        # is offered regardless -- firewalld answers an existing port with a warning
+        # and changes nothing.
+        ports = _run(["firewall-cmd", "--list-ports"])
+        if ports is None or not _mentions_port(ports, port):
+            return (f"sudo firewall-cmd --add-port={port}/tcp --permanent && "
+                    "sudo firewall-cmd --reload")
+    if shutil.which("ufw") and _ufw_enabled():
+        # Its rules are root's to read, so whether this port is already allowed is
+        # usually unknown here -- and then the command is offered anyway: running it
+        # twice is harmless, ufw skips a rule it already has. When they can be read,
+        # an allowed port gets no hint.
         status = _run(["ufw", "status"])
-        if status and "inactive" not in status and not _mentions_port(status, port):
+        if status is None or not _mentions_port(status, port):
             return f"sudo ufw allow {port}/tcp"
     return ""
+
+
+def _firewalld_running() -> bool:
+    """Whether firewalld is running, asked of systemd rather than of firewalld.
+
+    `firewall-cmd --state` goes through polkit, and for an ordinary user it answered
+    "Authorization failed" -- over SSH and from the desktop session alike, checked on
+    the Linux test VM -- so a running firewalld was never noticed. Whether the service
+    is up is something systemd tells anyone.
+    """
+    state = _run(["systemctl", "is-active", "firewalld"])
+    if state is not None:
+        return state == "active"
+    state = _run(["firewall-cmd", "--state"])
+    return state is not None and "running" in state
+
+
+def _ufw_enabled(conf: Path = Path("/etc/ufw/ufw.conf")) -> bool:
+    """Whether ufw is switched on, read where any user can.
+
+    `ufw status` was asked, and it answers only root: as anyone else it prints "You need
+    to be root" and nothing more -- so on Ubuntu, where ufw is the firewall, an enabled
+    one was never noticed and the page offered no help to a machine nobody could reach.
+    Checked on the Linux test VM. The switch itself is ENABLED= in ufw.conf, which is
+    readable by everyone. (systemd's view is no use: the unit is "active" with the
+    firewall off, because it runs either way.)
+    """
+    try:
+        text = conf.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return re.search(r"^\s*ENABLED\s*=\s*\"?yes\"?\s*$", text, re.MULTILINE | re.IGNORECASE) is not None
 
 
 def _mentions_port(text: str, port: int) -> bool:
