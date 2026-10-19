@@ -1096,10 +1096,11 @@
           // whole of it -- anyone given the key can use the model and load or unload
           // others -- so the network still matters.
           '<div class="hint">Off, the service answers only this computer. On, other ' +
-          'computers on the same network can use its API with the <strong>API key' +
-          '</strong> shown here — anyone with the key can use the model you have ' +
-          'loaded, and load or unload others. This settings page and the web ' +
-          'interface stay on this computer. Turn it on for a network you trust.</div></div>' +
+          'computers on the same network can chat with the model you have loaded, ' +
+          'through its OpenAI-compatible API (<code>/v1</code>), using the <strong>' +
+          'API key</strong> shown here. Loading models, downloads, fine-tuning, this ' +
+          'settings page and the web interface stay on this computer. Anyone with the ' +
+          'key can use the model, so turn it on for a network you trust.</div></div>' +
           '<div class="control"><label class="switch">' +
             '<input type="checkbox" id="lan-access"' +
             (netInfo.lan_access ? " checked" : "") + ">" +

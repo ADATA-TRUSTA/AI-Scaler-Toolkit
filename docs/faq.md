@@ -62,7 +62,7 @@ NVIDIA 版需要 compute capability 7.5 以上的顯卡（RTX 20／GTX 16 系列
 
 ### Q10. 別台電腦連不到這台
 
-在 Settings → Network 開啟 **Let another computer use this machine's model**，那裡會顯示要用的位址和 API key；另一台電腦要帶上 key（`Authorization: Bearer <key>`），否則會得到 `401`。得到 `403` 表示它要的不是 API，例如網頁介面，那只有這台電腦能開。完全連不上的話，通常是防火牆：那裡的 **Cannot connect?** 會提供新增規則的按鈕（Windows 會要求系統管理員同意）。拿到 key 的人都能使用模型，只在你信任的網路上開啟。
+在 Settings → Network 開啟 **Let another computer use this machine's model**，那裡會顯示要用的位址和 API key；另一台電腦要帶上 key（`Authorization: Bearer <key>`），否則會得到 `401`。得到 `403` 表示它要的不是 `/v1` 底下的對話 API，例如載入模型或網頁介面，這些只有這台電腦能用。完全連不上的話，通常是防火牆：那裡的 **Cannot connect?** 會提供新增規則的按鈕（Windows 會要求系統管理員同意）。拿到 key 的人都能使用模型，只在你信任的網路上開啟。
 
 ### Q11. 為什麼筆電顯示 8 條 4 GB 的記憶體？
 

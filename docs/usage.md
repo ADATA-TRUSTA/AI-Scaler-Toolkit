@@ -28,7 +28,7 @@
 | Updates | 顯示目前版本。**Check now** 向 GitHub 查有沒有新版；**Update now** 下載、檢查、安裝，並重新開啟應用程式 |
 | Components | 選用的第三方工具，裝在你自己的帳號底下（見下） |
 
-**Let another computer use this machine's model**（Settings → Network）：把服務開放給區域網路，讓其他電腦也能用這裡的模型。其他電腦只能使用 API，而且要帶那裡顯示的 **API key**；網頁介面和 API 文件只有這台電腦能開。第一次開啟時會自動產生 key。可以按 **Copy** 複製、按 **Use my own key…** 改成自己設定的 key（至少 12 個字元，可用英文字母、數字與 `. _ ~ + / = -`），或在 key 外流時按 **Make a new key** 重新產生；換了之後，還在用舊 key 的電腦要改成新的才能連。拿到 key 的人都能和模型對話、載入或卸載模型，所以只在你信任的網路上開啟。如果被防火牆擋住，那裡的 **Cannot connect?** 會提供新增規則的按鈕。
+**Let another computer use this machine's model**（Settings → Network）：把服務開放給區域網路，讓其他電腦也能用這裡的模型。其他電腦只能使用 OpenAI 相容的 API（`/v1`），而且要帶那裡顯示的 **API key**：可以和載入的模型對話，但載入模型、下載、微調、網頁介面和 API 文件都只有這台電腦能用。第一次開啟時會自動產生 key。可以按 **Copy** 複製、按 **Use my own key…** 改成自己設定的 key（至少 12 個字元，可用英文字母、數字與 `. _ ~ + / = -`），或在 key 外流時按 **Make a new key** 重新產生；換了之後，還在用舊 key 的電腦要改成新的才能連。拿到 key 的人都能使用模型，所以只在你信任的網路上開啟。如果被防火牆擋住，那裡的 **Cannot connect?** 會提供新增規則的按鈕。
 
 ### 元件（Components）
 

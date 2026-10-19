@@ -432,6 +432,13 @@ class ServiceManager:
             # it is changed in Settings. The process environment wins over the .env,
             # which the backend loads without override.
             "SERVICE_API_KEY": config.service_api_key(),
+            # Other computers get the inference API under /v1/ and nothing else. "all"
+            # also opens model loading, downloads, fine-tuning and RAG, whose requests
+            # carry file paths and launch arguments; that is for someone running the
+            # backend from source behind protection of their own, not a switch in this
+            # application. Passed here, not left to the .env, so an edited .env cannot
+            # widen it: the backend loads the .env without overriding the environment.
+            "SERVICE_REMOTE_ACCESS": "inference",
         }
         merged = os.environ.copy()
         merged.update({k: v for k, v in env.items() if v})

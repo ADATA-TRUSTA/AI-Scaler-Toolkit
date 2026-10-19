@@ -62,7 +62,7 @@ It needs a loaded model: load one first, then press it again. If Hermes is alrea
 
 ### Q10. Another computer cannot reach this one
 
-Turn on **Let another computer use this machine's model** in Settings → Network. It shows the address and the API key to use; the other computer must send the key (`Authorization: Bearer <key>`), or it gets `401`. A `403` means it asked for something other than the API, such as the web interface, which stays on this computer. If it cannot connect at all, a firewall is usually the reason: **Cannot connect?** there offers to add a rule (Windows asks for administrator approval). Anyone with the key can use the model, so do this only on a network you trust.
+Turn on **Let another computer use this machine's model** in Settings → Network. It shows the address and the API key to use; the other computer must send the key (`Authorization: Bearer <key>`), or it gets `401`. A `403` means it asked for something other than the chat API under `/v1`, such as loading a model or the web interface, which stay on this computer. If it cannot connect at all, a firewall is usually the reason: **Cannot connect?** there offers to add a rule (Windows asks for administrator approval). Anyone with the key can use the model, so do this only on a network you trust.
 
 ### Q11. Why does my laptop list eight 4 GB memory modules?
 

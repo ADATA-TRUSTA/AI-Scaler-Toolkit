@@ -15,7 +15,7 @@ Work through the steps in order. Tell the user what you are doing in plain words
 - **Do not install or change GPU drivers** without asking. A driver update can break other software on the PC.
 - **Do not open the service to the network.** It listens on `127.0.0.1` only. Leave "Let another computer use this
   machine's model" off unless the user asks for it. If they do, tell them that other computers then need the API key
-  shown in Settings → Network, and that anyone with that key can use the model and load or unload models.
+  shown in Settings → Network, that they get the chat API (`/v1`) only, and that anyone with that key can use the model.
 - **Tell the user about the download first.** The installer is small (about 30 MB on Windows, 160 MB on Linux), but
   the first launch downloads the GPU runtime and Python packages, about 6-10 GB, plus a small starter model. Confirm
   that is fine, especially on a metered connection.

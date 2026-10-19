@@ -575,7 +575,7 @@ class SettingsApi:
         The service binds where .env says, so this rewrites that one key and restarts
         it -- a listening socket's address cannot be changed under it.
 
-        Other machines get the API only, and only with the key: the service checks
+        Other machines get the inference API (/v1/) only, and only with the key: the service checks
         both (service/remote_access.py in the backend). The key is made here the first
         time the switch goes on, so there is never a moment the port is open without
         one.
