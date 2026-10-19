@@ -37,6 +37,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Everything this prints in UTF-8, whatever the console codepage. The launcher reads it as
+# UTF-8 (uv writes UTF-8 anyway); Windows PowerShell's own output was in the codepage, so
+# on a Chinese Windows a non-ASCII path or error message reached the progress view as "?".
+# The Python children are told the same.
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$env:PYTHONIOENCODING = "utf-8"
+
 # Fail with a single readable line, the way setup_env.sh does. `throw` would print the
 # exception, the offending source line and the CategoryInfo/FullyQualifiedErrorId block
 # on top of the message, which buries the part the user needs to act on.

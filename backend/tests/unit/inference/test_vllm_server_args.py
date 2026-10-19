@@ -389,22 +389,34 @@ def test_is_loopback_bind(host, is_loopback):
     assert VllmEngine._is_loopback_bind(host) is is_loopback
 
 
-def test_admin_endpoints_enabled_on_loopback(monkeypatch):
+def test_admin_endpoints_are_off_by_default(monkeypatch):
+    """/collective_rpc takes a plain POST from any web page on this machine, loopback or not."""
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "127.0.0.1")
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", False)
+    assert _engine()._admin_endpoint_env() == {"VLLM_SERVER_DEV_MODE": "0"}
+
+
+def test_admin_endpoints_when_asked_for_on_loopback(monkeypatch):
     """/reset_prefix_cache only exists under dev mode, so cleanup needs the flag."""
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "127.0.0.1")
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", True)
     assert _engine()._admin_endpoint_env() == {"VLLM_SERVER_DEV_MODE": "1"}
 
 
 def test_admin_endpoints_disabled_when_bind_is_routable(monkeypatch):
     """Dev mode also mounts /update_weights and /collective_rpc; never expose those."""
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "0.0.0.0")
-    assert _engine()._admin_endpoint_env() == {}
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", True)
+    assert _engine()._admin_endpoint_env() == {"VLLM_SERVER_DEV_MODE": "0"}
 
 
-def test_build_server_env_sets_dev_mode_on_default_loopback_bind(monkeypatch):
+def test_build_server_env_overrides_an_inherited_dev_mode(monkeypatch):
+    """A VLLM_SERVER_DEV_MODE=1 left in the environment cannot turn them on behind the setting."""
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "127.0.0.1")
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", False)
+    monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
     env = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
-    assert env["VLLM_SERVER_DEV_MODE"] == "1"
+    assert env["VLLM_SERVER_DEV_MODE"] == "0"
 
 
 def test_build_server_env_turns_pinned_memory_on_under_wsl(monkeypatch):

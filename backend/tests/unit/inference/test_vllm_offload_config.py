@@ -341,7 +341,7 @@ def test_the_runtime_check_runs_the_disk_tier_preflight(tmp_path, monkeypatch):
 # ==================== /inference/status carries every vLLM field ====================
 
 
-def test_status_reports_every_vllm_field_as_loaded(tmp_path):
+def test_status_reports_every_vllm_field_as_loaded(tmp_path, monkeypatch):
     """
     get_status lists its fields by hand. A new vLLM field that is left out there
     loads correctly but can never be read back, which is exactly what a frontend
@@ -356,10 +356,14 @@ def test_status_reports_every_vllm_field_as_loaded(tmp_path):
         def stop_process(self):
             """ModelManager tears its worker down on garbage collection."""
 
+    # ModelManager is a process-wide singleton: __new__ hands back the instance the
+    # app uses. Patched through monkeypatch so it is put back -- assigned directly,
+    # the stub outlived this test and every later /health call in the run failed on
+    # '_Loaded' object has no attribute 'is_loaded'.
     manager = ModelManager.__new__(ModelManager)
-    manager.inference_process = _Loaded()
-    manager.pending_config = None
-    manager.config = _moe_cfg(tmp_path)
+    monkeypatch.setattr(manager, "inference_process", _Loaded(), raising=False)
+    monkeypatch.setattr(manager, "pending_config", None, raising=False)
+    monkeypatch.setattr(manager, "config", _moe_cfg(tmp_path), raising=False)
 
     status = manager.get_status()
     for name in VllmConfigFields.model_fields:

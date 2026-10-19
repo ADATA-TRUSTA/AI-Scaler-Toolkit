@@ -291,7 +291,7 @@ def _read_checkpoint_keys(model_name_or_path: str) -> set:
 
     index = _resolve_checkpoint_file(model_name_or_path, "model.safetensors.index.json")
     if index is not None:
-        return set(json.loads(index.read_text()).get("weight_map", {}))
+        return set(json.loads(index.read_text(encoding="utf-8")).get("weight_map", {}))
     single = _resolve_checkpoint_file(model_name_or_path, "model.safetensors")
     if single is not None:
         from safetensors import safe_open

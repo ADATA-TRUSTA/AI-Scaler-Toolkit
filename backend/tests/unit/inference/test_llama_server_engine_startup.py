@@ -463,3 +463,31 @@ def test_synced_extra_arg_leaves_no_contradiction_on_the_command_line(monkeypatc
     values = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "-c"]
     assert values == ["32768", "32768"], f"contradictory -c on {cmd}"
     assert engine.config.n_ctx == 32768
+
+
+def test_managed_server_is_kept_to_this_service(monkeypatch):
+    """llama-server allows every origin and reads any body as JSON; bound to loopback it
+    is still reachable from web pages on this machine. It gets the service's own key and
+    only the service's origins."""
+    from service import settings
+    from service.server_args import local_service_origins
+
+    captured = {}
+    _patch_fs_and_popen(monkeypatch, captured)
+
+    engine = LlamaServerEngine(Queue(), Queue(), Event(), Event())
+    engine.config = InferenceConfig(
+        model_name="demo-model",
+        model_path="/tmp/model.gguf",
+        engine="llama_server",
+        llama_server_binary="/tmp/llama-server",
+        llama_server_port=8080,
+    )
+
+    engine._start_managed_server()
+
+    cmd = captured["cmd"]
+    assert settings.LLAMA_SERVER_API_KEY  # made up when none is configured
+    assert cmd[cmd.index("--api-key") + 1] == settings.LLAMA_SERVER_API_KEY
+    assert cmd[cmd.index("--cors-origins") + 1] == local_service_origins()[0]
+    assert "*" not in cmd[cmd.index("--cors-origins") + 1]

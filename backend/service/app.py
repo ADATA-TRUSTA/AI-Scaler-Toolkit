@@ -9,6 +9,7 @@ multiprocessing.set_start_method("spawn", force=True)
 
 import asyncio
 import json
+import logging
 import signal
 import sys
 import threading
@@ -34,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from . import config_examples
+from . import settings as settings_module
 from .config_models import (
     ChatRequest,
     CleanupGenerationMemoryRequest,
@@ -83,6 +85,7 @@ from .platform_support import (
     training_support,
 )
 from .rag_manager import rag_manager
+from .remote_access import RemoteAccessMiddleware
 from .session_manager import session_manager
 from .settings import (
     DEFAULT_SYSTEM_PROMPT,
@@ -807,13 +810,27 @@ async def frontend_spa_fallback(full_path: str) -> FileResponse:
     raise HTTPException(status_code=404, detail="index.html not found in dist")
 
 
-# Add CORS middleware
+# Pages served from this machine only, on any port (the bundled interface, a development
+# server). It allowed every origin, with credentials, so any site open in a browser here
+# could call the API on 127.0.0.1 and read the answers: chat with the model, list and
+# delete models, start downloads. Clients that are not web pages -- Hermes, coding agents,
+# scripts -- do not use CORS and are unaffected.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Should be restricted to specific origins in production
-    allow_credentials=True,
+    allow_origin_regex=r"^https?://(localhost|127(\.\d{1,3}){3}|\[::1\])(:\d+)?$",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Added last, so it runs first: every request is checked against where it came from
+# before anything else answers it -- see remote_access.py. Read through settings at call
+# time so a key changed by the launcher (which restarts the service) or by a test is the
+# one used.
+app.add_middleware(
+    RemoteAccessMiddleware,
+    api_key=lambda: settings_module.SERVICE_API_KEY,
+    access=lambda: settings_module.SERVICE_REMOTE_ACCESS,
 )
 
 
@@ -1981,14 +1998,22 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
     """OpenAI-compatible chat endpoint."""
 
     raw_payload = await parse_openai_chat_request_payload(http_request)
+    # The shape at INFO, the words at DEBUG. Every prompt used to go into service.log in
+    # full (long ones truncated), which kept people's conversations on disk in plain text
+    # for as long as the logs are kept.
+    messages = raw_payload.get("messages")
     logger.info(
-        "Received /v1/chat/completions request: content_type=%s payload=%s",
-        http_request.headers.get("content-type", ""),
-        json.dumps(
-            sanitize_openai_request_for_logging(raw_payload),
-            ensure_ascii=False,
-        ),
+        "Received /v1/chat/completions request: model=%s messages=%s stream=%s max_tokens=%s",
+        raw_payload.get("model"),
+        len(messages) if isinstance(messages, list) else "-",
+        raw_payload.get("stream", False),
+        raw_payload.get("max_tokens", raw_payload.get("max_completion_tokens")),
     )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "/v1/chat/completions payload: %s",
+            json.dumps(sanitize_openai_request_for_logging(raw_payload), ensure_ascii=False),
+        )
 
     try:
         request = OpenAIChatCompletionRequest.model_validate(raw_payload)

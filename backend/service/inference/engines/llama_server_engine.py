@@ -18,6 +18,7 @@ from urllib import request as urllib_request
 from openai import APIError, OpenAI
 
 from ...config_models import InferenceConfig
+from ...server_args import local_service_origins
 from ...settings import (
     HF_HOME,
     LLAMA_SERVER_API_KEY,
@@ -985,6 +986,20 @@ class LlamaServerEngine(BaseEngine):
             "trusta-ast-default",
         ]
 
+        # Kept to this service. Bound to loopback, llama-server is still reachable from
+        # every web page open in a browser here: it allows any origin by default, and
+        # reads a body as JSON whatever its content type, so a page can drive it without
+        # being allowed to read the answer. The key -- one this service made up, see
+        # settings.LLAMA_SERVER_API_KEY -- turns those requests away; the origin list
+        # keeps pages from reading anything that does not need one. Both are refused in
+        # llama_server_extra_args, which come last and would otherwise win.
+        if self.api_key:
+            cmd.extend(["--api-key", self.api_key])
+        # One origin: llama-server sends the value back as it is rather than matching
+        # the request against a list -- checked, it answered every origin with the whole
+        # comma-separated string, a header no browser accepts.
+        cmd.extend(["--cors-origins", local_service_origins()[0]])
+
         if self.config.n_gpu_layers is not None:
             cmd.extend(["-ngl", str(self.config.n_gpu_layers)])
 
@@ -1039,6 +1054,11 @@ class LlamaServerEngine(BaseEngine):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # llama-server writes UTF-8: the model path, general.name, the chat template.
+            # Read in the Windows codepage, the first such line raised in the log pump,
+            # which then closed the pipe -- every later line was lost without a word.
+            encoding="utf-8",
+            errors="replace",
             cwd=binary_dir if os.path.isdir(binary_dir) else None,
             env=env,
         )

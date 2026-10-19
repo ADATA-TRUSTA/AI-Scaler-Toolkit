@@ -29,7 +29,8 @@ from service.app import app
 
 pytestmark = pytest.mark.inference
 
-client = TestClient(app)
+# As this machine: see test_remote_access.py.
+client = TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1")
 
 
 def _mark_loaded(monkeypatch, engine="llama_server"):
@@ -326,7 +327,7 @@ def test_concurrent_mixed_stream_and_non_stream(monkeypatch):
     async def _run():
         transport = httpx2.ASGITransport(app=app)
         async with httpx2.AsyncClient(
-            transport=transport, base_url="http://testserver"
+            transport=transport, base_url="http://127.0.0.1"
         ) as ac:
 
             async def _non_stream(marker):

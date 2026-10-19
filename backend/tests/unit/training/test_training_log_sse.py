@@ -29,7 +29,8 @@ import service.training.core.job_logger as job_logger
 from service.training.core.training_events import EventType, Phase
 
 
-client = TestClient(app_module.app)
+# As this machine: see test_remote_access.py.
+client = TestClient(app_module.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1")
 
 
 # ── fixtures / helpers ───────────────────────────────────────────────────────

@@ -122,7 +122,9 @@ class ConversionManager:
         env = os.environ.copy()
         gguf_py_path = os.path.join(self.llama_cpp_dir, "gguf-py")
         if "PYTHONPATH" in env and env["PYTHONPATH"]:
-            env["PYTHONPATH"] = f"{gguf_py_path}:{env['PYTHONPATH']}"
+            # os.pathsep: ";" on Windows, where a ":" merged gguf-py and the existing entry
+            # into one path that names neither, so the converter imported no gguf at all.
+            env["PYTHONPATH"] = os.pathsep.join([gguf_py_path, env["PYTHONPATH"]])
         else:
             env["PYTHONPATH"] = gguf_py_path
 
@@ -142,7 +144,7 @@ class ConversionManager:
 
         if library_dirs:
             existing_ld = env.get("LD_LIBRARY_PATH", "").strip()
-            env["LD_LIBRARY_PATH"] = ":".join(
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(
                 [*library_dirs, *([existing_ld] if existing_ld else [])]
             )
 
@@ -153,10 +155,17 @@ class ConversionManager:
     ) -> subprocess.CompletedProcess:
         """Run subprocess and raise a readable error when it fails."""
         logger.info(f"Running command: {' '.join(cmd)}")
+        # One encoding for every child. llama-quantize writes UTF-8 (paths included), and
+        # the Python scripts are told to as well; read in the Windows codepage instead, a
+        # model under a non-ASCII path failed the conversion with a UnicodeDecodeError.
+        env = dict(env if env is not None else os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             env=env,
             check=False,
         )

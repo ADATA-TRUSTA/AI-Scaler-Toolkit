@@ -23,6 +23,7 @@ import psutil
 from openai import APIError, OpenAI
 
 from ...config_models import InferenceConfig
+from ...server_args import local_service_origins
 from ...settings import (
     VLLM_CLIENT_HOST,
     VLLM_ENABLE_LOG_REQUESTS,
@@ -31,6 +32,7 @@ from ...settings import (
     VLLM_OPENAI_API_KEY,
     VLLM_PORT,
     VLLM_SERVED_MODEL_NAME,
+    VLLM_SERVER_DEV_MODE,
     VLLM_SERVER_HOST,
     VLLM_SERVER_PROJECT_DIR,
     VLLM_STARTUP_SWEEP,
@@ -595,6 +597,9 @@ class VllmEngine(BaseEngine):
             VLLM_SERVER_HOST,
             "--port",
             str(self._resolve_vllm_port()),
+            # vLLM allows every web origin by default. Only this service talks to it.
+            "--allowed-origins",
+            json.dumps(local_service_origins()),
             "--dtype",
             config.vllm_dtype,
             "--gpu-memory-utilization",
@@ -1223,21 +1228,28 @@ class VllmEngine(BaseEngine):
 
     def _admin_endpoint_env(self) -> dict[str, str]:
         """
-        Enable vLLM's admin endpoints, but only while the server stays on loopback.
+        vLLM's admin endpoints: off unless VLLM_SERVER_DEV_MODE is set, and never off-host.
 
         vLLM 0.20.1 mounts ``/reset_prefix_cache`` (used by ``cleanup_generation_memory``)
-        only under ``VLLM_SERVER_DEV_MODE``; without it the cleanup call 404s. The same
-        flag also mounts ``/update_weights`` and ``/collective_rpc``, which must never be
-        reachable off-host -- so a routable ``VLLM_SERVER_HOST`` turns the flag back off
-        instead of exposing them.
+        only under ``VLLM_SERVER_DEV_MODE``; without it the cleanup call 404s and reports
+        as degraded. The same flag mounts ``/update_weights`` and ``/collective_rpc``, and
+        loopback alone does not protect those: ``/collective_rpc`` reads its body whatever
+        the content type, outside the paths ``--api-key`` guards, so any web page open on
+        this machine could post to it. They used to be on whenever the bind was loopback;
+        now only when asked for -- see settings.VLLM_SERVER_DEV_MODE.
+
+        Always written, as "0" when off, so a value inherited from the environment cannot
+        turn them on behind the setting's back.
         """
+        if not VLLM_SERVER_DEV_MODE:
+            return {"VLLM_SERVER_DEV_MODE": "0"}
         if not self._is_loopback_bind(VLLM_SERVER_HOST):
             logger.warning(
                 "[Worker] VLLM_SERVER_HOST=%s is not loopback; leaving "
                 "VLLM_SERVER_DEV_MODE off. Prefix cache cleanup will report as degraded.",
                 VLLM_SERVER_HOST,
             )
-            return {}
+            return {"VLLM_SERVER_DEV_MODE": "0"}
         return {"VLLM_SERVER_DEV_MODE": "1"}
 
     def _build_server_env(self, config: InferenceConfig) -> dict[str, str]:

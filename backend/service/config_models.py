@@ -3,6 +3,7 @@
 import os
 from enum import StrEnum
 from typing import Any, Literal, Optional
+from urllib.parse import urlsplit
 
 from pydantic import (
     AliasChoices,
@@ -13,6 +14,12 @@ from pydantic import (
     model_validator,
 )
 
+from .server_args import (
+    LLAMA_SERVER_RESERVED_FLAGS,
+    VLLM_SERVER_RESERVED_FLAGS,
+    is_loopback_host,
+    reserved_flags_in,
+)
 from .settings import DEFAULT_GENERATION_TIMEOUT
 
 
@@ -606,6 +613,60 @@ class InferenceConfig(
     torch_dtype: str = Field(default="auto", description="Torch dtype")
     trust_remote_code: bool = Field(default=True, description="Trust remote code")
     use_cache: bool = Field(default=True, description="Use KV cache")
+
+    @field_validator("llama_server_host")
+    @classmethod
+    def _keep_llama_server_on_loopback(cls, v: str) -> str:
+        """The server this service starts listens on this machine only -- see server_args."""
+        if not is_loopback_host(v):
+            raise ValueError(
+                "llama_server_host must be a loopback address (127.0.0.1, ::1 or localhost): "
+                "the server is reached through this service, never directly"
+            )
+        return v
+
+    @field_validator("llama_server_url")
+    @classmethod
+    def _keep_llama_server_url_on_loopback(cls, v: str | None) -> str | None:
+        """
+        A request may point at a llama-server of its own, but only on this machine.
+
+        The service connects to whatever this names and sends it every prompt, with
+        LLAMA_SERVER_API_KEY. Anywhere else, a request could make this machine call into
+        its network on the request's behalf. A server elsewhere is the operator's to
+        configure, through LLAMA_SERVER_URL, which this does not touch.
+        """
+        if v is None or not v.strip():
+            return v
+        parts = urlsplit(v.strip())
+        if parts.scheme not in ("http", "https") or not is_loopback_host(parts.hostname):
+            raise ValueError(
+                "llama_server_url must be an http(s) address on this machine "
+                "(127.0.0.1, ::1 or localhost); set LLAMA_SERVER_URL for a server elsewhere"
+            )
+        return v
+
+    @field_validator("llama_server_extra_args")
+    @classmethod
+    def _refuse_reserved_llama_flags(cls, v: list[str] | None) -> list[str] | None:
+        """Flags that decide who can reach llama-server belong to this service."""
+        if found := reserved_flags_in(v, LLAMA_SERVER_RESERVED_FLAGS):
+            raise ValueError(
+                f"llama_server_extra_args cannot set {', '.join(found)}: this service decides "
+                "where the server listens, who may use it and what it writes"
+            )
+        return v
+
+    @field_validator("vllm_server_extra_args")
+    @classmethod
+    def _refuse_reserved_vllm_flags(cls, v: list[str] | None) -> list[str] | None:
+        """Flags that decide who can reach vLLM, or what code it loads, belong to this service."""
+        if found := reserved_flags_in(v, VLLM_SERVER_RESERVED_FLAGS):
+            raise ValueError(
+                f"vllm_server_extra_args cannot set {', '.join(found)}: this service decides "
+                "where the server listens, who may use it and what it loads"
+            )
+        return v
 
     @model_validator(mode="after")
     def _sync_llama_server_extra_args(self) -> "InferenceConfig":

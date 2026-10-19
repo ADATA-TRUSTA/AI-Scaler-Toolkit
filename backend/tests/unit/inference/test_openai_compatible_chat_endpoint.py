@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 from service.app import app
 
 
-client = TestClient(app)
+# As this machine: see test_remote_access.py.
+client = TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1")
 
 
 import pytest
@@ -931,20 +932,24 @@ def test_openai_chat_completions_accepts_multipart_image_upload(monkeypatch):
 
 
 def test_openai_chat_completions_logs_sanitized_payload(monkeypatch):
+    """INFO carries the shape of a request, never its words; DEBUG the sanitized payload."""
     log_messages = []
+    debug_messages = []
     monkeypatch.setattr("service.app.model_manager.is_loaded", lambda: True)
 
     def _fake_generate(**kwargs):
         return {"result": "ok"}
 
-    def _fake_logger_info(message, *args, **kwargs):
-        if args:
-            log_messages.append(message % args)
-        else:
-            log_messages.append(message)
+    def _collect(into):
+        def _log(message, *args, **kwargs):
+            into.append(message % args if args else message)
+
+        return _log
 
     monkeypatch.setattr("service.app.model_manager.generate", _fake_generate)
-    monkeypatch.setattr("service.app.logger.info", _fake_logger_info)
+    monkeypatch.setattr("service.app.logger.info", _collect(log_messages))
+    monkeypatch.setattr("service.app.logger.debug", _collect(debug_messages))
+    monkeypatch.setattr("service.app.logger.isEnabledFor", lambda _level: True)
 
     raw_data_url = "data:image/png;base64," + ("A" * 256)
     body = {
@@ -966,8 +971,13 @@ def test_openai_chat_completions_logs_sanitized_payload(monkeypatch):
 
     combined_logs = "\n".join(log_messages)
     assert "Received /v1/chat/completions request" in combined_logs
-    assert "...(len=" in combined_logs
+    assert "請描述圖片" not in combined_logs
     assert raw_data_url not in combined_logs
+
+    debug_logs = "\n".join(debug_messages)
+    assert "請描述圖片" in debug_logs
+    assert "...(len=" in debug_logs
+    assert raw_data_url not in debug_logs
 
 
 def test_openai_chat_completions_accepts_json_attachments(monkeypatch):

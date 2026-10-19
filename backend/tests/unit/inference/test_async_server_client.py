@@ -322,11 +322,11 @@ def test_resolve_server_endpoint_external_uses_config_url():
     endpoint = resolve_server_endpoint(
         _llama_config(
             llama_server_auto_start=False,
-            llama_server_url="http://10.0.0.9:9999/",
+            llama_server_url="http://127.0.0.9:9999/",
             llama_server_api_key="sekret",
         )
     )
-    assert endpoint["base_url"] == "http://10.0.0.9:9999/v1"
+    assert endpoint["base_url"] == "http://127.0.0.9:9999/v1"
     assert endpoint["api_key"] == "sekret"
 
 
@@ -335,9 +335,9 @@ def test_resolve_server_endpoint_url_wins_over_auto_start():
     # even in managed (auto_start) mode, so the main process targets the same
     # server the engine health-checks.
     endpoint = resolve_server_endpoint(
-        _llama_config(llama_server_auto_start=True, llama_server_url="http://10.0.0.9:9999")
+        _llama_config(llama_server_auto_start=True, llama_server_url="http://127.0.0.9:9999")
     )
-    assert endpoint["base_url"] == "http://10.0.0.9:9999/v1"
+    assert endpoint["base_url"] == "http://127.0.0.9:9999/v1"
 
 
 def test_resolve_server_endpoint_external_without_url_uses_host_port():

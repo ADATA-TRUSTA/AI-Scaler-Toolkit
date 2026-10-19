@@ -17,7 +17,8 @@ import service.app as app_module
 from service import platform_support
 from service.config_models import InferenceEngine
 
-client = TestClient(app_module.app)
+# As this machine: see test_remote_access.py.
+client = TestClient(app_module.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1")
 
 
 def _training_payload(**overrides):

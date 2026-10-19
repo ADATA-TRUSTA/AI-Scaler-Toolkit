@@ -174,11 +174,14 @@ def test_convert_training_output_uses_offload_folder_as_work_dir(monkeypatch):
     monkeypatch.setattr(
         training_process_module.conversion_manager,
         "convert_and_quantize",
-        lambda **kwargs: captured.update(kwargs) or {
-            "intermediate_output_path": "demo-f16.gguf",
-            "quantized_output_path": "demo-q4.gguf",
-            "quantization_type": "Q4_K_M",
-        },
+        lambda **kwargs: (
+            captured.update(kwargs)
+            or {
+                "intermediate_output_path": "demo-f16.gguf",
+                "quantized_output_path": "demo-q4.gguf",
+                "quantization_type": "Q4_K_M",
+            }
+        ),
     )
 
     config = TrainingConfig(
@@ -216,20 +219,27 @@ def test_streaming_merge_success(tmp_path):
 
     # Index
     with open(base_dir / "model.safetensors.index.json", "w", encoding="utf-8") as f:
-        json.dump({
-            "weight_map": {
-                "model.layers.0.self_attn.q_proj.weight": "model.safetensors",
-                "model.layers.0.self_attn.k_proj.weight": "model.safetensors",
-            }
-        }, f)
+        json.dump(
+            {
+                "weight_map": {
+                    "model.layers.0.self_attn.q_proj.weight": "model.safetensors",
+                    "model.layers.0.self_attn.k_proj.weight": "model.safetensors",
+                }
+            },
+            f,
+        )
 
     # 2. Config & weights for LoRA
     with open(adapter_dir / "adapter_config.json", "w", encoding="utf-8") as f:
         json.dump({"r": 2, "lora_alpha": 4}, f)
 
     adapter_weights = {
-        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight": torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float16),
-        "base_model.model.model.layers.0.self_attn.q_proj.lora_B.default.weight": torch.tensor([[2.0, 3.0]], dtype=torch.float16), # Shape 1 x 2
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight": torch.tensor(
+            [[1.0, 0.0], [0.0, 1.0]], dtype=torch.float16
+        ),
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_B.default.weight": torch.tensor(
+            [[2.0, 3.0]], dtype=torch.float16
+        ),  # Shape 1 x 2
     }
     save_file(adapter_weights, str(adapter_dir / "adapter_model.safetensors"))
 
@@ -238,6 +248,7 @@ def test_streaming_merge_success(tmp_path):
 
     # Check merged tensor in out_dir
     from safetensors.torch import load_file
+
     merged_weights = load_file(str(out_dir / "model.safetensors"))
     q_proj_merged = merged_weights["model.layers.0.self_attn.q_proj.weight"]
 
@@ -248,7 +259,6 @@ def test_streaming_merge_success(tmp_path):
     # Update = scaling * (B @ A) = 2.0 * [[2.0, 3.0]] = [[4.0, 6.0]]
     # Merged = [[1.0, 2.0]] + [[4.0, 6.0]] = [[5.0, 8.0]]
     assert torch.allclose(q_proj_merged, torch.tensor([[5.0, 8.0]], dtype=torch.float16))
-
 
 
 # --- full-parameter multimodal fine-tune GGUF fallback ----------------------
@@ -287,8 +297,10 @@ def test_full_multimodal_convert_falls_back_to_language_extraction(monkeypatch, 
     monkeypatch.setattr(manager, "_resolve_output_file", lambda p: str(output_file))
 
     res = manager._convert_to_gguf(
-        model_path=str(model_dir), output_path=str(output_file),
-        outtype="f16", register_model=False,
+        model_path=str(model_dir),
+        output_path=str(output_file),
+        outtype="f16",
+        register_model=False,
     )
     assert calls["extract"] == 1, "language extraction fallback should have run"
     assert calls["run"] == 2, "should convert once directly, then once post-extraction"
@@ -309,25 +321,30 @@ def test_text_only_convert_failure_does_not_fall_back(monkeypatch, tmp_path):
     monkeypatch.setattr(manager, "_run_command", boom)
     monkeypatch.setattr(manager, "_is_multimodal", lambda p: False)
     monkeypatch.setattr(
-        manager, "_extract_language_model",
+        manager,
+        "_extract_language_model",
         lambda *a, **k: calls.__setitem__("extract", calls["extract"] + 1),
     )
 
     with pytest.raises(RuntimeError, match="boom"):
         manager._convert_to_gguf(
-            model_path=str(model_dir), output_path=str(tmp_path / "o.gguf"),
-            outtype="f16", register_model=False,
+            model_path=str(model_dir),
+            output_path=str(tmp_path / "o.gguf"),
+            outtype="f16",
+            register_model=False,
         )
     assert calls["extract"] == 0
 
 
 def test_copy_tokenizer_prefers_sentencepiece_source(tmp_path):
     """_copy_tokenizer brings over the SentencePiece tokenizer.model verbatim."""
-    src = tmp_path / "base"; src.mkdir()
+    src = tmp_path / "base"
+    src.mkdir()
     (src / "tokenizer.model").write_bytes(b"spm")
     (src / "tokenizer.json").write_text("{}", encoding="utf-8")
     (src / "tokenizer_config.json").write_text("{}", encoding="utf-8")
-    dest = tmp_path / "lang"; dest.mkdir()
+    dest = tmp_path / "lang"
+    dest.mkdir()
 
     ConversionManager._copy_tokenizer(str(src), str(dest))
     assert (dest / "tokenizer.model").read_bytes() == b"spm"
@@ -426,3 +443,50 @@ def test_unreadable_adapter_config_falls_back_to_base(tmp_path, caplog):
     with caplog.at_level("WARNING", logger=conversion_manager_module.logger.name):
         assert manager._adapter_trains_bridge(str(lora_dir)) is False
     assert "mmproj source" in caplog.text
+
+
+# A path the Windows codepage (cp950) cannot hold, and bytes it cannot decode.
+_NON_ASCII = "D:/模型/café/Qwen3.6-35B-🚀.gguf"
+
+
+def test_run_command_reads_a_native_tools_utf8_output(tmp_path):
+    """llama-quantize prints its paths in UTF-8; reading them must not fail the job."""
+    import sys
+
+    script = tmp_path / "native.py"
+    script.write_text(
+        f"import sys\nsys.stdout.buffer.write({_NON_ASCII!r}.encode('utf-8') + bytes([10]))\n",
+        encoding="utf-8",
+    )
+    result = ConversionManager()._run_command([sys.executable, str(script)])
+    assert _NON_ASCII in result.stdout
+
+
+def test_run_command_makes_python_children_write_utf8(tmp_path):
+    """convert_hf_to_gguf.py prints with print(); on Windows that is the codepage
+    unless the child is told otherwise -- it is, so the two sides agree."""
+    import sys
+
+    script = tmp_path / "convert.py"
+    script.write_text(f"print({_NON_ASCII!r})\n", encoding="utf-8")
+    result = ConversionManager()._run_command([sys.executable, str(script)])
+    assert _NON_ASCII in result.stdout
+
+
+def test_build_env_puts_gguf_py_ahead_of_an_existing_pythonpath(monkeypatch, tmp_path):
+    """Joined with the platform's separator, so each entry stays its own path on Windows too."""
+    import os
+
+    existing = str(tmp_path / "already-there")
+    monkeypatch.setenv("PYTHONPATH", existing)
+    manager = ConversionManager()
+    entries = manager._build_env()["PYTHONPATH"].split(os.pathsep)
+    assert entries == [os.path.join(manager.llama_cpp_dir, "gguf-py"), existing]
+
+
+def test_build_env_sets_pythonpath_when_there_is_none(monkeypatch):
+    import os
+
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    manager = ConversionManager()
+    assert manager._build_env()["PYTHONPATH"] == os.path.join(manager.llama_cpp_dir, "gguf-py")

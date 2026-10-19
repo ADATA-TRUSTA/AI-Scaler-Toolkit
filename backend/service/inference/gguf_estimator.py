@@ -976,6 +976,10 @@ class GgufMemoryEstimator:
                 cmd,
                 capture_output=True,
                 text=True,
+                # llama-fit-params writes UTF-8 (the model path, its metadata). Read in
+                # the Windows codepage, a non-ASCII path raised past the except below.
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 check=False,
                 env=self._fit_env(binary),

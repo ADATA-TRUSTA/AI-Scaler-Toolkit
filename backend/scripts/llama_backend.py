@@ -172,6 +172,7 @@ def _run(cmd: list[str]) -> tuple[int, str, str]:
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",  # llama's own output, device names included
             errors="replace",
             timeout=PROBE_TIMEOUT_SEC,
             check=False,

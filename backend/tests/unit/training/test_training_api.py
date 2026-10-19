@@ -8,7 +8,8 @@ from service.config_models import TrainingConfig, TrainingStatus
 import service.training.training_process as training_process_module
 
 
-client = TestClient(app_module.app)
+# As this machine: see test_remote_access.py.
+client = TestClient(app_module.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1")
 
 
 import pytest

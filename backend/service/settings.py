@@ -5,6 +5,7 @@ Contains all configurable parameters for logging, debugging, and service behavio
 
 import logging
 import os
+import secrets
 import shutil
 import time
 from logging.handlers import TimedRotatingFileHandler
@@ -166,6 +167,25 @@ SERVICE_HOST: str = os.getenv("SERVICE_HOST", _DEFAULT_SERVICE_HOST)
 _DEFAULT_SERVICE_PORT: int = 8000
 SERVICE_PORT: int = int(os.getenv("SERVICE_PORT", str(_DEFAULT_SERVICE_PORT)))
 
+# The key another machine must send (`Authorization: Bearer <key>`) once SERVICE_HOST opens
+# the service to the network. Requests from this machine never need it. Empty means other
+# machines are refused outright -- see service/remote_access.py.
+SERVICE_API_KEY: str = os.getenv("SERVICE_API_KEY", "")
+
+# What another machine may reach with that key. "inference" (the default) is the
+# OpenAI-compatible API under /v1/ -- chat, completions, embeddings, the model list -- which
+# is all a client such as Hermes needs. "all" adds the management API: loading and
+# unloading models, downloads, fine-tuning, RAG, system information. Those take paths and
+# launch arguments, so a key holder can reach well beyond the model; "all" is for someone
+# running this backend from source behind their own protection (a VPN, or a reverse proxy
+# with TLS and authentication). The desktop application always sets "inference".
+# See service/remote_access.py.
+_REMOTE_ACCESS_VALUES = ("inference", "all")
+SERVICE_REMOTE_ACCESS: str = os.getenv("SERVICE_REMOTE_ACCESS", "inference").strip().lower()
+if SERVICE_REMOTE_ACCESS not in _REMOTE_ACCESS_VALUES:
+    # Not "all" by mistake: an unrecognised value is the narrower one.
+    SERVICE_REMOTE_ACCESS = "inference"
+
 _DEFAULT_UVICORN_RELOAD: bool = False
 UVICORN_RELOAD: bool = os.getenv("UVICORN_RELOAD", str(_DEFAULT_UVICORN_RELOAD)).lower() in (
     "true",
@@ -310,7 +330,17 @@ def effective_llama_binary(configured: str | None) -> str:
     return (configured or "").strip() or LLAMA_SERVER_BINARY
 
 
-LLAMA_SERVER_API_KEY: str | None = os.getenv("LLAMA_SERVER_API_KEY", None)
+# The key between this service and llama-server. For a server this service starts, one is
+# made up when none is configured and passed to it with --api-key, so the only client that
+# can use it is this service. llama-server allows every web origin by default and reads a
+# request body as JSON whatever its content type, so without a key any page open in a
+# browser on this machine could drive it on 127.0.0.1 -- binding to loopback keeps other
+# machines out, not other web pages. Put in the environment, so the worker processes this
+# one starts read the same key instead of each making their own.
+LLAMA_SERVER_API_KEY: str | None = os.getenv("LLAMA_SERVER_API_KEY") or None
+if LLAMA_SERVER_API_KEY is None:
+    LLAMA_SERVER_API_KEY = "internal-" + secrets.token_urlsafe(24)
+    os.environ["LLAMA_SERVER_API_KEY"] = LLAMA_SERVER_API_KEY
 
 _DEFAULT_LLAMA_SERVER_TIMEOUT: int = 300
 LLAMA_SERVER_TIMEOUT: int = int(
@@ -439,13 +469,20 @@ VLLM_ENABLE_LOG_REQUESTS: bool = _parse_bool_env(
 # Host the vLLM server binds to (vllm serve --host)
 # Loopback by default: the vLLM server is an internal component that only this
 # backend talks to (always via VLLM_CLIENT_HOST), so it has no reason to accept
-# off-host connections. Keeping it on loopback is also what lets the engine turn on
-# VLLM_SERVER_DEV_MODE, which is the only way vLLM 0.20.1 mounts its admin endpoints
-# (/reset_prefix_cache and friends, but also /update_weights and /collective_rpc --
-# hence the pairing: admin surface on, reachable from this host only).
+# off-host connections.
 # Env var: VLLM_SERVER_HOST
 _DEFAULT_VLLM_SERVER_HOST: str = "127.0.0.1"
 VLLM_SERVER_HOST: str = os.getenv("VLLM_SERVER_HOST", _DEFAULT_VLLM_SERVER_HOST)
+
+# Whether to mount vLLM's admin endpoints (vLLM's own VLLM_SERVER_DEV_MODE). Off by default.
+# They include /reset_prefix_cache, which cleanup_generation_memory uses, but also
+# /collective_rpc and /update_weights -- and /collective_rpc reads its body as JSON whatever
+# the content type, outside the paths vLLM's --api-key guards. Loopback does not protect
+# it: any web page open on this machine can send it a plain POST. Turn it on only on a
+# machine where no browser runs, or behind something that keeps pages off the port.
+# Honoured only while VLLM_SERVER_HOST is loopback.
+# Env var: VLLM_SERVER_DEV_MODE
+VLLM_SERVER_DEV_MODE: bool = _parse_bool_env(os.getenv("VLLM_SERVER_DEV_MODE"), False)
 
 # The served model name vLLM reports; derived from the model source when unset
 # Env var: VLLM_SERVED_MODEL_NAME
