@@ -420,7 +420,10 @@ class WindowApi:
 # shell argument on the other computer, so no spaces, no quotes, nothing a shell or a
 # header would mangle -- the characters token_urlsafe uses, plus a few more people type.
 _API_KEY_CHARS = re.compile(r"[A-Za-z0-9._~+/=-]+")
-API_KEY_MIN_LENGTH = 12
+# Sixteen, with some variety: a short or repetitive key someone types is the one that can
+# be guessed. The service also locks out an address after repeated wrong keys (see
+# remote_access.py in the backend), which is what makes sixteen enough.
+API_KEY_MIN_LENGTH = 16
 
 
 def _api_key_problem(value: str) -> str:
@@ -429,6 +432,8 @@ def _api_key_problem(value: str) -> str:
         return f"Use at least {API_KEY_MIN_LENGTH} characters."
     if not _API_KEY_CHARS.fullmatch(value):
         return "Use letters, digits and . _ ~ + / = - only, without spaces or quotes."
+    if len(set(value)) < 6:
+        return "Use a key with more variety than that -- a few repeated characters are easy to guess."
     return ""
 
 
