@@ -18,6 +18,9 @@
 #   TRUSTA_LLAMA_ALLOW_FALLBACK=1 ./setup_env.sh  # unattended: accept a degraded llama
 #   TRUSTA_SKIP_XPU_CHECK=1 ./setup_env.sh      # skip the post-sync XPU smoke check
 #   TRUSTA_XPU_CHECK_TIMEOUT=600 ./setup_env.sh # raise the XPU check kill timeout (seconds)
+#   TRUSTA_SETUP_STRATA=1 ./setup_env.sh        # also install Strata (engine="strata", NVIDIA only)
+#                                               # through install_strata.sh: TRUSTA_STRATA_REPO /
+#                                               # _REF / _DIR / _SETUP_ARGS pick the source and model
 set -euo pipefail
 
 die() {
@@ -28,6 +31,9 @@ die() {
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 SERVICE_DIR="$PROJECT_ROOT/service"
+# record_env_setting: writes one setting into .env (shared with install_strata.sh).
+# shellcheck source=env_file.sh
+source "$SCRIPT_DIR/env_file.sh"
 
 # GGUF convert tooling (convert_hf_to_gguf.py / convert_lora_to_gguf.py + conversion/ + gguf-py):
 # only shipped with the llama.cpp sources, not built by the CMake targets, so they are copied
@@ -45,7 +51,7 @@ LLAMA_TOOLS=(llama-quantize llama-fit-params)
 LLAMA_TOOLS_DIR="$SERVICE_DIR/utils/llama-tools"
 LLAMA_CPP_URL="https://github.com/ggml-org/llama.cpp"
 # The one place the pinned build is named. TRUSTA_LLAMA_VERSION overrides it.
-LLAMA_VERSION_DEFAULT="b10107"
+LLAMA_VERSION_DEFAULT="b11701"
 LLAMA_VERSION="${TRUSTA_LLAMA_VERSION:-$LLAMA_VERSION_DEFAULT}"
 # The sources are a tarball of the tag, not a clone.
 #
@@ -412,87 +418,21 @@ is_user_llama_binary() {
 }
 
 # The sparse checkout is only useful if the scripts the conversion code calls are actually there.
+# And that they are the pinned version's: conversion and the binary have to agree on the GGUF
+# format. Presence alone kept an older copy for good once the pin moved.
 have_convert_tooling() {
     [[ -f "$LLAMA_CONVERT_DIR/convert_hf_to_gguf.py" ]] &&
         [[ -f "$LLAMA_CONVERT_DIR/convert_lora_to_gguf.py" ]] &&
-        [[ -d "$LLAMA_CONVERT_DIR/gguf-py" ]]
+        [[ -d "$LLAMA_CONVERT_DIR/gguf-py" ]] &&
+        [[ "$(llama_stamp "$LLAMA_CONVERT_DIR")" == "$LLAMA_VERSION" ]]
 }
 
-# Record what setup_env actually resolved, so the service reads a decision instead of
-# repeating the search. PATH is per-process: setup runs in your shell, the service may run
-# under a service manager with a different one, and then the two disagree. The file ends up with
-# exactly one line per key: an override that resolves is kept as it is, one that
-# points at nothing is replaced by what was actually verified, and duplicates are collapsed.
-record_env_setting() {
-    local key="$1" resolved="$2" env_file="$PROJECT_ROOT/.env"
-    [[ -n "$resolved" ]] || return 0
-    if [[ ! -f "$env_file" ]]; then
-        # settings.py falls back to .env.example when .env is missing; creating one here would
-        # change which file the service loads, so only say what could not be recorded.
-        echo "[setup_env] no .env, so $key was not recorded (resolved: $resolved)"
-        return 0
-    fi
-    # Exactly one line for the key survives this. Appending whenever no *live* line
-    # matched left .env.example's commented example sitting above a second entry, so the file
-    # showed the key twice; and once two live lines exist python-dotenv silently keeps the last,
-    # which is not the one someone editing the first would expect.
-    local live="^[[:space:]]*$key[[:space:]]*="
-    local commented="^[[:space:]]*#[[:space:]]*$key[[:space:]]*="
-    local stripped previous dropped total bom
-    stripped="$(mktemp)"
-    # Drop a leading BOM first: it hides a first-line key from every ^ anchor below, and
-    # python-dotenv would read it as part of that key's name.
-    bom="$(printf '\357\273\277')"
-    sed "1s/^$bom//" "$env_file" > "$stripped"
-
-    total="$(grep -cE "$live" "$stripped" || true)"
-    dropped=$(( total > 0 ? total - 1 : 0 ))
-    previous="$(grep -m1 -E "$live" "$stripped" 2>/dev/null |
-        sed -E "s/$live[[:space:]]*//" | tr -d '"'"'"'' | sed 's/[[:space:]]*$//' || true)"
-
-    local rewritten
-    rewritten="$(mktemp)"
-    awk -v setting="$key=$resolved" -v live="$live" -v commented="$commented" '
-        {
-            if ($0 ~ live) {
-                if (placed) { next }        # a duplicate: drop it
-                buf[++n] = setting
-                placed = 1
-                next
-            }
-            buf[++n] = $0
-        }
-        END {
-            if (!placed) {
-                # Take over the commented example in place, so the key stays where the template
-                # put it instead of the file growing a second block saying the same thing.
-                for (i = 1; i <= n; i++) {
-                    if (buf[i] ~ commented) { buf[i] = setting; placed = 1; break }
-                }
-            }
-            if (!placed) {
-                buf[++n] = ""
-                buf[++n] = "# Recorded by setup_env: the llama path it resolved, so the service does not"
-                buf[++n] = "# have to re-resolve it from a possibly different PATH."
-                buf[++n] = setting
-            }
-            for (i = 1; i <= n; i++) print buf[i]
-        }
-    ' "$stripped" > "$rewritten"
-
-    # cat rather than mv: keeps the original inode, owner and mode, which matter for a .env.
-    cat "$rewritten" > "$env_file"
-    rm -f "$stripped" "$rewritten"
-
-    if [[ "$previous" == "$resolved" ]]; then
-        echo "[setup_env] .env already records $key=$resolved"
-    elif [[ -n "$previous" ]]; then
-        echo "[setup_env] .env $key updated to $resolved (was $previous)"
-    else
-        echo "[setup_env] recorded $key=$resolved in .env"
-    fi
-    (( dropped > 0 )) &&
-        echo "[setup_env] removed $dropped duplicate $key line(s) from .env"
+# The version setup_env recorded when it installed into a directory, or nothing. Recorded
+# rather than asked of the binary: this build is made from a source archive and answers
+# --version with "version: 0 (unknown)".
+llama_stamp() {
+    local stamp="$1/$LLAMA_SRC_STAMP"
+    [[ -f "$stamp" ]] && tr -d '[:space:]' < "$stamp"
     return 0
 }
 
@@ -768,6 +708,8 @@ build_llama_from_source() {
     # unable to find anything. cp -P keeps the links as links instead of duplicating the target.
     find "$LLAMA_BUILD_DIR/build" \( -type f -o -type l \) -name "*.so*" \
         -exec cp -Pf {} "$dest/" \; 2>/dev/null || true
+    # What this directory now holds, for the next run to compare against the pin.
+    printf '%s\n' "$ver" > "$dest/$LLAMA_SRC_STAMP"
     echo "[setup_env] llama built into $dest: $(basename -a "${outputs[@]}" | tr '\n' ' ')"
     return 0
 }
@@ -1200,7 +1142,21 @@ else
         # from before the tools were built, or a server brought from elsewhere, would otherwise
         # be left without them for good, since every later run stops at this check.
         mapfile -t missing_tools < <(missing_llama_tools "$existing_llama")
-        if ((${#missing_tools[@]} == 0)); then
+        installed_version="$(llama_stamp "$LLAMA_BIN_DIR")"
+        if in_llama_bin_dir "$existing_llama" && [[ "$installed_version" != "$LLAMA_VERSION" ]]; then
+            # Our own build of another version -- or of one from before the record was kept.
+            # It used to be left alone whatever it was, so moving the pin reached no machine
+            # that was already set up. The build replaces the install only once it has
+            # produced llama-server, so a failure leaves the old one running.
+            was="${installed_version:-an unrecorded version}"
+            echo "[setup_env] llama in $LLAMA_BIN_DIR is $was; building the pinned $LLAMA_VERSION"
+            if build_llama_from_source; then
+                llama_bin_status="built $LLAMA_VERSION ($LLAMA_BACKEND), replacing $was"
+            else
+                echo "[setup_env] WARNING: could not build $LLAMA_VERSION; keeping $was at $existing_llama" >&2
+                llama_bin_status="already present ($was; could not build $LLAMA_VERSION)"
+            fi
+        elif ((${#missing_tools[@]} == 0)); then
             echo "[setup_env] llama binary already present at $existing_llama — leaving it alone (TRUSTA_INSTALL_LLAMA=1 to reinstall)"
             llama_bin_status="already present"
         elif ! is_user_llama_binary "$existing_llama"; then
@@ -1282,6 +1238,25 @@ else
     fi
 fi
 
+# Strata last: its setup compiles an engine and installs a model, the longest step by far, and
+# nothing above depends on it.
+case "${TRUSTA_SETUP_STRATA:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+        # Deep sleep, which the backend always starts Strata with, is built on CUDA's virtual
+        # memory API; there is no build of it for another accelerator.
+        [[ "$ACCEL" == "cuda" ]] ||
+            die "TRUSTA_SETUP_STRATA=1 needs an NVIDIA GPU (detected: $ACCEL); Strata's deep sleep is CUDA-only"
+        "$SCRIPT_DIR/install_strata.sh" || die "Strata was not installed (see above)"
+        STRATA_STATUS="installed (${TRUSTA_STRATA_REF:-feat/deep-sleep})"
+        ;;
+    0|false|FALSE|no|NO|off|OFF|"")
+        STRATA_STATUS="skipped (TRUSTA_SETUP_STRATA=1 to install)"
+        ;;
+    *)
+        die "unsupported TRUSTA_SETUP_STRATA value: ${TRUSTA_SETUP_STRATA} (use 1 / 0)"
+        ;;
+esac
+
 echo ""
 echo "=========================================="
 echo "  Environment setup complete"
@@ -1294,4 +1269,5 @@ echo "  vLLM Setup  : ${TRUSTA_SETUP_VLLM:-auto} (installed: $SETUP_VLLM)"
 echo "  DeepSpeed   : $DEEPSPEED_AIO_STATUS"
 echo "  llama       : $LLAMA_STATUS"
 echo "  llama tools : $LLAMA_TOOLS_STATUS"
+echo "  Strata      : $STRATA_STATUS"
 echo "=========================================="

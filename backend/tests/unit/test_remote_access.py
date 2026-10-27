@@ -277,7 +277,10 @@ def test_the_real_app_applies_it(monkeypatch):
 def test_the_real_app_opens_management_with_all(monkeypatch):
     app = _real_app(monkeypatch, access="all")
     remote = TestClient(app, client=REMOTE)
-    assert remote.get("/inference/status", headers={"Authorization": f"Bearer {KEY}"}).status_code == 200
+    assert (
+        remote.get("/inference/status", headers={"Authorization": f"Bearer {KEY}"}).status_code
+        == 200
+    )
 
 
 def test_the_real_app_answers_cors_for_this_machine_only(monkeypatch):
@@ -289,7 +292,9 @@ def test_the_real_app_answers_cors_for_this_machine_only(monkeypatch):
     assert ours.headers.get("access-control-allow-origin") == "http://localhost:5173"
     assert ours.headers.get("access-control-allow-credentials") is None
 
-    theirs = local.options("/config/models", headers={"Origin": "https://evil.example", **preflight})
+    theirs = local.options(
+        "/config/models", headers={"Origin": "https://evil.example", **preflight}
+    )
     assert "access-control-allow-origin" not in theirs.headers
 
 
@@ -344,7 +349,14 @@ def test_tuning_flags_still_pass():
     InferenceConfig(
         model_name="m",
         engine="llama_server",
-        llama_server_extra_args=["--mlock", "--no-mmap", "-ot", "exps=CPU", "--mmproj", "/m/p.gguf"],
+        llama_server_extra_args=[
+            "--mlock",
+            "--no-mmap",
+            "-ot",
+            "exps=CPU",
+            "--mmproj",
+            "/m/p.gguf",
+        ],
     )
     InferenceConfig(
         model_name="m",
@@ -448,3 +460,87 @@ def test_llama_server_url_on_this_machine_is_fine(url):
 def test_llama_server_url_elsewhere_is_refused(url):
     with pytest.raises(ValidationError, match="this machine"):
         InferenceConfig(model_name="m", engine="llama_server", llama_server_url=url)
+
+
+def test_health_tells_another_machine_only_that_it_is_up(monkeypatch):
+    """Without a key, another machine learned the loaded model's path and config."""
+    app = _real_app(monkeypatch)
+    remote = TestClient(app, client=REMOTE).get("/health")
+    assert remote.status_code == 200
+    assert remote.json() == {"status": "healthy"}
+
+    local = TestClient(app, client=LOCAL, base_url=LOCAL_URL).get("/health").json()
+    assert {"model_loaded", "platform", "supported_engines"} <= set(local)
+
+
+def test_health_tells_a_machine_with_the_key_everything(monkeypatch):
+    """The console reads platform and training_supported from a backend elsewhere."""
+    app = _real_app(monkeypatch)
+    full = _get(app, REMOTE, "/health", KEY).json()
+    assert {"model_loaded", "platform", "training_supported"} <= set(full)
+    assert _get(app, REMOTE, "/health", "wrong").json() == {"status": "healthy"}
+
+
+def test_wrong_keys_on_health_count_toward_the_lockout():
+    """/health answers without a key, but it is no way to try keys past the lockout."""
+    clock = _Clock()
+    app = _locking_app(clock)
+    for _ in range(3):
+        assert _get(app, REMOTE, "/health", "wrong").status_code == 200
+    assert _get(app, REMOTE, "/v1/models", KEY).status_code == 429
+
+
+# ------------------------------------------------------------- browser preflight
+_PREFLIGHT = {
+    "Origin": "http://localhost:5173",
+    "Access-Control-Request-Method": "GET",
+    "Access-Control-Request-Headers": "authorization",
+}
+
+
+def test_the_real_app_answers_a_preflight_from_another_machine_without_the_key(monkeypatch):
+    """A preflight cannot carry the key; it used to get a 401, count as a wrong key, lock out."""
+    app = _real_app(monkeypatch, access="all")
+    remote = TestClient(app, client=REMOTE)
+    for _ in range(20):
+        response = remote.options("/inference/status", headers=_PREFLIGHT)
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    auth = {"Origin": "http://localhost:5173", "Authorization": f"Bearer {KEY}"}
+    assert remote.get("/inference/status", headers=auth).status_code == 200  # not locked out
+
+
+def test_the_real_app_still_wants_the_key_after_a_preflight(monkeypatch):
+    app = _real_app(monkeypatch, access="all")
+    remote = TestClient(app, client=REMOTE)
+    refused = remote.get("/inference/status", headers={"Origin": "http://localhost:5173"})
+    assert refused.status_code == 401
+    assert refused.headers["access-control-allow-origin"] == "http://localhost:5173"  # readable
+    foreign = remote.options(
+        "/inference/status", headers={**_PREFLIGHT, "Origin": "https://evil.example"}
+    )
+    assert "access-control-allow-origin" not in foreign.headers
+    assert (
+        remote.get("/inference/status", headers={"Authorization": f"Bearer {KEY}"}).status_code
+        == 200
+    )
+
+
+def test_the_real_app_keeps_the_management_api_local_by_default_after_a_preflight(monkeypatch):
+    """Answering the preflight does not open anything: the default mode still refuses."""
+    app = _real_app(monkeypatch)
+    remote = TestClient(app, client=REMOTE)
+    assert remote.options("/inference/status", headers=_PREFLIGHT).status_code == 200
+    auth = {"Origin": "http://localhost:5173", "Authorization": f"Bearer {KEY}"}
+    assert remote.get("/inference/status", headers=auth).status_code == 403
+
+
+def test_a_page_from_another_site_is_still_refused_on_this_machine(monkeypatch):
+    app = _real_app(monkeypatch)
+    local = TestClient(app, client=LOCAL, base_url=LOCAL_URL)
+    evil = {**_PREFLIGHT, "Origin": "http://evil.example"}
+    assert local.options("/inference/unload_model", headers=evil).status_code == 400
+    assert (
+        local.post("/inference/unload_model", headers={"Origin": "http://evil.example"}).status_code
+        == 403
+    )

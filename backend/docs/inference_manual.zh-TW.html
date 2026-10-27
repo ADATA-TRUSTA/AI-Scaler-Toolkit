@@ -220,6 +220,7 @@
         .tag-transformers { background: #dbeafe; color: #1d4ed8; }
         .tag-vllm        { background: #f3e8ff; color: #7c3aed; }
         .tag-llama       { background: #fef3c7; color: #d97706; }
+        .tag-strata      { background: #dcfce7; color: #15803d; }
 
         .lang-switch {
             margin: 0.75rem 0 0;
@@ -251,7 +252,7 @@
         <header>
             <h1>Trusta AST Inference Service 教學手冊</h1>
             <p>本文檔詳細說明了推理服務的架構、API 流程以及程式碼結構，適用於團隊教育訓練。</p>
-            <p style="color:#64748b; font-size:0.9em;">適用版本：支援三種推理引擎 (Transformers / vLLM / llama-server)，主要對話端點已升級為 OpenAI 相容 API。</p>
+            <p style="color:#64748b; font-size:0.9em;">適用版本：支援四種推理引擎 (Transformers / vLLM / llama-server / Strata)，主要對話端點已升級為 OpenAI 相容 API。</p>
             <p class="lang-switch"><a href="inference_manual.html">English</a><span class="current">繁體中文</span></p>
         </header>
 
@@ -297,9 +298,10 @@
                 Engine -- transformers --> TF["HF Transformers 模型<br/>常駐於 worker"]
                 Engine -- vllm --> VLLM["vLLM server<br/>子行程"]
                 Engine -- llama_server --> LLAMA["llama-server<br/>子行程"]
+                Engine -- strata --> STRATA["Strata server<br/>子行程"]
             </div>
 
-            <p><strong>載入</strong>是一致的：三種 engine 都由隔離 worker 負責載入，這也是 OOM 時能靠終止並重啟該行程來復原的原因。
+            <p><strong>載入</strong>是一致的：每種 engine 都由隔離 worker 負責載入，這也是 OOM 時能靠終止並重啟該行程來復原的原因。
             <strong>生成</strong>則不然，會依 engine 走兩條不同路徑：</p>
 
             <div class="mermaid">
@@ -308,7 +310,7 @@
                 SW -- "false — transformers" --> GS["ModelManager<br/>.generate_stream()"]
                 GS --> Q["IPC data queue"]
                 Q --> TFG["worker：model.generate()<br/>+ TextIteratorStreamer"]
-                SW -- "true — vllm / llama_server" --> AGS["ModelManager<br/>.agenerate_stream()"]
+                SW -- "true — vllm / llama_server / strata" --> AGS["ModelManager<br/>.agenerate_stream()"]
                 AGS --> ASC["AsyncServerClient"]
                 ASC --> HTTP["engine 自身的 OpenAI 相容<br/>HTTP endpoint"]
                 TFG --> SSE["SSE：OpenAI chunk<br/>回傳給前端"]
@@ -316,9 +318,9 @@
             </div>
 
             <div class="warning">
-                <strong>兩條生成路徑。</strong>worker 行程負責<em>三種</em> engine 的模型載入，但只有
+                <strong>兩條生成路徑。</strong>worker 行程負責<em>每種</em> engine 的模型載入，但只有
                 <code>transformers</code> 也在那裡生成，並把 token 透過 IPC data queue 串流回來。
-                <code>vllm</code> 與 <code>llama_server</code> 的 worker 只負責啟動 server 子行程；生成改由主行程的
+                <code>vllm</code>、<code>llama_server</code> 與 <code>strata</code> 的 worker 只負責啟動 server 子行程；生成改由主行程的
                 <code>AsyncServerClient</code> 走該 engine 自己的 OpenAI 相容 HTTP endpoint 驅動，完全繞過 queue。
                 兩者由 <code>ModelManager.uses_async_http()</code> 決定，而 base engine 的
                 <code>generate()</code> 現在只要被呼叫就會拋錯 —— 代表 server engine 被誤導向了 worker。
@@ -358,6 +360,12 @@
                         <td>GGUF 格式模型，適合量化後部署</td>
                         <td>需提供 .gguf 檔案路徑，使用 llama.cpp 子程序</td>
                     </tr>
+                    <tr>
+                        <td><span class="engine-tag tag-strata">Strata</span></td>
+                        <td><code>strata</code></td>
+                        <td>單張 GPU 跑大型 MoE GGUF 模型：expert 從 DRAM 串流，KV cache 可到 256K。深度睡眠約 2 秒釋放 GPU 並保留對話</td>
+                        <td>已在 Linux 驗證。需要 Strata checkout（<code>STRATA_HOME</code>）與其 setup 產生的 run config；未設定 <code>STRATA_HOME</code> 時不提供此 engine。安裝：<code>TRUSTA_SETUP_STRATA=1 scripts/linux/setup_env.sh</code>（從 TRUSTA-SW-FAE/strata 編譯深度睡眠版，並安裝 IQ3_XXS）</td>
+                    </tr>
                 </tbody>
             </table>
 
@@ -390,6 +398,18 @@
                         <li><code>llama_server_mmproj</code>: 多模態 projector 路徑</li>
                         <li><code>llama_server_auto_start</code>: 自動啟動子程序 (預設 true)</li>
                     </ul>
+                </div>
+                <div class="card">
+                    <h3><span class="engine-tag tag-strata">Strata</span> 專用參數</h3>
+                    <ul>
+                        <li><code>model_path</code>: 模型第一個 GGUF 分片，即 model registry 的 <code>llama_gguf_models</code> 所列路徑。backend 會找出 Strata setup 為它產生的 run config（<code>STRATA_HOME/strata-&lt;model&gt;.json</code>，其 <code>--native</code> 為此檔）</li>
+                        <li><code>strata_config_path</code>（選填）：直接指定 run config（模型檔、MTP head、vision encoder 與進階啟動參數）。不會被修改，backend 會在 <code>STRATA_RUNTIME_DIR</code> 下另寫一份</li>
+                        <li><code>strata_max_context</code>: context 長度；留空沿用 run config 的值</li>
+                        <li><code>strata_vram_limit_gb</code>: 模型最多可用的 VRAM（GB；設 8 GB 實測用量 8.3 GB）。給越多越快；與其設低上限，不如留空，需要讓出 GPU 時讓模型睡眠</li>
+                        <li><code>strata_auto_wake</code>: 睡眠中收到對話請求時先喚醒（預設 true）；關閉則回 HTTP 503，例如 ComfyUI 正在使用 GPU 時</li>
+                    </ul>
+                    <p>固定開啟：深度睡眠，以及卸載時儲存對話（含 KV cache）、下次載入時還原。圖片輸入與進階參數（KV 格式、推測解碼、expert cache）依 run config。</p>
+                    <p>Server 設定放在 <code>.env</code>：<code>STRATA_HOME</code>、<code>STRATA_PYTHON</code>、<code>STRATA_ENGINE_BINARY</code>（必填：深度睡眠版）、<code>STRATA_PORT</code>（預設 5002）、<code>STRATA_HEALTH_TIMEOUT</code>、<code>STRATA_RUNTIME_DIR</code>。</p>
                 </div>
             </div>
         </section>
@@ -471,6 +491,18 @@
                     <h3>10. 清理 KV Cache</h3>
                     <code>POST /inference/cleanup_generation_memory</code>
                     <p>清理 KV cache 累積的記憶體，不卸載模型。適合長對話後或 OOM 重試前使用。</p>
+                </div>
+
+                <div class="card">
+                    <h3>11. 模型睡眠</h3>
+                    <code>POST /inference/sleep</code>
+                    <p>不卸載模型而釋放 GPU，例如讓給 ComfyUI。Body 為 <code>{"mode": "wait"}</code>（預設：等進行中的生成結束）或 <code>{"mode": "abort"}</code>。vLLM（<code>vllm_enable_sleep_mode</code>）：權重移到 pinned CPU 記憶體，KV cache 丟棄。Strata（固定可睡眠）：engine 的 VRAM 複製到主機 RAM，對話保留。回傳 <code>{"sleeping", "changed", "seconds"}</code>；重複呼叫不會改變狀態。載入的 engine 或設定不支援睡眠時回 HTTP 409。</p>
+                </div>
+
+                <div class="card">
+                    <h3>12. 模型喚醒</h3>
+                    <code>POST /inference/wake</code>
+                    <p>取回 GPU；回傳欄位相同，已清醒時不做任何事。讓出的 VRAM 已被佔用時回 HTTP 502。<code>GET /inference/status</code> 的 <code>sleeping</code> 欄位顯示目前狀態。</p>
                 </div>
             </div>
 
@@ -561,6 +593,7 @@ payload = {
                                 <li><code>transformers_engine.py</code>: HF Transformers 引擎</li>
                                 <li><code>vllm_engine.py</code>: vLLM 引擎（子程序管理；無 <code>generate()</code>）</li>
                                 <li><code>llama_server_engine.py</code>: llama-server 引擎（子程序管理；無 <code>generate()</code>）</li>
+                                <li><code>strata_engine.py</code>: Strata 引擎（server 子程序、run config、對話儲存／還原；無 <code>generate()</code>）</li>
                                 <li><code>vllm_error_classifier.py</code>: 將 vLLM 啟動／執行期失敗轉換成可據以處理的訊息</li>
                             </ul>
                         </td>
@@ -720,6 +753,15 @@ payload = {
   "n_ctx": 8192,
   "llama_server_port": 5001,
   "llama_server_np": 4                 // 平行生成槽位
+}</code></pre>
+
+            <h3>InferenceConfig — Strata 引擎載入範例</h3>
+            <pre><code>{
+  "model_name": "qwen3.8-flash-next-iq3_xxs",
+  "engine": "strata",
+  "model_path": "/data/models/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+  "strata_max_context": 262144,        // 選填；留空沿用 run config 的值
+  "strata_vram_limit_gb": 12           // 選填；留空讓模型用滿 GPU
 }</code></pre>
 
             <h3>OpenAI Chat Completions — 請求參數</h3>

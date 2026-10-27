@@ -664,7 +664,7 @@ class TransformersEngine(BaseEngine):
             logger.exception(f"[Worker] apply_chat_template error: {e}")
             self.data_queue.put({"type": "error", "request_id": request_id, "error": str(e)})
 
-    def cleanup_generation_memory(self) -> None:
+    def cleanup_generation_memory(self) -> str:
         """Release cached generation memory for the loaded model."""
         _cleanup_generation_memory(self.model)
-        self.data_queue.put({"type": "cleanup", "result": "generation memory cleaned"})
+        return "generation memory cleaned"

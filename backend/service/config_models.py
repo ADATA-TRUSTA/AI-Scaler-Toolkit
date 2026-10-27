@@ -29,6 +29,7 @@ class InferenceEngine(StrEnum):
     TRANSFORMERS = "transformers"
     LLAMA_SERVER = "llama_server"
     VLLM = "vllm"
+    STRATA = "strata"
 
 
 class QuantizationType(StrEnum):
@@ -81,7 +82,7 @@ class InferenceSharedFields(BaseModel):
     )
     engine: InferenceEngine = Field(
         default=InferenceEngine.TRANSFORMERS,
-        description="Inference engine: transformers (default), llama_server, vllm",
+        description="Inference engine: transformers (default), llama_server, vllm, strata",
     )
     quantization: QuantizationType | str | None = Field(
         default=None,
@@ -159,6 +160,20 @@ class InferenceSharedFields(BaseModel):
         default=None,
         description="[vLLM] --max-num-batched-tokens",
     )
+    vllm_enable_sleep_mode: bool | None = Field(
+        default=None, description="[vLLM] Started with --enable-sleep-mode"
+    )
+    strata_config_path: str | None = Field(default=None, description="[Strata] Run config")
+    strata_max_context: int | None = Field(default=None, description="[Strata] --max-context")
+    strata_vram_limit_gb: float | None = Field(
+        default=None, description="[Strata] VRAM limit in GB"
+    )
+    strata_auto_wake: bool | None = Field(
+        default=None, description="[Strata] Wake on a request while asleep instead of 503"
+    )
+    vllm_auto_wake: bool | None = Field(
+        default=None, description="[vLLM] Wake on a request while asleep instead of 503"
+    )
     vllm_mm_image_limit: int | None = Field(
         default=None,
         description="[vLLM] --limit-mm-per-prompt image limit",
@@ -181,6 +196,9 @@ class InferenceSharedFields(BaseModel):
     vllm_kv_offloading_disk_path: str | None = Field(
         default=None,
         description="[vLLM] Directory of the disk (NVMe) KV offload tier behind the DRAM tier",
+    )
+    vllm_kv_offloading_disk_max_gb: float | None = Field(
+        default=None, description="[vLLM] Size cap for the disk KV tier (GiB)"
     )
     vllm_hf_overrides: str | dict[str, Any] | None = Field(
         default=None,
@@ -423,6 +441,19 @@ class VllmConfigFields(BaseModel):
             "vllm_kv_offloading_size > 0"
         ),
     )
+    vllm_kv_offloading_disk_max_gb: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "[vLLM] Size cap (GiB) for vllm_kv_offloading_disk_path. vLLM itself never evicts "
+            "from the disk tier, so without a cap it only grows. Checked when the model "
+            "loads and then every VLLM_KV_DISK_CHECK_INTERVAL seconds; over the cap, the "
+            "least recently used blocks are deleted down to 90% of it. Deleting is safe "
+            "while vLLM runs: a missing block is a cache miss and is recomputed. "
+            "POST /inference/kv_cache/disk/cleanup trims or clears it on demand, with or "
+            "without a cap. Requires vllm_kv_offloading_disk_path"
+        ),
+    )
     vllm_tensor_parallel_size: int = Field(
         default=1,
         ge=1,
@@ -437,6 +468,26 @@ class VllmConfigFields(BaseModel):
         default=None,
         ge=1,
         description="[vLLM] --max-num-batched-tokens",
+    )
+    vllm_enable_sleep_mode: bool = Field(
+        default=False,
+        description=(
+            "[vLLM] Start with --enable-sleep-mode so POST /inference/sleep can free the "
+            "GPU without unloading: the weights move to pinned CPU memory and the KV "
+            "cache is dropped (measured on one 16 GB GPU with Qwen3.5-35B-A3B GPTQ-Int4: "
+            "12.9 GiB freed, woken in 0.3 s). Costs host RAM equal to the weights on the "
+            "GPU while asleep. Needs VLLM_SERVER_HOST on loopback, because the sleep "
+            "endpoints come with vLLM's admin API"
+        ),
+    )
+    vllm_auto_wake: bool = Field(
+        default=True,
+        description=(
+            "[vLLM] With the model asleep, a generation request wakes it first (true, "
+            "default) or is refused with HTTP 503 (false). Refusing keeps the GPU free "
+            "for whatever it was released to; waking reclaims it, which can fail if "
+            "another process now holds that memory"
+        ),
     )
     # vLLM multimodal (Vision / Audio / Video) specific config
     # Applies to VLM models such as Gemma 4, Gemma 3n, Qwen-VL, LLaVA
@@ -570,9 +621,59 @@ class VllmConfigFields(BaseModel):
         return os.path.abspath(os.path.expanduser(stripped))
 
 
+class StrataConfigFields(BaseModel):
+    """
+    Everything the Strata engine reads. See :class:`LlamaServerConfigFields` on grouping.
+
+    Only what a first-time user sets is a field here. The rest of Strata's start-up flags
+    (KV format and residency, speculative decoding, the expert cache) live in the run config
+    its setup writes, which strata_config_path points at; edit that file to tune them.
+    Always on: deep sleep (POST /inference/sleep frees the GPU in about 2 s and keeps the
+    conversation; STRATA_ENGINE_BINARY is the build with it), saving the
+    conversation on unload and restoring it on the next load. Image input follows the run
+    config.
+    """
+
+    strata_config_path: str | None = Field(
+        default=None,
+        description=(
+            "[Strata] The model's Strata run config (the strata-<model>.json Strata's "
+            "setup writes: pack, GGUF shards, vision encoder, and the advanced start-up "
+            "flags). Optional: when omitted, the one in STRATA_HOME whose first GGUF "
+            "shard is model_path is used"
+        ),
+    )
+    strata_max_context: int | None = Field(
+        default=None,
+        ge=1024,
+        description="[Strata] Context length in tokens; when omitted, the run config's value",
+    )
+    strata_vram_limit_gb: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "[Strata] Most VRAM the model may take while awake, in GB. Strata sizes its "
+            "expert cache to fill the GPU; this leaves the rest free for other programs "
+            "(turned into --vram-reserve-mib from the VRAM free at load). More is faster: "
+            "decode measured 72-84 tok/s at ~15 GB against 45-54 at ~8 GB, so rather "
+            "than a low limit, leave it unset and POST /inference/sleep when another "
+            "program needs the GPU. When omitted, the run config's reserve"
+        ),
+    )
+    strata_auto_wake: bool = Field(
+        default=True,
+        description=(
+            "[Strata] With the model asleep, a generation request wakes it first "
+            "(true, default) or is refused with HTTP 503 (false) -- turn it off while "
+            "another program holds the GPU the model gave up"
+        ),
+    )
+
+
 class InferenceConfig(
     LlamaServerConfigFields,
     VllmConfigFields,
+    StrataConfigFields,
     InferenceSharedFields,
 ):
     """
@@ -739,6 +840,11 @@ class InferenceConfig(
             )
 
         kv_offload_on = bool(self.vllm_kv_offloading_size and self.vllm_kv_offloading_size > 0)
+        if self.vllm_kv_offloading_disk_max_gb and not self.vllm_kv_offloading_disk_path:
+            raise ValueError(
+                "vllm_kv_offloading_disk_max_gb caps the disk KV tier, but "
+                "vllm_kv_offloading_disk_path is not set, so there is no tier to cap"
+            )
         if self.vllm_kv_offloading_disk_path and not kv_offload_on:
             raise ValueError(
                 "vllm_kv_offloading_disk_path needs vllm_kv_offloading_size > 0: blocks on "
@@ -973,6 +1079,41 @@ class CleanupGenerationMemoryRequest(BaseModel):
             "visible slots are cleared"
         ),
     )
+
+
+class KvDiskCleanupRequest(BaseModel):
+    """Trim the vLLM disk KV tier on demand."""
+
+    target_gb: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Size (GiB) to trim the disk KV tier down to, least recently used blocks "
+            "first. 0 (the default) empties it"
+        ),
+    )
+
+
+class KvDiskUsageResponse(BaseModel):
+    """What the vLLM disk KV tier holds right now."""
+
+    path: str = Field(description="vllm_kv_offloading_disk_path of the current model")
+    max_gb: float | None = Field(
+        default=None, description="vllm_kv_offloading_disk_max_gb; null when uncapped"
+    )
+    total_bytes: int = Field(description="Bytes of block files plus in-flight temp files")
+    blocks: int = Field(description="Distinct KV blocks (one hash across all groups)")
+    block_files: int = Field(description="Block files on disk (a block has one per group)")
+    temp_files: int = Field(description="Temp files of writes in flight or abandoned")
+
+
+class KvDiskCleanupResponse(BaseModel):
+    """Result of an on-demand disk KV tier trim."""
+
+    path: str = Field(description="vllm_kv_offloading_disk_path of the current model")
+    deleted_files: int = Field(description="Files deleted")
+    freed_bytes: int = Field(description="Bytes freed")
+    remaining_bytes: int = Field(description="Bytes left in the tier")
 
 
 class RagAddDocument(BaseModel):
@@ -1333,10 +1474,25 @@ class ModelStatus(InferenceSharedFields):
 
     loaded: bool = Field(default=False, description="Whether the model is loaded")
     is_loading: bool = Field(default=False, description="Whether the model is loading")
+    sleeping: bool = Field(
+        default=False,
+        description=(
+            "[vLLM / Strata] Loaded but asleep (POST /inference/sleep): the GPU is free "
+            "and the weights wait in CPU memory. POST /inference/wake, or a request when "
+            "vllm_auto_wake / strata_auto_wake is on, brings it back"
+        ),
+    )
     loading_error: str | None = Field(default=None, description="Load error message")
     quantization: str | None = Field(default=None, description="Quantization type")
     device: str | None = Field(default=None, description="Device")
     memory_usage: dict | None = Field(default=None, description="Memory usage")
+    vllm_kv_disk_usage_bytes: int | None = Field(
+        default=None,
+        description=(
+            "[vLLM] Bytes in the disk KV tier as of the last cap check (null without a cap); "
+            "GET /inference/kv_cache/disk measures it now"
+        ),
+    )
     device_allocation: DeviceAllocation | None = Field(
         default=None,
         description="Actual device allocation stats (only available once loaded)",

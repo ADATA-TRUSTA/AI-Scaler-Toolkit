@@ -42,6 +42,14 @@ def _inference_payload(**overrides):
     return payload
 
 
+@pytest.fixture(autouse=True)
+def _no_strata_checkout(monkeypatch):
+    """Strata is offered only where a checkout is configured; keep a local .env out of these."""
+    from service.inference.engines import strata_engine
+
+    monkeypatch.setattr(strata_engine, "STRATA_HOME", "")
+
+
 def _pretend(monkeypatch, system: str) -> None:
     """Report a given OS from platform.system(), as platform_support reads it."""
     monkeypatch.setattr(platform_support.platform, "system", lambda: system)

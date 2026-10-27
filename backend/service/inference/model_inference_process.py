@@ -22,6 +22,7 @@ from ..config_models import InferenceConfig, InferenceEngine
 # Import settings BEFORE torch/transformers (sets HF_HOME environment variable)
 from ..settings import DEFAULT_GENERATION_TIMEOUT, configure_logging
 from .engines.llama_server_engine import LlamaServerEngine
+from .engines.strata_engine import StrataEngine
 
 # Import engines
 from .engines.transformers_engine import TransformersEngine
@@ -92,6 +93,14 @@ def _model_worker_process(
                         elif config.engine == InferenceEngine.VLLM:
                             logger.info("[Worker] Selecting VllmEngine")
                             engine = VllmEngine(
+                                status_queue,
+                                data_queue,
+                                stop_event,
+                                stop_generation_flag,
+                            )
+                        elif config.engine == InferenceEngine.STRATA:
+                            logger.info("[Worker] Selecting StrataEngine")
+                            engine = StrataEngine(
                                 status_queue,
                                 data_queue,
                                 stop_event,
@@ -226,13 +235,22 @@ def _model_worker_process(
                     logger.info("[Worker] cleanup_generation_memory command received")
                     if engine:
                         if isinstance(engine, LlamaServerEngine):
-                            engine.cleanup_generation_memory(request)
+                            result = engine.cleanup_generation_memory(request)
                         else:
                             # Other engines have no slot support; keep the global cleanup behavior
-                            engine.cleanup_generation_memory()
+                            result = engine.cleanup_generation_memory()
                     else:
                         _cleanup_memory()
-                        data_queue.put({"type": "cleanup", "result": "memory cleaned (no engine)"})
+                        result = "memory cleaned (no engine)"
+                    # Tagged with the request id: the manager's dispatcher drops anything
+                    # without one, which is how every cleanup reply used to be lost.
+                    data_queue.put(
+                        {
+                            "type": "cleanup",
+                            "request_id": request.get("request_id"),
+                            "result": result,
+                        }
+                    )
 
                 else:
                     logger.warning(f"[Worker] Unknown command: {command}")
@@ -311,6 +329,11 @@ class ModelInferenceProcess:
         # shared queue with multiple concurrent readers suffered from.
         self._request_queues: dict[str, ThreadQueue] = {}
         self._request_queues_lock = threading.Lock()
+        # update_status runs on the event loop and on the threads that serve chat. Two
+        # drains at once could each take one message and apply them out of order -- a
+        # "loading" applied after "ready" left the model looking busy for good, since
+        # nothing follows "ready".
+        self._status_lock = threading.Lock()
         self._dispatcher_thread: threading.Thread | None = None
         self._dispatcher_stop = threading.Event()
 
@@ -948,8 +971,13 @@ class ModelInferenceProcess:
         """Update state (reading from status_queue)."""
         if self.status_queue is None:
             return
+        with self._status_lock:
+            self._drain_status_queue()
 
-        # Drain all status messages from the queue first
+    def _drain_status_queue(self) -> None:
+        """Apply every pending status message, in order. Called under _status_lock."""
+        if self.status_queue is None:
+            return
         while not self.status_queue.empty():
             try:
                 response = self.status_queue.get_nowait()
@@ -1140,25 +1168,24 @@ class ModelInferenceProcess:
         if not self.request_queue or not (self.process and self.process.is_alive()):
             return {"status": "error", "message": "Worker process not alive"}
 
-        req_id = str(uuid.uuid4())  # Not actually used, kept for format consistency
+        req_id = str(uuid.uuid4())
         # The guard above ruled out request_queue being None; data_queue shares its lifetime
         if self.data_queue is None:
             return {"status": "error", "message": "Worker process not alive"}
-        self.request_queue.put(
-            {"command": "cleanup_generation_memory", "request_id": req_id, "slot": slot}
-        )
-        # Read the response (up to 5s)
-        start = time.time()
-        while time.time() - start < 5:
+        # The dispatcher is data_queue's only reader: wait on our own queue, registered
+        # before sending, as generate does. Reading data_queue here raced it and lost.
+        response_queue = self._register_request(req_id)
+        try:
+            self.request_queue.put(
+                {"command": "cleanup_generation_memory", "request_id": req_id, "slot": slot}
+            )
             try:
-                resp = self.data_queue.get(timeout=0.5)
-                if resp.get("type") == "cleanup":
-                    return {"status": "success", "message": resp.get("result")}
-                # Put non-cleanup responses back
-                self.data_queue.put(resp)
+                resp = response_queue.get(timeout=5)
             except Empty:
-                continue
-        return {"status": "timeout", "message": "Cleanup command timed out"}
+                return {"status": "timeout", "message": "Cleanup command timed out"}
+            return {"status": "success", "message": resp.get("result")}
+        finally:
+            self._unregister_request(req_id)
 
     def is_loaded(self) -> bool:
         """Check whether the model is loaded."""
@@ -1194,38 +1221,28 @@ class ModelInferenceProcess:
         # A ready model implies a live worker, so the IPC queues are never None
         if self.request_queue is None or self.data_queue is None:
             raise self._build_queue_unavailable_error("apply_chat_template")
-        # Send the request
-        self.request_queue.put(
-            {
-                "command": "apply_chat_template",
-                "request_id": request_id,
-                "messages": messages,
-                "template_kwargs": kwargs,
-            }
-        )
-
-        # Wait for the response (10s timeout) - read from data_queue
-        timeout = 10
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
+        # Registered before sending, for the same reason as cleanup_generation_memory.
+        response_queue = self._register_request(request_id)
+        try:
+            self.request_queue.put(
+                {
+                    "command": "apply_chat_template",
+                    "request_id": request_id,
+                    "messages": messages,
+                    "template_kwargs": kwargs,
+                }
+            )
             try:
-                response = self.data_queue.get(timeout=0.5)
-
-                if response.get("request_id") == request_id:
-                    if response.get("type") == "result":
-                        return response.get("result")
-                    elif response.get("type") == "error":
-                        error_msg = response.get("error", "Unknown error")
-                        raise RuntimeError(f"apply_chat_template failed: {error_msg}")
-                else:
-                    # Not our response, put it back on the queue
-                    self.data_queue.put(response)
-
+                response = response_queue.get(timeout=10)
             except Empty:
-                continue
+                raise TimeoutError("apply_chat_template request timed out") from None
+        finally:
+            self._unregister_request(request_id)
 
-        raise TimeoutError("apply_chat_template request timed out")
+        if response.get("type") == "error":
+            error_msg = response.get("error", "Unknown error")
+            raise RuntimeError(f"apply_chat_template failed: {error_msg}")
+        return response.get("result")
 
     def get_error_details(self) -> dict[str, Any] | None:
         """Get detailed error info (including the traceback)."""

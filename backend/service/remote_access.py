@@ -161,10 +161,17 @@ def remote_refusal(
             "Access from other computers is not enabled on this service. "
             "Turn it on in AI Scaler Toolkit's settings, which also sets its API key."
         )
-    supplied = _bearer(authorization)
-    if not supplied or not secrets.compare_digest(supplied.encode(), api_key.encode()):
+    if not key_matches(authorization, api_key):
         return 401, "A valid API key is required: send it as 'Authorization: Bearer <key>'."
     return None
+
+
+def key_matches(authorization: str | None, api_key: str) -> bool:
+    """Whether the Authorization header carries this service's key."""
+    supplied = _bearer(authorization)
+    return bool(supplied and api_key) and secrets.compare_digest(
+        supplied.encode(), api_key.encode()
+    )
 
 
 class KeyLockout:
@@ -271,6 +278,8 @@ class RemoteAccessMiddleware:
             if refusal is not None and refusal[0] == 401:
                 self.lockout.record_failure(str(address))
                 extra = {"WWW-Authenticate": "Bearer"}
+            elif path in OPEN_PATHS and _bearer(headers.get("authorization")):
+                self._check_open_path_key(scope, headers, str(address))
         if refusal is None:
             await self.app(scope, receive, send)
             return
@@ -281,3 +290,18 @@ class RemoteAccessMiddleware:
         await JSONResponse({"detail": detail}, status_code=status, headers=extra)(
             scope, receive, send
         )
+
+    def _check_open_path_key(self, scope: Scope, headers: dict[str, str], address: str) -> None:
+        """
+        A key sent to an open path: mark the request when it is right (``state.api_key_ok``).
+
+        The path answers either way, with less without the key. A wrong key still counts
+        toward the lockout, and a locked-out address is not checked at all, so the open
+        path is no way around it.
+        """
+        if self.lockout.remaining(address):
+            return
+        if key_matches(headers.get("authorization"), self.api_key() or ""):
+            scope.setdefault("state", {})["api_key_ok"] = True
+        else:
+            self.lockout.record_failure(address)

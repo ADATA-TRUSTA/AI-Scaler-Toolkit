@@ -16,6 +16,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from multiprocessing import Queue
 from multiprocessing.synchronize import Event as EventClass
+from pathlib import Path
 from typing import IO, Any
 
 import httpx2
@@ -48,6 +49,11 @@ from .vllm_error_classifier import (
 )
 
 logger = configure_logging(__name__)
+
+# The guard vLLM loads in front of its admin endpoints. Its directory, and nothing else of
+# the service, goes on vLLM's PYTHONPATH; see _admin_endpoints_on.
+_ADMIN_GUARD_DIR = Path(__file__).resolve().parents[2] / "vllm_middleware"
+_ADMIN_GUARD_MODULE = "ast_vllm_guard"
 
 # Values of vllm_tool_call_parser that mean "serve chat only".
 _TOOL_PARSER_OFF_VALUES = frozenset({"off", "none", "disabled", "false", "0"})
@@ -657,6 +663,8 @@ class VllmEngine(BaseEngine):
             args.extend(["--max-num-batched-tokens", str(config.vllm_max_num_batched_tokens)])
         if config.vllm_enforce_eager:
             args.append("--enforce-eager")
+        if config.vllm_enable_sleep_mode:
+            args.append("--enable-sleep-mode")
         if config.trust_remote_code:
             args.append("--trust-remote-code")
         if not self._is_vllm_request_logging_enabled():
@@ -941,6 +949,7 @@ class VllmEngine(BaseEngine):
         """
         cmd: list[str] = ["vllm", "serve"]
         cmd.extend(self._core_args(config))
+        cmd.extend(self._admin_guard_args(config))
         cmd.extend(self._perf_args(config))
         cmd.extend(self._mm_args(config))
         cmd.extend(self._template_args(config))
@@ -1226,31 +1235,72 @@ class VllmEngine(BaseEngine):
             # A hostname we cannot resolve to a literal: assume it is routable
             return False
 
-    def _admin_endpoint_env(self) -> dict[str, str]:
+    @staticmethod
+    def _asks_for_sleep_mode(config: InferenceConfig) -> bool:
         """
-        vLLM's admin endpoints: off unless VLLM_SERVER_DEV_MODE is set, and never off-host.
+        Whether vLLM starts with sleep mode on: vllm_enable_sleep_mode, or the extra args.
 
-        vLLM 0.20.1 mounts ``/reset_prefix_cache`` (used by ``cleanup_generation_memory``)
-        only under ``VLLM_SERVER_DEV_MODE``; without it the cleanup call 404s and reports
-        as degraded. The same flag mounts ``/update_weights`` and ``/collective_rpc``, and
-        loopback alone does not protect those: ``/collective_rpc`` reads its body whatever
-        the content type, outside the paths ``--api-key`` guards, so any web page open on
-        this machine could post to it. They used to be on whenever the bind was loopback;
-        now only when asked for -- see settings.VLLM_SERVER_DEV_MODE.
-
-        Always written, as "0" when off, so a value inherited from the environment cannot
-        turn them on behind the setting's back.
+        The field adds --enable-sleep-mode itself (_perf_args), so it needs the admin
+        endpoints as much as the flag in the extra args does: without them POST
+        /inference/sleep reached a /sleep vLLM had not mounted, and got a 404. The extra
+        args come last on the command line, so the last of their two flags wins over it.
         """
-        if not VLLM_SERVER_DEV_MODE:
-            return {"VLLM_SERVER_DEV_MODE": "0"}
+        enabled = bool(config.vllm_enable_sleep_mode)
+        for arg in config.vllm_server_extra_args or []:
+            flag = str(arg).strip()
+            if flag == "--enable-sleep-mode":
+                enabled = True
+            elif flag == "--no-enable-sleep-mode":
+                enabled = False
+        return enabled
+
+    def _admin_endpoints_on(self, config: InferenceConfig) -> bool:
+        """
+        Whether vLLM's admin endpoints are mounted (VLLM_SERVER_DEV_MODE), behind AdminGuard.
+
+        vLLM mounts them all under the one flag: ``/sleep``, ``/wake_up`` and
+        ``/is_sleeping``, which a GPU sharing tool needs once ``--enable-sleep-mode`` is
+        on; ``/reset_prefix_cache``, which cleanup_generation_memory uses; and with them
+        ``/collective_rpc``, ``/update_weights`` and the rest, which ``--api-key`` does not
+        cover and which any web page open on this machine could post to. So they are on
+        only when asked for -- sleep mode in the extra args, or
+        settings.VLLM_SERVER_DEV_MODE -- and then always behind
+        service/vllm_middleware/ast_vllm_guard.py, which answers the first few to programs
+        on this machine and 404s the rest. Never when vLLM listens beyond this machine.
+        """
+        if not (VLLM_SERVER_DEV_MODE or self._asks_for_sleep_mode(config)):
+            return False
         if not self._is_loopback_bind(VLLM_SERVER_HOST):
             logger.warning(
-                "[Worker] VLLM_SERVER_HOST=%s is not loopback; leaving "
-                "VLLM_SERVER_DEV_MODE off. Prefix cache cleanup will report as degraded.",
+                "[Worker] VLLM_SERVER_HOST=%s is not loopback; leaving vLLM's admin "
+                "endpoints off. Sleep mode and prefix cache cleanup will not be available.",
                 VLLM_SERVER_HOST,
             )
+            return False
+        return True
+
+    def _admin_guard_args(self, config: InferenceConfig) -> list[str]:
+        """``--middleware`` for the guard, whenever the admin endpoints are on."""
+        if not self._admin_endpoints_on(config):
+            return []
+        return ["--middleware", f"{_ADMIN_GUARD_MODULE}.AdminGuard"]
+
+    def _admin_endpoint_env(self, config: InferenceConfig) -> dict[str, str]:
+        """
+        VLLM_SERVER_DEV_MODE, and the guard's directory on vLLM's PYTHONPATH.
+
+        Always written, as "0" when off, so a value inherited from the environment cannot
+        turn the endpoints on behind the setting's back -- or without the guard.
+        """
+        if not self._admin_endpoints_on(config):
             return {"VLLM_SERVER_DEV_MODE": "0"}
-        return {"VLLM_SERVER_DEV_MODE": "1"}
+        inherited = os.environ.get("PYTHONPATH")
+        return {
+            "VLLM_SERVER_DEV_MODE": "1",
+            "PYTHONPATH": os.pathsep.join(
+                [str(_ADMIN_GUARD_DIR)] + ([inherited] if inherited else [])
+            ),
+        }
 
     def _build_server_env(self, config: InferenceConfig) -> dict[str, str]:
         """Build the environment variables for the vLLM subprocess."""
@@ -1275,7 +1325,7 @@ class VllmEngine(BaseEngine):
         else:
             env.setdefault("VLLM_LOGGING_LEVEL", VLLM_LOGGING_LEVEL)
         env["HF_HUB_OFFLINE"] = "1"
-        env.update(self._admin_endpoint_env())
+        env.update(self._admin_endpoint_env(config))
         # Not a tuning knob: vLLM roots its prefix-hash chain at NONE_HASH, which
         # falls back to os.urandom(32) when PYTHONHASHSEED is unset. KV blocks
         # offloaded to disk are named by that hash, so without a fixed seed every
@@ -1347,6 +1397,7 @@ class VllmEngine(BaseEngine):
               ``python -m vllm.entrypoints.cli.main`` or system uv).
         3. ``VLLM_PORT`` is within 1-65535.
         4. The disk KV offload tier, when configured, can actually be used.
+        5. Sleep mode, when asked for, has the admin API it is driven through.
 
         Failures raise directly; the caller's ``load_model`` try/except reports
         the error to the main process via status_queue.
@@ -1359,6 +1410,15 @@ class VllmEngine(BaseEngine):
         self._resolve_vllm_port()
         # 4: disk KV offload tier
         self._prepare_kv_disk_tier(config)
+        # 5: sleep mode is driven through vLLM's admin API, which _admin_endpoint_env
+        # only enables on a loopback bind. Without it the model would load fine and
+        # every sleep would 404, so refuse the combination before loading anything.
+        if config.vllm_enable_sleep_mode and not self._is_loopback_bind(VLLM_SERVER_HOST):
+            raise RuntimeError(
+                f"vllm_enable_sleep_mode needs VLLM_SERVER_HOST on loopback (it is "
+                f"{VLLM_SERVER_HOST}): the sleep endpoints are part of vLLM's admin API, "
+                "which is only enabled on a loopback bind"
+            )
 
     def _start_server_process(self, config: InferenceConfig) -> None:
         port = self._resolve_vllm_port()
@@ -1900,7 +1960,7 @@ class VllmEngine(BaseEngine):
             path = "/" + path
         return f"{root.rstrip('/')}{path}"
 
-    def cleanup_generation_memory(self) -> None:
+    def cleanup_generation_memory(self) -> str:
         """
         Ask the vLLM server to reset its prefix cache and free accumulated KV memory.
 
@@ -1911,13 +1971,7 @@ class VllmEngine(BaseEngine):
         """
         # Report directly when the vLLM server is not ready (avoids a pointless HTTP call)
         if not self.runtime.base_url or self.runtime.client is None:
-            self.data_queue.put(
-                {
-                    "type": "cleanup",
-                    "result": "vLLM cleanup skipped: server not loaded",
-                }
-            )
-            return
+            return "vLLM cleanup skipped: server not loaded"
 
         url = self._vllm_admin_url("/reset_prefix_cache")
         headers = (
@@ -1929,12 +1983,7 @@ class VllmEngine(BaseEngine):
                 response = http.post(url, headers=headers)
                 response.raise_for_status()
             logger.info("[Worker] vLLM reset_prefix_cache OK (%s)", url)
-            self.data_queue.put(
-                {
-                    "type": "cleanup",
-                    "result": "vLLM prefix cache reset",
-                }
-            )
+            return "vLLM prefix cache reset"
         except httpx2.HTTPStatusError as e:
             # The endpoint may be disabled in some vLLM builds; not fatal
             status_code = e.response.status_code if e.response is not None else None
@@ -1942,20 +1991,10 @@ class VllmEngine(BaseEngine):
                 "[Worker] vLLM reset_prefix_cache returned %s; cleanup degraded.",
                 status_code,
             )
-            self.data_queue.put(
-                {
-                    "type": "cleanup",
-                    "result": (
-                        f"vLLM cleanup degraded: HTTP {status_code} "
-                        "(endpoint may be disabled in this vLLM build)"
-                    ),
-                }
+            return (
+                f"vLLM cleanup degraded: HTTP {status_code} "
+                "(the admin endpoints are off unless sleep mode or VLLM_SERVER_DEV_MODE is on)"
             )
         except (httpx2.HTTPError, OSError) as e:
             logger.warning("[Worker] vLLM reset_prefix_cache error: %s", e)
-            self.data_queue.put(
-                {
-                    "type": "cleanup",
-                    "result": f"vLLM cleanup failed: {e}",
-                }
-            )
+            return f"vLLM cleanup failed: {e}"

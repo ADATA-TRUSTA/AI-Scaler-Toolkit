@@ -449,6 +449,15 @@ VLLM_HEALTH_TIMEOUT: float = float(
     os.getenv("VLLM_HEALTH_TIMEOUT", str(_DEFAULT_VLLM_HEALTH_TIMEOUT))
 )
 
+# Seconds between checks of the disk KV tier against vllm_kv_offloading_disk_max_gb.
+# A scan is cheap (65 GB / 3228 block files measured at 0.02 s); the interval bounds
+# how far past the cap the tier can grow between checks under heavy prefill.
+# Env var: VLLM_KV_DISK_CHECK_INTERVAL
+_DEFAULT_VLLM_KV_DISK_CHECK_INTERVAL: float = 60.0
+VLLM_KV_DISK_CHECK_INTERVAL: float = float(
+    os.getenv("VLLM_KV_DISK_CHECK_INTERVAL", str(_DEFAULT_VLLM_KV_DISK_CHECK_INTERVAL))
+)
+
 # Host the API client uses to reach the vLLM server (usually 127.0.0.1)
 # Env var: VLLM_CLIENT_HOST
 _DEFAULT_VLLM_CLIENT_HOST: str = "127.0.0.1"
@@ -474,12 +483,13 @@ VLLM_ENABLE_LOG_REQUESTS: bool = _parse_bool_env(
 _DEFAULT_VLLM_SERVER_HOST: str = "127.0.0.1"
 VLLM_SERVER_HOST: str = os.getenv("VLLM_SERVER_HOST", _DEFAULT_VLLM_SERVER_HOST)
 
-# Whether to mount vLLM's admin endpoints (vLLM's own VLLM_SERVER_DEV_MODE). Off by default.
-# They include /reset_prefix_cache, which cleanup_generation_memory uses, but also
-# /collective_rpc and /update_weights -- and /collective_rpc reads its body as JSON whatever
-# the content type, outside the paths vLLM's --api-key guards. Loopback does not protect
-# it: any web page open on this machine can send it a plain POST. Turn it on only on a
-# machine where no browser runs, or behind something that keeps pages off the port.
+# Whether to mount vLLM's admin endpoints (vLLM's own VLLM_SERVER_DEV_MODE). Off by default;
+# --enable-sleep-mode in vllm_server_extra_args turns them on as well. vLLM mounts them all
+# at once: /sleep, /wake_up, /is_sleeping, /reset_prefix_cache (cleanup_generation_memory),
+# and also /collective_rpc and /update_weights, which --api-key does not cover and any web
+# page open on this machine could post to. So whenever they are on, vLLM loads
+# service/vllm_middleware/ast_vllm_guard.py: sleep, wake and the cache resets answer
+# programs on this machine, never a browser, and the rest answer 404.
 # Honoured only while VLLM_SERVER_HOST is loopback.
 # Env var: VLLM_SERVER_DEV_MODE
 VLLM_SERVER_DEV_MODE: bool = _parse_bool_env(os.getenv("VLLM_SERVER_DEV_MODE"), False)
@@ -503,6 +513,34 @@ _DEFAULT_VLLM_SERVER_PROJECT_DIR: str = str(PROJECT_ROOT)
 VLLM_SERVER_PROJECT_DIR: str = _get_env_path(
     "VLLM_SERVER_PROJECT_DIR", _DEFAULT_VLLM_SERVER_PROJECT_DIR
 )
+
+# ==================== Strata engine ====================
+# Strata (github.com/Niko1221/Strata) serves a MoE model with its experts in DRAM and the
+# hot ones cached on the GPU, behind its own OpenAI-compatible server (serve/server.py).
+# Nothing of it ships here: engine="strata" starts that server from a Strata checkout its
+# own setup prepared, so these point at one. Empty STRATA_HOME = the engine is not offered.
+
+# Env var: STRATA_HOME -- the Strata checkout (the directory holding serve/server.py)
+STRATA_HOME: str = os.getenv("STRATA_HOME", "")
+# Env var: STRATA_PYTHON -- the interpreter for serve/server.py (Strata's own venv)
+STRATA_PYTHON: str = os.getenv("STRATA_PYTHON", "")
+# Env var: STRATA_ENGINE_BINARY -- the Strata engine built with deep sleep (--sleep-mode);
+# required. It replaces the executable the run config names, which has no deep sleep.
+STRATA_ENGINE_BINARY: str = os.getenv("STRATA_ENGINE_BINARY", "")
+# Env var: STRATA_PORT -- loopback port of the managed Strata server
+_DEFAULT_STRATA_PORT: int = 5002
+STRATA_PORT: int = int(os.getenv("STRATA_PORT", str(_DEFAULT_STRATA_PORT)))
+# Env var: STRATA_HEALTH_TIMEOUT -- seconds to wait for the server to report the model loaded.
+# A 50 GiB expert arena read from a cold SSD plus the vision encoder's warm-up took ~25 s
+# here; a slow drive or a first start that builds caches takes several minutes.
+_DEFAULT_STRATA_HEALTH_TIMEOUT: float = 900.0
+STRATA_HEALTH_TIMEOUT: float = float(
+    os.getenv("STRATA_HEALTH_TIMEOUT", str(_DEFAULT_STRATA_HEALTH_TIMEOUT))
+)
+# Env var: STRATA_RUNTIME_DIR -- the run config the server is started with, its log, and
+# the slot files a conversation is saved to across an unload
+_DEFAULT_STRATA_RUNTIME_DIR: str = "./.cache/strata"
+STRATA_RUNTIME_DIR: str = _get_env_path("STRATA_RUNTIME_DIR", _DEFAULT_STRATA_RUNTIME_DIR)
 
 # ==================== Redis Configuration ====================
 # 💡 Edit here to change the Redis connection settings, or override with env vars

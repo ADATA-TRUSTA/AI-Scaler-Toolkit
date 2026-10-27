@@ -1254,7 +1254,7 @@ class LlamaServerEngine(BaseEngine):
                 }
             )
 
-    def cleanup_generation_memory(self, request: dict[str, Any] | None = None) -> None:
+    def cleanup_generation_memory(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
         """Report cleanup as a no-op (llama-server manages KV cache by slot)."""
         try:
             slot = None
@@ -1277,21 +1277,11 @@ class LlamaServerEngine(BaseEngine):
                 "[LlamaServer] cleanup_generation_memory skipped (auto slot/prefix cache management)"
             )
 
-            self.data_queue.put(
-                {
-                    "type": "cleanup",
-                    "result": summary,
-                }
-            )
+            return summary
         except Exception as e:
-            self.data_queue.put(
-                {
-                    "type": "cleanup",
-                    "result": {
-                        "cleared": 0,
-                        "total": 0,
-                        "slots": [],
-                        "message": f"cleanup failed: {e}",
-                    },
-                }
-            )
+            return {
+                "cleared": 0,
+                "total": 0,
+                "slots": [],
+                "message": f"cleanup failed: {e}",
+            }

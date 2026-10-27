@@ -210,7 +210,7 @@ $LlamaTools = [ordered]@{
 $LlamaToolsDir   = Join-Path $ServiceDir "utils\llama-tools"
 $LlamaCppUrl     = "https://github.com/ggml-org/llama.cpp"
 # The one place the pinned build is named. -LlamaVersion / TRUSTA_LLAMA_VERSION override it.
-$LlamaVersionDefault = "b10107"
+$LlamaVersionDefault = "b11701"
 # The convert scripts come from an archive of the tag, not a checkout.
 #
 # git used to be a hard prerequisite of this script and of the desktop launcher's preflight
@@ -509,6 +509,8 @@ function Install-LlamaRelease {
         }
     }
     $script:LlamaInstalled = $true
+    # What this directory now holds, for the next run to compare against the pin.
+    Set-Content -Path (Join-Path $Destination $LlamaSrcStamp) -Value $LlamaVersion -Encoding ascii
     Write-Host "[setup_env] llama $LlamaVersion ($script:LlamaBackendResolved) installed: $Destination"
 }
 
@@ -847,10 +849,24 @@ function Test-UserLlamaBinary {
 }
 
 # The sparse checkout is only useful if the scripts the conversion code calls are actually there.
+# And that they are the pinned version's: conversion and the binary have to agree on the GGUF
+# format. Presence alone kept an older copy for good once the pin moved.
 function Test-LlamaConvertTooling {
     return (Test-Path (Join-Path $LlamaConvertDir "convert_hf_to_gguf.py")) -and
            (Test-Path (Join-Path $LlamaConvertDir "convert_lora_to_gguf.py")) -and
-           (Test-Path (Join-Path $LlamaConvertDir "gguf-py"))
+           (Test-Path (Join-Path $LlamaConvertDir "gguf-py")) -and
+           ((Get-LlamaStamp -Dir $LlamaConvertDir) -eq $LlamaVersion)
+}
+
+# The version setup_env recorded when it installed into a directory, or "" when it recorded
+# none. Recorded rather than asked of the binary: a release answers --version with its build
+# number, but the Linux build is made from a source archive and answers "version: 0
+# (unknown)", so the record is the one answer that works the same on both.
+function Get-LlamaStamp {
+    param([string]$Dir)
+    $stamp = Join-Path $Dir $LlamaSrcStamp
+    if (-not (Test-Path $stamp -PathType Leaf)) { return "" }
+    return ((Get-Content $stamp -Raw -ErrorAction SilentlyContinue) -as [string]).Trim()
 }
 
 # XPU only: prove the install can actually compute. torch.xpu.is_available() can report True
@@ -1153,7 +1169,22 @@ if ($LlamaMode -eq "skip") {
         # run stops at this check.
         $missingTools = Get-MissingLlamaTools -Server $existingLlama
         $missingText = $missingTools -join " "
-        if ($missingTools.Count -eq 0) {
+        $installedVersion = Get-LlamaStamp -Dir $LlamaBinDir
+        if ((Test-InLlamaBinDir -Binary $existingLlama) -and $installedVersion -ne $LlamaVersion) {
+            # Our own install of another version -- or of one from before the record was kept.
+            # It used to be left alone whatever it was, so moving the pin reached no machine
+            # that was already set up. Replaced in place; the install keeps the old files until
+            # the new release has checked out, so a failure leaves the old one running.
+            $was = if ($installedVersion) { $installedVersion } else { "an unrecorded version" }
+            Write-Host "[setup_env] llama in $LlamaBinDir is $was; installing the pinned $LlamaVersion"
+            Install-LlamaRelease
+            if ($LlamaInstalled) {
+                $binStatus = "release $LlamaVersion ($LlamaBackendResolved), replacing $was"
+            } else {
+                Write-Warning "[setup_env] could not install $LlamaVersion; keeping $was at $existingLlama"
+                $binStatus = "already present ($was; could not install $LlamaVersion)"
+            }
+        } elseif ($missingTools.Count -eq 0) {
             Write-Host "[setup_env] llama binary already present at $existingLlama — leaving it alone (-Llama force to reinstall)"
             $binStatus = "already present"
         } elseif (-not (Test-UserLlamaBinary -Binary $existingLlama)) {

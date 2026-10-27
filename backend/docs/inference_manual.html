@@ -220,6 +220,7 @@
         .tag-transformers { background: #dbeafe; color: #1d4ed8; }
         .tag-vllm        { background: #f3e8ff; color: #7c3aed; }
         .tag-llama       { background: #fef3c7; color: #d97706; }
+        .tag-strata      { background: #dcfce7; color: #15803d; }
 
         .lang-switch {
             margin: 0.75rem 0 0;
@@ -251,7 +252,7 @@
         <header>
             <h1>Trusta AST Inference Service User Manual</h1>
             <p>This document explains in detail the architecture of the inference service, the API flow, and the code structure. It is intended for team training.</p>
-            <p style="color:#64748b; font-size:0.9em;">Applicable version: supports three inference engines (Transformers / vLLM / llama-server); the primary chat endpoint has been upgraded to an OpenAI-compatible API.</p>
+            <p style="color:#64748b; font-size:0.9em;">Applicable version: supports four inference engines (Transformers / vLLM / llama-server / Strata); the primary chat endpoint has been upgraded to an OpenAI-compatible API.</p>
             <p class="lang-switch"><span class="current">English</span><a href="inference_manual.zh-TW.html">繁體中文</a></p>
         </header>
 
@@ -297,6 +298,7 @@
                 Engine -- transformers --> TF["HF Transformers model<br/>held in the worker"]
                 Engine -- vllm --> VLLM["vLLM server<br/>subprocess"]
                 Engine -- llama_server --> LLAMA["llama-server<br/>subprocess"]
+                Engine -- strata --> STRATA["Strata server<br/>subprocess"]
             </div>
 
             <p><strong>Loading</strong> is uniform: every engine is loaded by the isolated worker,
@@ -309,7 +311,7 @@
                 SW -- "false — transformers" --> GS["ModelManager<br/>.generate_stream()"]
                 GS --> Q["IPC data queue"]
                 Q --> TFG["worker: model.generate()<br/>+ TextIteratorStreamer"]
-                SW -- "true — vllm / llama_server" --> AGS["ModelManager<br/>.agenerate_stream()"]
+                SW -- "true — vllm / llama_server / strata" --> AGS["ModelManager<br/>.agenerate_stream()"]
                 AGS --> ASC["AsyncServerClient"]
                 ASC --> HTTP["engine's own OpenAI-compatible<br/>HTTP endpoint"]
                 TFG --> SSE["SSE: OpenAI chunks<br/>back to the client"]
@@ -318,9 +320,9 @@
 
             <div class="warning">
                 <strong>Two generation paths.</strong> The worker process loads the model for
-                <em>all three</em> engines, but only <code>transformers</code> also generates
-                there, streaming tokens back over the IPC data queue. For <code>vllm</code> and
-                <code>llama_server</code> the worker only starts the server subprocess; generation
+                <em>every</em> engine, but only <code>transformers</code> also generates
+                there, streaming tokens back over the IPC data queue. For <code>vllm</code>,
+                <code>llama_server</code> and <code>strata</code> the worker only starts the server subprocess; generation
                 is then driven from the main process by <code>AsyncServerClient</code> over the
                 engine's own OpenAI-compatible HTTP endpoint, bypassing the queue entirely.
                 <code>ModelManager.uses_async_http()</code> is what selects between the two, and
@@ -362,6 +364,12 @@
                         <td>GGUF-format models; ideal for deploying quantized models</td>
                         <td>Requires a path to a .gguf file; uses a llama.cpp subprocess</td>
                     </tr>
+                    <tr>
+                        <td><span class="engine-tag tag-strata">Strata</span></td>
+                        <td><code>strata</code></td>
+                        <td>Large MoE GGUF models on one GPU: experts stream from DRAM, the KV cache can reach 256K. Deep sleep frees the GPU in about 2 s and keeps the conversation</td>
+                        <td>Tested on Linux. Needs a Strata checkout (<code>STRATA_HOME</code>) and a run config from its setup; offered only when <code>STRATA_HOME</code> is set. Install: <code>TRUSTA_SETUP_STRATA=1 scripts/linux/setup_env.sh</code> (compiles the deep-sleep build from TRUSTA-SW-FAE/strata and installs IQ3_XXS)</td>
+                    </tr>
                 </tbody>
             </table>
 
@@ -394,6 +402,18 @@
                         <li><code>llama_server_mmproj</code>: Multimodal projector path</li>
                         <li><code>llama_server_auto_start</code>: Automatically start the subprocess (default true)</li>
                     </ul>
+                </div>
+                <div class="card">
+                    <h3><span class="engine-tag tag-strata">Strata</span> Specific Parameters</h3>
+                    <ul>
+                        <li><code>model_path</code>: the model's first GGUF shard, as the model registry lists it under <code>llama_gguf_models</code>. The backend finds the run config Strata's setup wrote for it (<code>STRATA_HOME/strata-&lt;model&gt;.json</code>, whose <code>--native</code> is this file)</li>
+                        <li><code>strata_config_path</code> (optional): name a run config directly instead (the model files, MTP head, vision encoder and advanced start-up flags). Never modified; the backend writes its own copy under <code>STRATA_RUNTIME_DIR</code></li>
+                        <li><code>strata_max_context</code>: context length; empty keeps the run config's value</li>
+                        <li><code>strata_vram_limit_gb</code>: most VRAM the model may take, in GB (an 8 GB limit measured 8.3 GB in use). More is faster; rather than a low limit, leave it empty and sleep the model when another program needs the GPU</li>
+                        <li><code>strata_auto_wake</code>: a chat request to a sleeping model wakes it first (default true); off returns HTTP 503, e.g. while ComfyUI holds the GPU</li>
+                    </ul>
+                    <p>Always on: deep sleep, and saving the conversation (its KV cache) on unload to restore it on the next load. Image input and the advanced flags (KV format, speculative decoding, expert cache) follow the run config.</p>
+                    <p>Server settings live in <code>.env</code>: <code>STRATA_HOME</code>, <code>STRATA_PYTHON</code>, <code>STRATA_ENGINE_BINARY</code> (required: the deep-sleep build), <code>STRATA_PORT</code> (default 5002), <code>STRATA_HEALTH_TIMEOUT</code>, <code>STRATA_RUNTIME_DIR</code>.</p>
                 </div>
             </div>
         </section>
@@ -475,6 +495,18 @@
                     <h3>10. Clean Up KV Cache</h3>
                     <code>POST /inference/cleanup_generation_memory</code>
                     <p>Cleans up memory accumulated by the KV cache without unloading the model. Suitable after long conversations or before an OOM retry.</p>
+                </div>
+
+                <div class="card">
+                    <h3>11. Sleep Model</h3>
+                    <code>POST /inference/sleep</code>
+                    <p>Frees the GPU without unloading, e.g. to hand it to ComfyUI. Body <code>{"mode": "wait"}</code> (default: running generations finish first) or <code>{"mode": "abort"}</code>. vLLM (<code>vllm_enable_sleep_mode</code>): weights move to pinned CPU memory and the KV cache is dropped. Strata (always able to sleep): the engine's VRAM is copied to host RAM and the conversation is kept. Returns <code>{"sleeping", "changed", "seconds"}</code>; idempotent. HTTP 409 when the loaded engine or load cannot sleep.</p>
+                </div>
+
+                <div class="card">
+                    <h3>12. Wake Model</h3>
+                    <code>POST /inference/wake</code>
+                    <p>Takes the GPU back; same response keys, a no-op when awake. HTTP 502 when the VRAM it gave up is no longer free. <code>GET /inference/status</code> reports <code>sleeping</code>.</p>
                 </div>
             </div>
 
@@ -565,6 +597,7 @@ payload = {
                                 <li><code>transformers_engine.py</code>: HF Transformers engine</li>
                                 <li><code>vllm_engine.py</code>: vLLM engine (subprocess management; no <code>generate()</code>)</li>
                                 <li><code>llama_server_engine.py</code>: llama-server engine (subprocess management; no <code>generate()</code>)</li>
+                                <li><code>strata_engine.py</code>: Strata engine (server subprocess, run config, conversation save/restore; no <code>generate()</code>)</li>
                                 <li><code>vllm_error_classifier.py</code>: maps vLLM startup / runtime failures to actionable messages</li>
                             </ul>
                         </td>
@@ -725,6 +758,15 @@ payload = {
   "n_ctx": 8192,
   "llama_server_port": 5001,
   "llama_server_np": 4                 // 平行生成槽位
+}</code></pre>
+
+            <h3>InferenceConfig — Strata Engine Loading Example</h3>
+            <pre><code>{
+  "model_name": "qwen3.8-flash-next-iq3_xxs",
+  "engine": "strata",
+  "model_path": "/data/models/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+  "strata_max_context": 262144,        // optional; empty keeps the run config's value
+  "strata_vram_limit_gb": 12           // optional; empty lets the model fill the GPU
 }</code></pre>
 
             <h3>OpenAI Chat Completions — Request Parameters</h3>

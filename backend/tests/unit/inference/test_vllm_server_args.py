@@ -3,6 +3,7 @@
 import json
 import os
 from multiprocessing import Event, Queue
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -136,12 +137,16 @@ def test_reasoning_parser_unset_on_minicpm5_defaults_to_qwen3(tmp_path, as_snaps
 
 
 def test_reasoning_parser_explicit_off_beats_the_minicpm5_default():
-    config = InferenceConfig(engine="vllm", model_name="openbmb/MiniCPM5-1B", vllm_reasoning_parser="off")
+    config = InferenceConfig(
+        engine="vllm", model_name="openbmb/MiniCPM5-1B", vllm_reasoning_parser="off"
+    )
     assert "--reasoning-parser" not in _engine()._template_args(config)
 
 
 def test_reasoning_parser_explicit_value_beats_the_minicpm5_default():
-    config = InferenceConfig(engine="vllm", model_name="openbmb/MiniCPM5-1B", vllm_reasoning_parser="deepseek_r1")
+    config = InferenceConfig(
+        engine="vllm", model_name="openbmb/MiniCPM5-1B", vllm_reasoning_parser="deepseek_r1"
+    )
     args = _engine()._template_args(config)
     assert args[args.index("--reasoning-parser") + 1] == "deepseek_r1"
 
@@ -389,25 +394,35 @@ def test_is_loopback_bind(host, is_loopback):
     assert VllmEngine._is_loopback_bind(host) is is_loopback
 
 
+_DEMO = InferenceConfig(engine="vllm", model_name="demo")
+_SLEEPY = InferenceConfig(
+    engine="vllm", model_name="demo", vllm_server_extra_args=["--enable-sleep-mode"]
+)
+
+
 def test_admin_endpoints_are_off_by_default(monkeypatch):
     """/collective_rpc takes a plain POST from any web page on this machine, loopback or not."""
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "127.0.0.1")
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", False)
-    assert _engine()._admin_endpoint_env() == {"VLLM_SERVER_DEV_MODE": "0"}
+    assert _engine()._admin_endpoint_env(_DEMO) == {"VLLM_SERVER_DEV_MODE": "0"}
+    assert _engine()._admin_guard_args(_DEMO) == []
 
 
 def test_admin_endpoints_when_asked_for_on_loopback(monkeypatch):
     """/reset_prefix_cache only exists under dev mode, so cleanup needs the flag."""
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "127.0.0.1")
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", True)
-    assert _engine()._admin_endpoint_env() == {"VLLM_SERVER_DEV_MODE": "1"}
+    env = _engine()._admin_endpoint_env(_DEMO)
+    assert env["VLLM_SERVER_DEV_MODE"] == "1"
+    assert _engine()._admin_guard_args(_DEMO) == ["--middleware", "ast_vllm_guard.AdminGuard"]
 
 
 def test_admin_endpoints_disabled_when_bind_is_routable(monkeypatch):
     """Dev mode also mounts /update_weights and /collective_rpc; never expose those."""
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "0.0.0.0")
     monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", True)
-    assert _engine()._admin_endpoint_env() == {"VLLM_SERVER_DEV_MODE": "0"}
+    assert _engine()._admin_endpoint_env(_DEMO) == {"VLLM_SERVER_DEV_MODE": "0"}
+    assert _engine()._admin_guard_args(_SLEEPY) == []
 
 
 def test_build_server_env_overrides_an_inherited_dev_mode(monkeypatch):
@@ -523,9 +538,7 @@ def test_unload_reclaims_a_region_this_run_leaked(tmp_path, monkeypatch):
 def test_a_region_that_predates_this_run_is_left_alone(tmp_path, monkeypatch):
     """Not ours to delete: it was already there when this server launched."""
     pre_existing = _make(tmp_path, "vllm_offload_old.mmap")
-    engine = _shm_engine(
-        tmp_path, monkeypatch, before=(pre_existing,), after=(pre_existing,)
-    )
+    engine = _shm_engine(tmp_path, monkeypatch, before=(pre_existing,), after=(pre_existing,))
 
     assert engine._reclaim_orphaned_shm() == 0
     assert os.path.exists(pre_existing)
@@ -550,9 +563,7 @@ def test_a_failed_unlink_does_not_raise(tmp_path, monkeypatch):
     """Unload must finish; a region we cannot remove is logged, not fatal."""
     leaked = _make(tmp_path, "vllm_offload_stuck.mmap")
     engine = _shm_engine(tmp_path, monkeypatch, before=(), after=(leaked,))
-    monkeypatch.setattr(
-        vllm_engine.os, "unlink", lambda p: (_ for _ in ()).throw(OSError("busy"))
-    )
+    monkeypatch.setattr(vllm_engine.os, "unlink", lambda p: (_ for _ in ()).throw(OSError("busy")))
 
     assert engine._reclaim_orphaned_shm() == 0
 
@@ -572,19 +583,13 @@ def test_graceful_stop_timeout_scales_with_the_offload_budget():
     engine.config = InferenceConfig(engine="vllm", model_name="demo")
     assert engine._graceful_stop_timeout() == 10.0, "no offload -> unchanged"
 
-    engine.config = InferenceConfig(
-        engine="vllm", model_name="demo", vllm_kv_offloading_size=48.0
-    )
+    engine.config = InferenceConfig(engine="vllm", model_name="demo", vllm_kv_offloading_size=48.0)
     assert engine._graceful_stop_timeout() == 48.0
 
-    engine.config = InferenceConfig(
-        engine="vllm", model_name="demo", vllm_kv_offloading_size=4.0
-    )
+    engine.config = InferenceConfig(engine="vllm", model_name="demo", vllm_kv_offloading_size=4.0)
     assert engine._graceful_stop_timeout() == 10.0, "floor still applies"
 
-    engine.config = InferenceConfig(
-        engine="vllm", model_name="demo", vllm_kv_offloading_size=500.0
-    )
+    engine.config = InferenceConfig(engine="vllm", model_name="demo", vllm_kv_offloading_size=500.0)
     assert engine._graceful_stop_timeout() == 120.0, "a wedged server is still killed"
 
 
@@ -705,3 +710,75 @@ def test_xpu_build_never_goes_below_the_floor(monkeypatch):
     _memory(engine, monkeypatch, vllm_version="0.28.0+xpu", available_gib=1)
     config = InferenceConfig(engine="vllm", model_name="demo", vllm_gpu_memory_utilization=0.9)
     assert engine._effective_gpu_memory_utilization(config) == 0.05
+
+
+def test_sleep_mode_turns_the_admin_endpoints_on_behind_the_guard(monkeypatch):
+    """vLLM only mounts /sleep under dev mode; a GPU sharing tool needs it once sleep mode is on."""
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "127.0.0.1")
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", False)
+    monkeypatch.setenv("PYTHONPATH", "/somewhere")
+    engine = _engine()
+    env = engine._build_server_env(_SLEEPY)
+    assert env["VLLM_SERVER_DEV_MODE"] == "1"
+    first, *rest = env["PYTHONPATH"].split(os.pathsep)
+    assert Path(first, "ast_vllm_guard.py").is_file()
+    assert rest == ["/somewhere"]
+    cmd = engine._build_server_cmd(_SLEEPY)
+    at = cmd.index("--middleware")
+    assert cmd[at + 1] == "ast_vllm_guard.AdminGuard"
+    assert at < cmd.index("--enable-sleep-mode")
+
+
+@pytest.mark.parametrize(
+    ("args", "on"),
+    [
+        (["--enable-sleep-mode"], True),
+        (["--enable-sleep-mode", "--no-enable-sleep-mode"], False),
+        (["--no-enable-sleep-mode", "--enable-sleep-mode"], True),
+        (["--enforce-eager"], False),
+    ],
+)
+def test_the_last_sleep_mode_flag_decides(monkeypatch, args, on):
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "127.0.0.1")
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", False)
+    config = InferenceConfig(engine="vllm", model_name="demo", vllm_server_extra_args=args)
+    assert (_engine()._admin_guard_args(config) != []) is on
+
+
+def test_the_sleep_mode_field_mounts_sleep_behind_the_guard_too(monkeypatch):
+    """POST /inference/sleep calls vLLM's /sleep: vllm_enable_sleep_mode alone must mount it."""
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_HOST", "127.0.0.1")
+    monkeypatch.setattr(vllm_engine, "VLLM_SERVER_DEV_MODE", False)
+    engine = _engine()
+    config = InferenceConfig(engine="vllm", model_name="demo", vllm_enable_sleep_mode=True)
+    assert engine._build_server_env(config)["VLLM_SERVER_DEV_MODE"] == "1"
+    cmd = engine._build_server_cmd(config)
+    assert cmd[cmd.index("--middleware") + 1] == "ast_vllm_guard.AdminGuard"
+    assert "--enable-sleep-mode" in cmd
+    # the extra args still have the last word
+    off = InferenceConfig(
+        engine="vllm",
+        model_name="demo",
+        vllm_enable_sleep_mode=True,
+        vllm_server_extra_args=["--no-enable-sleep-mode"],
+    )
+    assert engine._admin_guard_args(off) == []
+
+
+def test_the_guard_cannot_be_turned_off_from_the_extra_args():
+    """--middleware is reserved, so the extra args cannot add or replace one."""
+    with pytest.raises(ValidationError):
+        InferenceConfig(
+            engine="vllm",
+            model_name="demo",
+            vllm_server_extra_args=["--enable-sleep-mode", "--middleware", "x.Y"],
+        )
+
+
+def test_cleanup_returns_its_result_for_the_worker_to_send():
+    """The worker tags the reply with the request id; an untagged put was dropped."""
+    engine = _engine()
+    sent = []
+    engine.data_queue = SimpleNamespace(put=sent.append)
+    assert engine.cleanup_generation_memory() == "vLLM cleanup skipped: server not loaded"
+    assert sent == []

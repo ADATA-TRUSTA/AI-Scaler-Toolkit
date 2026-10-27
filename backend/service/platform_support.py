@@ -103,6 +103,14 @@ def vllm_installed() -> bool:
 
 def engine_support(engine: InferenceEngine | str) -> Support:
     """Whether a given inference engine can run on this host."""
+    if InferenceEngine(engine) is InferenceEngine.STRATA:
+        # Nothing of Strata ships here: it is offered once STRATA_HOME names a checkout
+        from .inference.engines.strata_engine import strata_setup_problem
+
+        problem = strata_setup_problem()
+        return (
+            Support(supported=True) if problem is None else Support(supported=False, reason=problem)
+        )
     if InferenceEngine(engine) is not InferenceEngine.VLLM:
         return Support(supported=True)
     on_linux = _linux_only(

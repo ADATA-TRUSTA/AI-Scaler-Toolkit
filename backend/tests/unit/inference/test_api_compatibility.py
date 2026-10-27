@@ -665,3 +665,46 @@ def test_status_names_no_binary_for_an_in_process_engine(monkeypatch):
     _llama_manager(monkeypatch, InferenceConfig(model_name="m", engine="transformers"))
 
     assert app_module.model_manager.get_status()["llama_server_binary"] is None
+
+
+def test_gguf_estimate_verify_passes_the_probe_only_what_it_takes(monkeypatch, tmp_path):
+    """verify=true handed the probe the analytic estimate's arguments too (n_gpu,
+    tensor_split), and every verified request failed with a TypeError."""
+    import inspect
+
+    from service.inference.gguf_estimator import GgufMemoryEstimator
+
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"GGUF")
+    seen = {}
+    signature = inspect.signature(GgufMemoryEstimator.probe_exact)
+
+    def fake_probe(model_path, **kwargs):
+        signature.bind(None, model_path, **kwargs)  # raises on an argument it does not take
+        seen.update(kwargs)
+        return {"source": "fit-params"}
+
+    monkeypatch.setattr(app_module.gguf_memory_estimator, "probe_exact", fake_probe)
+    monkeypatch.setattr(
+        app_module.gguf_memory_estimator,
+        "estimate",
+        lambda path, include_per_layer=True, **kw: {
+            "source": "analytic",
+            "model_path": path,
+            "settings": {},
+            "model_info": {},
+            "memory_breakdown_mib": {},
+            "placement": {},
+            "notes": [],
+        },
+    )
+    monkeypatch.setattr(app_module, "_require_gguf_path", lambda path: path)
+
+    response = client.post(
+        "/inference/estimate_memory/gguf",
+        json={"model_path": str(gguf), "n_ctx": 4096, "verify": True, "n_gpu": 2},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["verification"] == {"source": "fit-params"}
+    assert seen["n_ctx"] == 4096
+    assert "n_gpu" not in seen and "tensor_split" not in seen

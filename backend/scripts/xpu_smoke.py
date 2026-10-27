@@ -105,7 +105,8 @@ def _linux_runtime_remedy() -> str:
             f"[xpu_smoke]   sudo apt install {packages}\n"
             "[xpu_smoke] (the AppImage asks for these on first launch)"
         )
-    major = int(re.match(r"\d*", installed).group() or 0)
+    leading_digits = re.match(r"\d*", installed)
+    major = int(leading_digits.group() or 0) if leading_digits else 0
     if major >= 25:
         # Already Intel's current build: the runtime is not what is missing.
         return (

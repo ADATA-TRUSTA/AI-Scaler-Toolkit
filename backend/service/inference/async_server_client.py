@@ -24,6 +24,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx2
 from openai import APIError, AsyncOpenAI
 
 from ..config_models import InferenceConfig, InferenceEngine
@@ -31,6 +32,7 @@ from ..settings import (
     DEFAULT_GENERATION_TIMEOUT,
     LLAMA_SERVER_API_KEY,
     MAX_OUTPUT_TOKENS_CAP,
+    STRATA_PORT,
     VLLM_CLIENT_HOST,
     VLLM_OPENAI_API_KEY,
     VLLM_PORT,
@@ -43,7 +45,7 @@ logger = configure_logging(__name__)
 
 # Engines that expose an OpenAI-compatible HTTP server and can therefore be
 # reached directly from the main process (bypassing the worker + queue).
-SERVER_ENGINES = (InferenceEngine.LLAMA_SERVER, InferenceEngine.VLLM)
+SERVER_ENGINES = (InferenceEngine.LLAMA_SERVER, InferenceEngine.VLLM, InferenceEngine.STRATA)
 
 
 def is_server_engine(config: InferenceConfig | None) -> bool:
@@ -75,6 +77,9 @@ def resolve_server_endpoint(config: InferenceConfig) -> dict[str, Any]:
             "base_url": f"http://{VLLM_CLIENT_HOST}:{VLLM_PORT}/v1",
             "api_key": VLLM_OPENAI_API_KEY or "EMPTY",
         }
+    if engine == InferenceEngine.STRATA:
+        # StrataEngine always binds loopback (its sleep and slot routes refuse other pages)
+        return {"base_url": f"http://127.0.0.1:{STRATA_PORT}/v1", "api_key": "EMPTY"}
     raise ValueError(f"Engine {engine} is not an OpenAI-compatible server engine")
 
 
@@ -870,6 +875,7 @@ class AsyncServerClient:
         **extra: Any,  # noqa: ANN401 - passthrough to the OpenAI client
     ) -> Any:  # noqa: ANN401 - the client returns a stream or a completion
         """create(), retried once with an output cap that fits the context."""
+        await self._refuse_if_asleep()
         for attempt in (1, 2):
             try:
                 return await self.client.chat.completions.create(
@@ -908,6 +914,32 @@ class AsyncServerClient:
         # declared architecture from the file instead of guessing from the name.
         self.model_path = model_path
         self.client = AsyncOpenAI(base_url=base_url, api_key=self.api_key)
+
+    async def _refuse_if_asleep(self) -> None:
+        """
+        Fail at once while vLLM sleeps, instead of waiting out the generation timeout.
+
+        With ``--enable-sleep-mode`` a GPU sharing tool can put vLLM to sleep (``/sleep``)
+        to hand the card to something else; a request sent then hangs until it wakes. Only
+        a definite "sleeping" refuses: with the admin endpoints off ``/is_sleeping`` is a
+        404, and any failure to ask lets the request go ahead as before.
+        """
+        if self.engine != InferenceEngine.VLLM:
+            return
+        root = self.base_url.rstrip("/").removesuffix("/v1")
+        try:
+            async with httpx2.AsyncClient(timeout=2.0) as http:
+                response = await http.get(f"{root}/is_sleeping")
+            asleep = response.status_code == 200 and response.json().get("is_sleeping") is True
+        except (httpx2.HTTPError, OSError, ValueError, AttributeError):
+            return
+        if asleep:
+            raise _as_runtime_error(
+                RuntimeError(
+                    "The model is asleep: another program put vLLM to sleep to use the "
+                    "GPU. Try again once it wakes the model (POST /wake_up)."
+                )
+            )
 
     async def aclose(self) -> None:
         """Close the underlying AsyncOpenAI client, ignoring shutdown errors."""

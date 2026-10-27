@@ -86,7 +86,10 @@ def _probe_request() -> object | None:
         except ImportError:
             return None
     try:
-        return ChatCompletionRequest(model="trusta-probe", messages=_MESSAGES[:1], tools=_TOOLS)
+        # seed defaults through a positional Field(None, ...), which pyright reads as required.
+        return ChatCompletionRequest(  # pyright: ignore[reportCallIssue]
+            model="trusta-probe", messages=_MESSAGES[:1], tools=_TOOLS
+        )
     except Exception:  # noqa: BLE001 - a schema drift here must not abort the probe
         return None
 

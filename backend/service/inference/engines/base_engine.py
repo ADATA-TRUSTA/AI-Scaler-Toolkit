@@ -68,6 +68,6 @@ class BaseEngine(ABC):
         # Default implementation or override in subclasses
         pass
 
-    def cleanup_generation_memory(self) -> None:  # noqa: B027 - optional hook, no-op by default, subclasses may override
-        """Clean up generation memory."""
-        pass
+    def cleanup_generation_memory(self) -> Any:  # noqa: ANN401 - each engine reports in its own shape
+        """Clean up generation memory, returning what was done (the worker sends it on)."""
+        return "nothing to clean up"

@@ -8,6 +8,7 @@ import multiprocessing
 multiprocessing.set_start_method("spawn", force=True)
 
 import asyncio
+import inspect
 import json
 import logging
 import signal
@@ -20,7 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from types import FrameType
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request, Response
@@ -51,6 +52,9 @@ from .config_models import (
     GgufSweepResponse,
     InferenceConfig,
     InferenceEngine,
+    KvDiskCleanupRequest,
+    KvDiskCleanupResponse,
+    KvDiskUsageResponse,
     MemoryEstimateRequest,
     MemoryEstimateResponse,
     ModelConversionRequest,
@@ -73,10 +77,11 @@ from .inference.gguf_estimator import (
     apply_cli_args,
     gguf_memory_estimator,
 )
+from .inference.kv_disk_tier import DiskTierNotConfigured
 from .inference.memory_estimator import memory_estimator
 from .inference.model_family import is_qwen35_family, read_model_arch, read_model_context_length
 from .model_deletion import delete_model_files, resolve_model_files_path
-from .model_manager import model_manager
+from .model_manager import SleepModeUnavailable, model_manager
 from .model_registry import MODEL_STATUS_DELETING, model_registry
 from .platform_support import (
     current_platform,
@@ -85,7 +90,7 @@ from .platform_support import (
     training_support,
 )
 from .rag_manager import rag_manager
-from .remote_access import RemoteAccessMiddleware
+from .remote_access import RemoteAccessMiddleware, is_local
 from .session_manager import session_manager
 from .settings import (
     DEFAULT_SYSTEM_PROMPT,
@@ -810,27 +815,33 @@ async def frontend_spa_fallback(full_path: str) -> FileResponse:
     raise HTTPException(status_code=404, detail="index.html not found in dist")
 
 
+# Every request is checked against where it came from before a route answers it -- see
+# remote_access.py. Read through settings at call time so a key changed by the launcher
+# (which restarts the service) or by a test is the one used.
+app.add_middleware(
+    RemoteAccessMiddleware,
+    api_key=lambda: settings_module.SERVICE_API_KEY,
+    access=lambda: settings_module.SERVICE_REMOTE_ACCESS,
+)
+
 # Pages served from this machine only, on any port (the bundled interface, a development
 # server). It allowed every origin, with credentials, so any site open in a browser here
 # could call the API on 127.0.0.1 and read the answers: chat with the model, list and
 # delete models, start downloads. Clients that are not web pages -- Hermes, coding agents,
 # scripts -- do not use CORS and are unaffected.
+#
+# Added last, so it runs first. A browser's preflight carries no Authorization header
+# (the Fetch standard forbids it), so behind RemoteAccessMiddleware every preflight from
+# another machine got a 401 and counted as a wrong key: a web page sending the key could
+# never reach the request that carries it, and its address was locked out. Answering the
+# preflight here runs no route; the request that follows still meets the key check. The
+# refusals also carry CORS headers now, so a page can read why it was refused.
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127(\.\d{1,3}){3}|\[::1\])(:\d+)?$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-)
-
-# Added last, so it runs first: every request is checked against where it came from
-# before anything else answers it -- see remote_access.py. Read through settings at call
-# time so a key changed by the launcher (which restarts the service) or by a test is the
-# one used.
-app.add_middleware(
-    RemoteAccessMiddleware,
-    api_key=lambda: settings_module.SERVICE_API_KEY,
-    access=lambda: settings_module.SERVICE_REMOTE_ACCESS,
 )
 
 
@@ -854,8 +865,21 @@ async def root() -> dict[str, Any] | RedirectResponse:
 
 
 @app.get("/health")
-async def health_check() -> dict[str, Any]:
-    """Health check."""
+async def health_check(request: Request) -> dict[str, Any]:
+    """
+    Health check.
+
+    Another machine may ask without a key -- it is how one tells the service is up before
+    it has one -- so without the key it is told that and nothing else. The rest named the
+    loaded model's path on this machine (a user name in it, on Windows), its configuration
+    and whether a training run was going, to anyone on the network. With the key (checked
+    by RemoteAccessMiddleware) it gets all of it, as this machine does.
+    """
+    client = request.client
+    if not is_local(client.host if client else None) and not getattr(
+        request.state, "api_key_ok", False
+    ):
+        return {"status": "healthy"}
     return {
         "status": "healthy",
         "model_loaded": model_manager.is_loaded(),
@@ -968,6 +992,10 @@ def _resolve_served_context_window(status: dict[str, Any], trained: int | None) 
     if engine == InferenceEngine.VLLM:
         # Config value only; absent unless --max-model-len was passed explicitly.
         return _positive_int(status.get("vllm_max_model_len"))
+
+    if engine == InferenceEngine.STRATA:
+        # The server reports its window at load; this is the fallback when it did not.
+        return _positive_int(status.get("strata_max_context"))
 
     # transformers has no runtime window knob, so the model's own ceiling is the window
     return trained
@@ -1268,6 +1296,56 @@ async def load_model(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@app.post("/inference/sleep")
+async def sleep_model(
+    mode: Annotated[
+        Literal["wait", "abort"],
+        Body(
+            embed=True,
+            description=(
+                "Running generations: 'wait' (default) lets them finish first, 'abort' "
+                "ends them now"
+            ),
+        ),
+    ] = "wait",
+) -> dict[str, Any]:
+    """
+    Put the loaded model to sleep, freeing the GPU without unloading it.
+
+    vLLM (loaded with ``vllm_enable_sleep_mode``): the weights move to pinned CPU memory
+    and the KV cache is dropped (sleep level 1). Strata (always started able to sleep):
+    the engine's VRAM is copied to pinned host RAM and the conversation, its KV cache
+    included, is kept. While asleep, a generation request wakes the model first, or gets
+    HTTP 503 when ``vllm_auto_wake`` / ``strata_auto_wake`` is off. Idempotent: sleeping
+    an asleep model changes nothing.
+    """
+    try:
+        return await model_manager.asleep(mode)
+    except SleepModeUnavailable as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Model sleep failed")
+        raise HTTPException(status_code=502, detail=f"Model sleep failed: {e}") from e
+
+
+@app.post("/inference/wake")
+async def wake_model() -> dict[str, Any]:
+    """
+    Wake a sleeping vLLM or Strata model; a no-op when it is awake.
+
+    Fails (HTTP 502) when the GPU memory it gave up is no longer free -- e.g. another
+    process took it while the model slept. /inference/status then reports whether
+    the model is still asleep.
+    """
+    try:
+        return await model_manager.awake()
+    except SleepModeUnavailable as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Model wake-up failed")
+        raise HTTPException(status_code=502, detail=f"Model wake-up failed: {e}") from e
+
+
 @app.post("/inference/unload_model")
 async def unload_model() -> dict[str, Any]:
     """Unload the model."""
@@ -1338,6 +1416,46 @@ async def force_cleanup_gpu() -> dict[str, Any]:
         return result
     except Exception as e:
         logger.exception(f"Failed to force cleanup GPU: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/inference/kv_cache/disk")
+async def get_kv_disk_usage() -> KvDiskUsageResponse:
+    """
+    Measure the current vLLM model's disk KV tier now.
+
+    The tier persists across restarts and vLLM never evicts from it, so this is the
+    size it has actually reached. 409 when no vLLM model with a disk tier is loaded.
+    """
+    try:
+        # Walks the tier directory; off the event loop.
+        usage = await asyncio.to_thread(model_manager.kv_disk_usage)
+        return KvDiskUsageResponse(**usage)
+    except DiskTierNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        logger.exception(f"Failed to measure the disk KV tier: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/inference/kv_cache/disk/cleanup")
+async def cleanup_kv_disk(
+    request: Annotated[KvDiskCleanupRequest, Body(default_factory=KvDiskCleanupRequest)],
+) -> KvDiskCleanupResponse:
+    """
+    Trim the current vLLM model's disk KV tier, least recently used blocks first.
+
+    Safe while vLLM serves: a block deleted under it is a cache miss and is recomputed.
+    Only the configured vllm_kv_offloading_disk_path is touched, and only files in
+    vLLM's own block layout. 409 when no vLLM model with a disk tier is loaded.
+    """
+    try:
+        result = await asyncio.to_thread(model_manager.kv_disk_cleanup, request.target_gb)
+        return KvDiskCleanupResponse(**result)
+    except DiskTierNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        logger.exception(f"Failed to clean up the disk KV tier: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
@@ -1465,6 +1583,18 @@ async def estimate_memory_requirements(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+def _probe_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """
+    The estimate's arguments that the fit-params probe also takes.
+
+    The analytic estimate needs the GPU count and the tensor split; llama.cpp works those
+    out for itself, and probe_exact does not accept them. Passed through, every request
+    with verify=true failed with "unexpected keyword argument 'n_gpu'".
+    """
+    accepted = inspect.signature(type(gguf_memory_estimator).probe_exact).parameters
+    return {key: value for key, value in kwargs.items() if key in accepted}
+
+
 @app.post("/inference/estimate_memory/gguf")
 async def estimate_gguf_memory(
     request: Annotated[
@@ -1521,7 +1651,9 @@ async def estimate_gguf_memory(
         if request.verify:
             # Shells out to the fit-params probe (120s default timeout), so it must not
             # run on the event loop.
-            exact = await asyncio.to_thread(gguf_memory_estimator.probe_exact, model_path, **kwargs)
+            exact = await asyncio.to_thread(
+                gguf_memory_estimator.probe_exact, model_path, **_probe_kwargs(kwargs)
+            )
             if exact is None:
                 result["notes"].append(
                     "Exact verification was requested but the fit-params probe is unavailable; "
@@ -1708,7 +1840,9 @@ async def check_gguf_config(
         if verify:
             # Shells out to the fit-params probe (120s default timeout), so it must not
             # run on the event loop.
-            exact = await asyncio.to_thread(gguf_memory_estimator.probe_exact, model_path, **kwargs)
+            exact = await asyncio.to_thread(
+                gguf_memory_estimator.probe_exact, model_path, **_probe_kwargs(kwargs)
+            )
             if exact is None:
                 notes.append(
                     "Exact verification was requested but the fit-params probe is unavailable; "
@@ -2021,6 +2155,17 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
     backend_request_id = _normalize_request_id(request.request_id, prefix="openai")
+    if model_manager.is_sleeping() and not model_manager.auto_wake_enabled():
+        # Checked here, before any of the three generation paths below, so every one
+        # of them answers the same way instead of each mapping the error itself.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"The model is asleep and {model_manager.auto_wake_field()} is off; "
+                "POST /inference/wake first."
+            ),
+            headers={"Retry-After": "1"},
+        )
 
     def _stop_backend_generation() -> None:
         try:

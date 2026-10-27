@@ -7,6 +7,7 @@ generate_stream behaviour (against a stubbed OpenAI client, no network).
 
 No pytest-asyncio dependency: async bodies run via asyncio.run().
 """
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -40,8 +41,8 @@ def test_build_chat_payload_mapping_and_clamping():
         [{"role": "user", "content": "hi"}],
         {
             "max_new_tokens": 128,
-            "temperature": 5.0,   # clamps to 2.0
-            "top_p": 2.0,         # clamps to 1.0
+            "temperature": 5.0,  # clamps to 2.0
+            "top_p": 2.0,  # clamps to 1.0
             "top_k": 40,
             "repetition_penalty": 1.2,
             "enable_thinking": True,
@@ -215,7 +216,9 @@ def test_reorder_multimodal_media_before_text():
 
 
 def test_reorder_multimodal_noop_when_text_only():
-    msgs = [{"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}]
+    msgs = [
+        {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}
+    ]
     out = reorder_multimodal_content(msgs)
     # no media -> order untouched
     assert [p["text"] for p in out[0]["content"]] == ["a", "b"]
@@ -265,7 +268,10 @@ def test_normalize_message_roles_returns_same_list_when_nothing_to_do():
 def test_build_chat_payload_remaps_developer_role_for_local_templates():
     payload = build_chat_payload(
         "m",
-        [{"role": "developer", "content": "You are a coding agent."}, {"role": "user", "content": "hi"}],
+        [
+            {"role": "developer", "content": "You are a coding agent."},
+            {"role": "user", "content": "hi"},
+        ],
         {},
         stream=False,
     )
@@ -275,12 +281,43 @@ def test_build_chat_payload_remaps_developer_role_for_local_templates():
 
 def test_tool_call_fragment_reassembly():
     acc = {}
-    _accumulate_tool_call_deltas(acc, [SimpleNamespace(index=0, id="c1", type="function", function=SimpleNamespace(name="get_weather", arguments=""))])
-    _accumulate_tool_call_deltas(acc, [SimpleNamespace(index=0, id=None, type=None, function=SimpleNamespace(name=None, arguments='{"city"'))])
-    _accumulate_tool_call_deltas(acc, [SimpleNamespace(index=0, id=None, type=None, function=SimpleNamespace(name=None, arguments=':"NY"}'))])
+    _accumulate_tool_call_deltas(
+        acc,
+        [
+            SimpleNamespace(
+                index=0,
+                id="c1",
+                type="function",
+                function=SimpleNamespace(name="get_weather", arguments=""),
+            )
+        ],
+    )
+    _accumulate_tool_call_deltas(
+        acc,
+        [
+            SimpleNamespace(
+                index=0,
+                id=None,
+                type=None,
+                function=SimpleNamespace(name=None, arguments='{"city"'),
+            )
+        ],
+    )
+    _accumulate_tool_call_deltas(
+        acc,
+        [
+            SimpleNamespace(
+                index=0, id=None, type=None, function=SimpleNamespace(name=None, arguments=':"NY"}')
+            )
+        ],
+    )
     assembled = _assemble_tool_calls(acc)
     assert assembled == [
-        {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city":"NY"}'}}
+        {
+            "id": "c1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city":"NY"}'},
+        }
     ]
     assert _assemble_tool_calls({}) is None
 
@@ -357,9 +394,7 @@ def test_client_for_config_sets_engine():
     # The engine drives payload naming in build_chat_payload (repeat_penalty
     # vs repetition_penalty), so it must be wired through.
     assert client_for_config(_llama_config()).engine == InferenceEngine.LLAMA_SERVER
-    vllm_cfg = SimpleNamespace(
-        engine=InferenceEngine.VLLM, model_name="m", model_path=None
-    )
+    vllm_cfg = SimpleNamespace(engine=InferenceEngine.VLLM, model_name="m", model_path=None)
     assert client_for_config(vllm_cfg).engine == InferenceEngine.VLLM
 
 
@@ -381,9 +416,7 @@ def test_client_for_config_vllm_model_prefers_served_name(monkeypatch):
 
     # llama-server keeps model_name (llama.cpp ignores the model field, and
     # Qwen detection relies on the name)
-    llama_client = client_for_config(
-        _llama_config(model_name="gguf-name", model_path="/x.gguf")
-    )
+    llama_client = client_for_config(_llama_config(model_name="gguf-name", model_path="/x.gguf"))
     assert llama_client._model == "gguf-name"
 
 
@@ -492,7 +525,14 @@ def test_generate_non_stream_result_usage_tool_calls():
     def handler(kwargs):
         assert kwargs["stream"] is False
         return _Completion(
-            choices=[_Choice(message=_Msg(content=None, tool_calls=[_ToolCall(id="c1", name="f", arguments="{}")]), finish_reason="tool_calls")],
+            choices=[
+                _Choice(
+                    message=_Msg(
+                        content=None, tool_calls=[_ToolCall(id="c1", name="f", arguments="{}")]
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
             usage=_Usage(3, 4, 7),
         )
 
@@ -506,17 +546,21 @@ def test_generate_non_stream_result_usage_tool_calls():
 def test_generate_stream_order_and_done_stats():
     def handler(kwargs):
         assert kwargs["stream"] is True
-        return _Stream([
-            _Event([_Choice(delta=_Delta(content="a"))]),
-            _Event([_Choice(delta=_Delta(content="b"))]),
-            _Event([_Choice(delta=_Delta())], usage=_Usage(2, 2, 4)),
-        ])
+        return _Stream(
+            [
+                _Event([_Choice(delta=_Delta(content="a"))]),
+                _Event([_Choice(delta=_Delta(content="b"))]),
+                _Event([_Choice(delta=_Delta())], usage=_Usage(2, 2, 4)),
+            ]
+        )
 
     c = _client_with(handler)
 
     async def run():
         chunks, done = [], None
-        async for item in c.generate_stream([{"role": "user", "content": "hi"}], {"total_timeout": 5}):
+        async for item in c.generate_stream(
+            [{"role": "user", "content": "hi"}], {"total_timeout": 5}
+        ):
             if item.get("done"):
                 done = item
             elif item.get("chunk"):
@@ -531,18 +575,38 @@ def test_generate_stream_order_and_done_stats():
 
 def test_generate_stream_tool_calls_on_done():
     def handler(kwargs):
-        return _Stream([
-            _Event([_Choice(delta=_Delta(tool_calls=[_ToolCall(index=0, id="c1", name="get_weather", arguments="")]))]),
-            _Event([_Choice(delta=_Delta(tool_calls=[_ToolCall(index=0, arguments='{"city"')]))]),
-            _Event([_Choice(delta=_Delta(tool_calls=[_ToolCall(index=0, arguments=':"NY"}')]))]),
-            _Event([_Choice(delta=_Delta(), finish_reason="tool_calls")], usage=_Usage(1, 5, 6)),
-        ])
+        return _Stream(
+            [
+                _Event(
+                    [
+                        _Choice(
+                            delta=_Delta(
+                                tool_calls=[
+                                    _ToolCall(index=0, id="c1", name="get_weather", arguments="")
+                                ]
+                            )
+                        )
+                    ]
+                ),
+                _Event(
+                    [_Choice(delta=_Delta(tool_calls=[_ToolCall(index=0, arguments='{"city"')]))]
+                ),
+                _Event(
+                    [_Choice(delta=_Delta(tool_calls=[_ToolCall(index=0, arguments=':"NY"}')]))]
+                ),
+                _Event(
+                    [_Choice(delta=_Delta(), finish_reason="tool_calls")], usage=_Usage(1, 5, 6)
+                ),
+            ]
+        )
 
     c = _client_with(handler)
 
     async def run():
         done = None
-        async for item in c.generate_stream([{"role": "user", "content": "hi"}], {"total_timeout": 5}):
+        async for item in c.generate_stream(
+            [{"role": "user", "content": "hi"}], {"total_timeout": 5}
+        ):
             if item.get("done"):
                 done = item
         return done
@@ -652,7 +716,10 @@ def test_generate_non_stream_recovers_fallback_tool_call():
     res = asyncio.run(
         c.generate(
             [{"role": "user", "content": "weather?"}],
-            {"total_timeout": 5, "tools": [{"type": "function", "function": {"name": "get_weather"}}]},
+            {
+                "total_timeout": 5,
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+            },
         )
     )
     assert res["tool_calls"][0]["function"]["name"] == "get_weather"
@@ -745,16 +812,22 @@ def test_generate_stream_reports_length_truncation():
     """A max_tokens cut-off must reach the caller as "length", not a silent "stop"."""
 
     def handler(kwargs):
-        return _Stream([
-            _Event([_Choice(delta=_Delta(content="half an ans"))]),
-            _Event([_Choice(delta=_Delta(), finish_reason="length")], usage=_Usage(2, 512, 514)),
-        ])
+        return _Stream(
+            [
+                _Event([_Choice(delta=_Delta(content="half an ans"))]),
+                _Event(
+                    [_Choice(delta=_Delta(), finish_reason="length")], usage=_Usage(2, 512, 514)
+                ),
+            ]
+        )
 
     c = _client_with(handler)
 
     async def run():
         done = None
-        async for item in c.generate_stream([{"role": "user", "content": "hi"}], {"total_timeout": 5}):
+        async for item in c.generate_stream(
+            [{"role": "user", "content": "hi"}], {"total_timeout": 5}
+        ):
             if item.get("done"):
                 done = item
         return done
@@ -768,16 +841,20 @@ def test_generate_stream_reports_plain_stop():
     """A normal EOS stop is reported explicitly rather than left to a caller default."""
 
     def handler(kwargs):
-        return _Stream([
-            _Event([_Choice(delta=_Delta(content="done"))]),
-            _Event([_Choice(delta=_Delta(), finish_reason="stop")], usage=_Usage(2, 3, 5)),
-        ])
+        return _Stream(
+            [
+                _Event([_Choice(delta=_Delta(content="done"))]),
+                _Event([_Choice(delta=_Delta(), finish_reason="stop")], usage=_Usage(2, 3, 5)),
+            ]
+        )
 
     c = _client_with(handler)
 
     async def run():
         done = None
-        async for item in c.generate_stream([{"role": "user", "content": "hi"}], {"total_timeout": 5}):
+        async for item in c.generate_stream(
+            [{"role": "user", "content": "hi"}], {"total_timeout": 5}
+        ):
             if item.get("done"):
                 done = item
         return done
@@ -789,16 +866,30 @@ def test_generate_stream_keeps_server_finish_reason_over_tool_call_guess():
     """The server's own reason wins; the tool_calls fallback only fills a blank."""
 
     def handler(kwargs):
-        return _Stream([
-            _Event([_Choice(delta=_Delta(tool_calls=[_ToolCall(index=0, id="c1", name="f", arguments="{}")]))]),
-            _Event([_Choice(delta=_Delta(), finish_reason="length")], usage=_Usage(1, 512, 513)),
-        ])
+        return _Stream(
+            [
+                _Event(
+                    [
+                        _Choice(
+                            delta=_Delta(
+                                tool_calls=[_ToolCall(index=0, id="c1", name="f", arguments="{}")]
+                            )
+                        )
+                    ]
+                ),
+                _Event(
+                    [_Choice(delta=_Delta(), finish_reason="length")], usage=_Usage(1, 512, 513)
+                ),
+            ]
+        )
 
     c = _client_with(handler)
 
     async def run():
         done = None
-        async for item in c.generate_stream([{"role": "user", "content": "hi"}], {"total_timeout": 5}):
+        async for item in c.generate_stream(
+            [{"role": "user", "content": "hi"}], {"total_timeout": 5}
+        ):
             if item.get("done"):
                 done = item
         return done
@@ -818,7 +909,10 @@ def test_generate_stream_recovers_fallback_tool_call_and_withholds_content():
         assert kwargs["tools"]
         # Split across several small deltas, the way real token streaming would.
         return _Stream(
-            [_Event([_Choice(delta=_Delta(content=wrapped[i : i + 4]))]) for i in range(0, len(wrapped), 4)]
+            [
+                _Event([_Choice(delta=_Delta(content=wrapped[i : i + 4]))])
+                for i in range(0, len(wrapped), 4)
+            ]
             + [_Event([_Choice(delta=_Delta(), finish_reason="stop")], usage=_Usage(1, 5, 6))]
         )
 
@@ -829,7 +923,10 @@ def test_generate_stream_recovers_fallback_tool_call_and_withholds_content():
         done = None
         async for item in c.generate_stream(
             [{"role": "user", "content": "weather?"}],
-            {"total_timeout": 5, "tools": [{"type": "function", "function": {"name": "get_weather"}}]},
+            {
+                "total_timeout": 5,
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+            },
         ):
             if item.get("done"):
                 done = item
@@ -863,7 +960,10 @@ def test_generate_stream_flushes_buffer_when_not_a_wrapped_tool_call():
         chunks = []
         async for item in c.generate_stream(
             [{"role": "user", "content": "write add()"}],
-            {"total_timeout": 5, "tools": [{"type": "function", "function": {"name": "get_weather"}}]},
+            {
+                "total_timeout": 5,
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+            },
         ):
             if item.get("chunk"):
                 chunks.append(item["chunk"])
@@ -883,7 +983,10 @@ def test_generate_stream_forwards_prose_prefix_live_then_recovers_bare_json():
     def handler(kwargs):
         assert kwargs["tools"]
         return _Stream(
-            [_Event([_Choice(delta=_Delta(content=full[i : i + 5]))]) for i in range(0, len(full), 5)]
+            [
+                _Event([_Choice(delta=_Delta(content=full[i : i + 5]))])
+                for i in range(0, len(full), 5)
+            ]
             + [_Event([_Choice(delta=_Delta(), finish_reason="stop")], usage=_Usage(1, 5, 6))]
         )
 
@@ -925,7 +1028,10 @@ def test_generate_stream_resumes_scanning_after_a_false_marker():
 
     def handler(kwargs):
         return _Stream(
-            [_Event([_Choice(delta=_Delta(content=full[i : i + 6]))]) for i in range(0, len(full), 6)]
+            [
+                _Event([_Choice(delta=_Delta(content=full[i : i + 6]))])
+                for i in range(0, len(full), 6)
+            ]
             + [_Event([_Choice(delta=_Delta(), finish_reason="stop")], usage=_Usage(1, 5, 6))]
         )
 
@@ -936,7 +1042,10 @@ def test_generate_stream_resumes_scanning_after_a_false_marker():
         done = None
         async for item in c.generate_stream(
             [{"role": "user", "content": "weather?"}],
-            {"total_timeout": 5, "tools": [{"type": "function", "function": {"name": "get_weather"}}]},
+            {
+                "total_timeout": 5,
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+            },
         ):
             if item.get("done"):
                 done = item
@@ -964,7 +1073,9 @@ def test_generate_stream_stop_event_aborts():
         stop = asyncio.Event()
         got = []
         stopped = None
-        async for item in c.generate_stream([{"role": "user", "content": "hi"}], {"total_timeout": 5}, stop_event=stop):
+        async for item in c.generate_stream(
+            [{"role": "user", "content": "hi"}], {"total_timeout": 5}, stop_event=stop
+        ):
             if item.get("done"):
                 stopped = item.get("stopped")
             elif item.get("chunk"):
@@ -1012,14 +1123,20 @@ def test_generate_stream_error_becomes_runtime_error():
 # ------------------- reasoning / engine-specific payload -------------------
 def test_build_chat_payload_llama_uses_repeat_penalty():
     p = build_chat_payload(
-        "llama-x", [{"role": "user", "content": "hi"}],
-        {"repetition_penalty": 1.2}, stream=False, engine=InferenceEngine.LLAMA_SERVER,
+        "llama-x",
+        [{"role": "user", "content": "hi"}],
+        {"repetition_penalty": 1.2},
+        stream=False,
+        engine=InferenceEngine.LLAMA_SERVER,
     )
     assert p["extra_body"]["repeat_penalty"] == 1.2
     assert "repetition_penalty" not in p["extra_body"]
     # llama always sends repeat_penalty, defaulting to 1.1 when unset
     p2 = build_chat_payload(
-        "llama-x", [{"role": "user", "content": "hi"}], {}, stream=False,
+        "llama-x",
+        [{"role": "user", "content": "hi"}],
+        {},
+        stream=False,
         engine=InferenceEngine.LLAMA_SERVER,
     )
     assert p2["extra_body"]["repeat_penalty"] == 1.1
@@ -1027,8 +1144,11 @@ def test_build_chat_payload_llama_uses_repeat_penalty():
 
 def test_build_chat_payload_vllm_uses_repetition_penalty():
     p = build_chat_payload(
-        "vllm-x", [{"role": "user", "content": "hi"}],
-        {"repetition_penalty": 1.2}, stream=False, engine=InferenceEngine.VLLM,
+        "vllm-x",
+        [{"role": "user", "content": "hi"}],
+        {"repetition_penalty": 1.2},
+        stream=False,
+        engine=InferenceEngine.VLLM,
     )
     assert p["extra_body"]["repetition_penalty"] == 1.2
     assert "repeat_penalty" not in p["extra_body"]
@@ -1036,13 +1156,19 @@ def test_build_chat_payload_vllm_uses_repetition_penalty():
 
 def test_apply_thinking_tag_qwen():
     p = build_chat_payload(
-        "Qwen/Qwen2.5-0.5B-Instruct", [{"role": "user", "content": "hi"}],
-        {"enable_thinking": False}, stream=False, engine=InferenceEngine.VLLM,
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        [{"role": "user", "content": "hi"}],
+        {"enable_thinking": False},
+        stream=False,
+        engine=InferenceEngine.VLLM,
     )
     assert p["messages"][-1]["content"].endswith("/no_think")
     p2 = build_chat_payload(
-        "Qwen/Qwen2.5-0.5B-Instruct", [{"role": "user", "content": "hi"}],
-        {"enable_thinking": True}, stream=False, engine=InferenceEngine.VLLM,
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        [{"role": "user", "content": "hi"}],
+        {"enable_thinking": True},
+        stream=False,
+        engine=InferenceEngine.VLLM,
     )
     assert p2["messages"][-1]["content"].endswith("/think")
 
@@ -1050,8 +1176,10 @@ def test_apply_thinking_tag_qwen():
 def test_reasoning_effort_reaches_vllm_as_a_request_field():
     # vLLM hands the request field to the template and to Harmony (gpt-oss).
     p = build_chat_payload(
-        "openai/gpt-oss-20b", [{"role": "user", "content": "hi"}],
-        {"enable_thinking": True, "reasoning_effort": "high"}, stream=False,
+        "openai/gpt-oss-20b",
+        [{"role": "user", "content": "hi"}],
+        {"enable_thinking": True, "reasoning_effort": "high"},
+        stream=False,
         engine=InferenceEngine.VLLM,
     )
     assert p["extra_body"]["reasoning_effort"] == "high"
@@ -1061,8 +1189,10 @@ def test_reasoning_effort_reaches_vllm_as_a_request_field():
 def test_reasoning_effort_reaches_llama_server_as_a_template_variable():
     # llama-server has no reasoning_effort field; gpt-oss's template reads the variable.
     p = build_chat_payload(
-        "gpt-oss-20b", [{"role": "user", "content": "hi"}],
-        {"enable_thinking": True, "reasoning_effort": "low"}, stream=False,
+        "gpt-oss-20b",
+        [{"role": "user", "content": "hi"}],
+        {"enable_thinking": True, "reasoning_effort": "low"},
+        stream=False,
         engine=InferenceEngine.LLAMA_SERVER,
     )
     assert p["extra_body"]["chat_template_kwargs"]["reasoning_effort"] == "low"
@@ -1072,7 +1202,10 @@ def test_reasoning_effort_reaches_llama_server_as_a_template_variable():
 @pytest.mark.parametrize("engine", [InferenceEngine.VLLM, InferenceEngine.LLAMA_SERVER])
 def test_no_reasoning_effort_sends_no_level(engine):
     p = build_chat_payload(
-        "m", [{"role": "user", "content": "hi"}], {"enable_thinking": False}, stream=False,
+        "m",
+        [{"role": "user", "content": "hi"}],
+        {"enable_thinking": False},
+        stream=False,
         engine=engine,
     )
     assert "reasoning_effort" not in p["extra_body"]
@@ -1085,8 +1218,11 @@ def test_apply_thinking_tag_skipped_for_qwen35():
     # model (verified against Qwen3.5-35B-A3B on llama-server).
     for flag in (True, False):
         p = build_chat_payload(
-            "unsloth/Qwen3.5-35B-GGUF", [{"role": "user", "content": "hi"}],
-            {"enable_thinking": flag}, stream=False, engine=InferenceEngine.LLAMA_SERVER,
+            "unsloth/Qwen3.5-35B-GGUF",
+            [{"role": "user", "content": "hi"}],
+            {"enable_thinking": flag},
+            stream=False,
+            engine=InferenceEngine.LLAMA_SERVER,
         )
         assert p["messages"][-1]["content"] == "hi"
         assert p["extra_body"]["chat_template_kwargs"]["enable_thinking"] is flag
@@ -1095,13 +1231,19 @@ def test_apply_thinking_tag_skipped_for_qwen35():
 def test_apply_thinking_tag_noop_non_qwen_or_unset():
     # non-Qwen model: untouched
     p = build_chat_payload(
-        "llama-x", [{"role": "user", "content": "hi"}],
-        {"enable_thinking": False}, stream=False, engine=InferenceEngine.LLAMA_SERVER,
+        "llama-x",
+        [{"role": "user", "content": "hi"}],
+        {"enable_thinking": False},
+        stream=False,
+        engine=InferenceEngine.LLAMA_SERVER,
     )
     assert p["messages"][-1]["content"] == "hi"
     # Qwen but enable_thinking unset: untouched
     p2 = build_chat_payload(
-        "Qwen/Qwen2.5", [{"role": "user", "content": "hi"}], {}, stream=False,
+        "Qwen/Qwen2.5",
+        [{"role": "user", "content": "hi"}],
+        {},
+        stream=False,
         engine=InferenceEngine.VLLM,
     )
     assert p2["messages"][-1]["content"] == "hi"
@@ -1110,12 +1252,14 @@ def test_apply_thinking_tag_noop_non_qwen_or_unset():
 def test_generate_stream_reasoning_on_its_own_key():
     def handler(kwargs):
         assert kwargs["stream"] is True
-        return _Stream([
-            _Event([_Choice(delta=_Delta(reasoning_content="think A"))]),
-            _Event([_Choice(delta=_Delta(reasoning_content=" think B"))]),
-            _Event([_Choice(delta=_Delta(content="answer"))]),
-            _Event([_Choice(delta=_Delta())], usage=_Usage(3, 2, 5)),
-        ])
+        return _Stream(
+            [
+                _Event([_Choice(delta=_Delta(reasoning_content="think A"))]),
+                _Event([_Choice(delta=_Delta(reasoning_content=" think B"))]),
+                _Event([_Choice(delta=_Delta(content="answer"))]),
+                _Event([_Choice(delta=_Delta())], usage=_Usage(3, 2, 5)),
+            ]
+        )
 
     c = _client_with(handler)
 
@@ -1140,12 +1284,21 @@ def test_generate_stream_reasoning_on_its_own_key():
 def test_generate_non_stream_reasoning_on_its_own_key():
     def handler(kwargs):
         return _Completion(
-            choices=[_Choice(message=_Msg(content="answer", reasoning_content="because reasons"), finish_reason="stop")],
+            choices=[
+                _Choice(
+                    message=_Msg(content="answer", reasoning_content="because reasons"),
+                    finish_reason="stop",
+                )
+            ],
             usage=_Usage(3, 2, 5),
         )
 
     c = _client_with(handler)
-    res = asyncio.run(c.generate([{"role": "user", "content": "hi"}], {"enable_thinking": True, "total_timeout": 5}))
+    res = asyncio.run(
+        c.generate(
+            [{"role": "user", "content": "hi"}], {"enable_thinking": True, "total_timeout": 5}
+        )
+    )
     assert res["reasoning_content"] == "because reasons"
     assert res["result"] == "answer"
     assert "<think>" not in res["result"]
@@ -1168,15 +1321,19 @@ def test_generate_stream_drops_separator_split_across_deltas():
     # vLLM splits at </think> and leaves the template's "\n\n" on the answer;
     # it can arrive one newline per delta, so the strip has to span chunks.
     def handler(kwargs):
-        return _Stream([
-            _Event([_Choice(delta=_Delta(reasoning_content="think"))]),
-            _Event([_Choice(delta=_Delta(content="\n"))]),
-            _Event([_Choice(delta=_Delta(content="\n"))]),
-            _Event([_Choice(delta=_Delta(content="answer"))]),
-            _Event([_Choice(delta=_Delta())], usage=_Usage(3, 2, 5)),
-        ])
+        return _Stream(
+            [
+                _Event([_Choice(delta=_Delta(reasoning_content="think"))]),
+                _Event([_Choice(delta=_Delta(content="\n"))]),
+                _Event([_Choice(delta=_Delta(content="\n"))]),
+                _Event([_Choice(delta=_Delta(content="answer"))]),
+                _Event([_Choice(delta=_Delta())], usage=_Usage(3, 2, 5)),
+            ]
+        )
 
-    content, reasoning = _collect(_client_with(handler), {"enable_thinking": True, "total_timeout": 5})
+    content, reasoning = _collect(
+        _client_with(handler), {"enable_thinking": True, "total_timeout": 5}
+    )
     assert reasoning == "think"
     assert content == "answer"
 
@@ -1184,11 +1341,13 @@ def test_generate_stream_drops_separator_split_across_deltas():
 def test_generate_stream_keeps_newlines_inside_the_answer():
     # Only the separator goes; paragraph breaks the model wrote are content.
     def handler(kwargs):
-        return _Stream([
-            _Event([_Choice(delta=_Delta(reasoning_content="think"))]),
-            _Event([_Choice(delta=_Delta(content="\n\npara one\n\npara two"))]),
-            _Event([_Choice(delta=_Delta())], usage=_Usage(3, 2, 5)),
-        ])
+        return _Stream(
+            [
+                _Event([_Choice(delta=_Delta(reasoning_content="think"))]),
+                _Event([_Choice(delta=_Delta(content="\n\npara one\n\npara two"))]),
+                _Event([_Choice(delta=_Delta())], usage=_Usage(3, 2, 5)),
+            ]
+        )
 
     content, _ = _collect(_client_with(handler), {"enable_thinking": True, "total_timeout": 5})
     assert content == "para one\n\npara two"
@@ -1197,10 +1356,12 @@ def test_generate_stream_keeps_newlines_inside_the_answer():
 def test_generate_stream_leaves_content_alone_without_reasoning():
     # No reasoning block means no separator: a leading newline is the model's own.
     def handler(kwargs):
-        return _Stream([
-            _Event([_Choice(delta=_Delta(content="\n\nanswer"))]),
-            _Event([_Choice(delta=_Delta())], usage=_Usage(3, 2, 5)),
-        ])
+        return _Stream(
+            [
+                _Event([_Choice(delta=_Delta(content="\n\nanswer"))]),
+                _Event([_Choice(delta=_Delta())], usage=_Usage(3, 2, 5)),
+            ]
+        )
 
     content, reasoning = _collect(_client_with(handler), {"total_timeout": 5})
     assert reasoning == ""
@@ -1210,11 +1371,18 @@ def test_generate_stream_leaves_content_alone_without_reasoning():
 def test_generate_non_stream_drops_separator_after_reasoning():
     def handler(kwargs):
         return _Completion(
-            choices=[_Choice(message=_Msg(content="\n\nanswer", reasoning_content="why"), finish_reason="stop")],
+            choices=[
+                _Choice(
+                    message=_Msg(content="\n\nanswer", reasoning_content="why"),
+                    finish_reason="stop",
+                )
+            ],
             usage=_Usage(3, 2, 5),
         )
 
-    res = asyncio.run(_client_with(handler).generate([{"role": "user", "content": "hi"}], {"total_timeout": 5}))
+    res = asyncio.run(
+        _client_with(handler).generate([{"role": "user", "content": "hi"}], {"total_timeout": 5})
+    )
     assert res["reasoning_content"] == "why"
     assert res["result"] == "answer"
 
@@ -1226,7 +1394,9 @@ def test_generate_non_stream_leaves_content_alone_without_reasoning():
             usage=_Usage(3, 2, 5),
         )
 
-    res = asyncio.run(_client_with(handler).generate([{"role": "user", "content": "hi"}], {"total_timeout": 5}))
+    res = asyncio.run(
+        _client_with(handler).generate([{"role": "user", "content": "hi"}], {"total_timeout": 5})
+    )
     assert "reasoning_content" not in res
     assert res["result"] == "\n\nanswer"
 
@@ -1250,18 +1420,47 @@ def test_extract_reasoning_field_and_location_variants():
 def test_generate_stream_reasoning_via_model_extra():
     # simulate vLLM: reasoning arrives only in delta.model_extra['reasoning']
     def handler(kwargs):
-        return _Stream([
-            _Event([_Choice(delta=SimpleNamespace(content=None, tool_calls=None, model_extra={"reasoning": "step 1"}))]),
-            _Event([_Choice(delta=SimpleNamespace(content=None, tool_calls=None, model_extra={"reasoning": " step 2"}))]),
-            _Event([_Choice(delta=SimpleNamespace(content="final", tool_calls=None, model_extra={}))]),
-            _Event([_Choice(delta=SimpleNamespace(content=None, tool_calls=None, model_extra={}))], usage=_Usage(2, 3, 5)),
-        ])
+        return _Stream(
+            [
+                _Event(
+                    [
+                        _Choice(
+                            delta=SimpleNamespace(
+                                content=None, tool_calls=None, model_extra={"reasoning": "step 1"}
+                            )
+                        )
+                    ]
+                ),
+                _Event(
+                    [
+                        _Choice(
+                            delta=SimpleNamespace(
+                                content=None, tool_calls=None, model_extra={"reasoning": " step 2"}
+                            )
+                        )
+                    ]
+                ),
+                _Event(
+                    [
+                        _Choice(
+                            delta=SimpleNamespace(content="final", tool_calls=None, model_extra={})
+                        )
+                    ]
+                ),
+                _Event(
+                    [_Choice(delta=SimpleNamespace(content=None, tool_calls=None, model_extra={}))],
+                    usage=_Usage(2, 3, 5),
+                ),
+            ]
+        )
 
     c = _client_with(handler)
 
     async def run():
         content, reasoning = [], []
-        async for item in c.generate_stream([{"role": "user", "content": "hi"}], {"enable_thinking": True, "total_timeout": 5}):
+        async for item in c.generate_stream(
+            [{"role": "user", "content": "hi"}], {"enable_thinking": True, "total_timeout": 5}
+        ):
             if item.get("chunk"):
                 content.append(item["chunk"])
             if item.get("reasoning"):
@@ -1272,13 +1471,19 @@ def test_generate_stream_reasoning_via_model_extra():
     assert reasoning == "step 1 step 2"
     assert content == "final"
 
+
 def test_generate_non_stream_qwen_default_thinking_kept():
     # Qwen3.5 thinks by default (template prefill), so reasoning arrives with
     # a normal answer even when enable_thinking was never set — it must not be
     # dropped.
     def handler(kwargs):
         return _Completion(
-            choices=[_Choice(message=_Msg(content="391", reasoning_content="17*23 math"), finish_reason="stop")],
+            choices=[
+                _Choice(
+                    message=_Msg(content="391", reasoning_content="17*23 math"),
+                    finish_reason="stop",
+                )
+            ],
             usage=_Usage(3, 2, 5),
         )
 
@@ -1306,7 +1511,10 @@ def test_refit_max_tokens_leaves_room_for_the_prompt():
 def test_refit_max_tokens_declines_when_the_prompt_is_what_does_not_fit():
     # 65800 in with 300 asked is a 65,500-token prompt against a 65,536 window:
     # no output cap rescues that, and trimming to a two-token answer would hide it.
-    assert _refit_max_tokens({"max_tokens": 300}, Exception(_OVERFLOW.replace("65545", "65800"))) is None
+    assert (
+        _refit_max_tokens({"max_tokens": 300}, Exception(_OVERFLOW.replace("65545", "65800")))
+        is None
+    )
 
 
 def test_refit_max_tokens_ignores_unrelated_failures():
@@ -1445,3 +1653,83 @@ def test_no_generation_path_still_hardcodes_300():
     assert not offenders, "total_timeout must default to DEFAULT_GENERATION_TIMEOUT:\n" + "\n".join(
         offenders
     )
+
+
+# ------------------------------- vLLM asleep -------------------------------
+def _vllm_client_with(monkeypatch, is_sleeping):
+    """A vLLM client whose /is_sleeping answers through ``is_sleeping(request)``."""
+    import httpx2
+
+    from service.inference import async_server_client as module
+
+    seen = []
+
+    def answer(request):
+        seen.append(str(request.url))
+        return is_sleeping(request)
+
+    real = httpx2.AsyncClient
+    monkeypatch.setattr(
+        module.httpx2,
+        "AsyncClient",
+        lambda **kw: real(transport=httpx2.MockTransport(answer), **kw),
+    )
+    calls = []
+
+    def handler(kwargs):
+        calls.append(kwargs)
+        return _Completion(choices=[_Choice(message=_Msg(content="ok"))], usage=_Usage(1, 1, 2))
+
+    c = _client_with(handler)
+    c.engine = InferenceEngine.VLLM
+    c.base_url = "http://127.0.0.1:5000/v1"
+    return c, calls, seen
+
+
+def test_a_sleeping_vllm_is_refused_at_once(monkeypatch):
+    """A GPU sharing tool put it to sleep; the request used to hang until the timeout."""
+    import httpx2
+
+    c, calls, seen = _vllm_client_with(
+        monkeypatch, lambda r: httpx2.Response(200, json={"is_sleeping": True})
+    )
+    with pytest.raises(RuntimeError, match="asleep") as raised:
+        asyncio.run(c.generate([{"role": "user", "content": "hi"}], {"total_timeout": 5}))
+    assert raised.value.error_payload["recoverable"] is True
+    assert calls == []
+    assert seen == ["http://127.0.0.1:5000/is_sleeping"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        lambda r: __import__("httpx2").Response(200, json={"is_sleeping": False}),
+        lambda r: __import__("httpx2").Response(404, json={"detail": "Not Found"}),
+        lambda r: __import__("httpx2").Response(200, text="not json"),
+    ],
+    ids=["awake", "admin-endpoints-off", "garbled"],
+)
+def test_anything_but_asleep_lets_the_request_through(monkeypatch, reply):
+    c, calls, _ = _vllm_client_with(monkeypatch, reply)
+    res = asyncio.run(c.generate([{"role": "user", "content": "hi"}], {"total_timeout": 5}))
+    assert len(calls) == 1
+    assert res["result"] == "ok"
+
+
+def test_a_failed_check_lets_the_request_through(monkeypatch):
+    import httpx2
+
+    def refuse(request):
+        raise httpx2.ConnectError("refused", request=request)
+
+    c, calls, _ = _vllm_client_with(monkeypatch, refuse)
+    asyncio.run(c.generate([{"role": "user", "content": "hi"}], {"total_timeout": 5}))
+    assert len(calls) == 1
+
+
+def test_llama_server_is_not_asked(monkeypatch):
+    c, calls, seen = _vllm_client_with(monkeypatch, lambda r: None)
+    c.engine = InferenceEngine.LLAMA_SERVER
+    asyncio.run(c.generate([{"role": "user", "content": "hi"}], {"total_timeout": 5}))
+    assert seen == []
+    assert len(calls) == 1

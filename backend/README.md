@@ -385,6 +385,19 @@ Skip setting up the vLLM environment:
 TRUSTA_SETUP_VLLM=0 bash scripts/linux/setup_env.sh
 ```
 
+Also install the Strata engine (`engine="strata"`, NVIDIA only). Its deep sleep is not in upstream
+Strata, so the engine is compiled from `TRUSTA-SW-FAE/strata` (`feat/deep-sleep`, private: set up git
+credentials first, e.g. `gh auth login` and `gh auth setup-git`); Strata's own setup then installs the
+model, IQ3_XXS unless told otherwise (about 76 GB to download). `scripts/linux/install_strata.sh` does
+this step on its own too, to install or update Strata later.
+
+```bash
+TRUSTA_SETUP_STRATA=1 bash scripts/linux/setup_env.sh
+# another branch / tag / commit, folder, or model (arguments for Strata's setup, as they are)
+TRUSTA_STRATA_REF=feat/deep-sleep TRUSTA_STRATA_DIR=/opt/strata \
+  TRUSTA_STRATA_SETUP_ARGS="--model IQ3_XXS --data-dir /mnt/models" bash scripts/linux/install_strata.sh
+```
+
 #### Option B: Manual setup
 
 ```bash

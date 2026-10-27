@@ -6,6 +6,7 @@ routing, FIFO order, cross-talk isolation, lifecycle and the generate /
 generate_stream consumer paths — all without a real multiprocessing worker
 (a thread queue satisfies the ``get(timeout=...)`` interface the loop uses).
 """
+
 import queue
 import threading
 import time
@@ -142,9 +143,7 @@ def test_generate_full_path_result_and_cleanup(mip):
     result_box = {}
 
     def _consume():
-        result_box["out"] = mip.generate(
-            "hi", {"total_timeout": 5}, request_id="r1"
-        )
+        result_box["out"] = mip.generate("hi", {"total_timeout": 5}, request_id="r1")
 
     t = threading.Thread(target=_consume)
     t.start()
@@ -250,9 +249,7 @@ def test_generate_stream_two_concurrent_consumers_interleaved(mip):
     t2 = threading.Thread(target=_consume, args=("s2",))
     t1.start()
     t2.start()
-    assert _wait_until(
-        lambda: mip._is_request_active("s1") and mip._is_request_active("s2")
-    )
+    assert _wait_until(lambda: mip._is_request_active("s1") and mip._is_request_active("s2"))
 
     feed = [
         {"request_id": "s1", "type": "stream_chunk", "chunk": "c1", "done": False},
@@ -301,8 +298,101 @@ def test_generate_stream_command_sent_after_registration(mip):
     assert mip._sent_commands[0]["command"] == "generate_stream"
     assert mip._is_request_active("sc-1")  # registered before/at command time
 
-    mip.data_queue.put(
-        {"request_id": "sc-1", "type": "stream_chunk", "chunk": "", "done": True}
-    )
+    mip.data_queue.put({"request_id": "sc-1", "type": "stream_chunk", "chunk": "", "done": True})
     t.join(timeout=5)
     assert not t.is_alive()
+
+
+# ------------------- cleanup / apply_chat_template ---------------------
+def _fake_worker(mip, reply):
+    """Answer each command the way the worker does: later, on data_queue, tagged with its id."""
+
+    def answer(item):
+        time.sleep(0.05)  # another process: the caller is already waiting by then
+        mip.data_queue.put({"request_id": item["request_id"], **reply(item)})
+
+    def put(item, **kw):
+        mip._sent_commands.append(item)
+        threading.Thread(target=answer, args=(item,), daemon=True).start()
+
+    mip.request_queue = SimpleNamespace(put=put)
+
+
+def test_cleanup_reply_reaches_the_caller_with_the_dispatcher_running(mip):
+    """The dispatcher, data_queue's only reader, dropped the reply: every cleanup timed out."""
+    mip._start_dispatcher()
+    _fake_worker(mip, lambda item: {"type": "cleanup", "result": "vLLM prefix cache reset"})
+
+    started = time.time()
+    result = mip.cleanup_generation_memory(slot=2)
+
+    assert result == {"status": "success", "message": "vLLM prefix cache reset"}
+    assert time.time() - started < 2
+    assert mip._sent_commands[0]["command"] == "cleanup_generation_memory"
+    assert mip._sent_commands[0]["slot"] == 2
+    assert not mip._request_queues  # unregistered afterwards
+
+
+def test_cleanup_times_out_when_the_worker_never_answers(mip, monkeypatch):
+    mip._start_dispatcher()
+    real_get = queue.Queue.get
+    monkeypatch.setattr(queue.Queue, "get", lambda self, timeout=None: real_get(self, timeout=0.05))
+
+    result = mip.cleanup_generation_memory()
+
+    assert result["status"] == "timeout"
+    assert not mip._request_queues
+
+
+def test_apply_chat_template_reply_reaches_the_caller(mip):
+    mip._start_dispatcher()
+    _fake_worker(mip, lambda item: {"type": "result", "result": "<prompt>"})
+    assert mip.apply_chat_template([{"role": "user", "content": "hi"}]) == "<prompt>"
+    assert not mip._request_queues
+
+
+def test_apply_chat_template_error_is_raised(mip):
+    mip._start_dispatcher()
+    _fake_worker(mip, lambda item: {"type": "error", "error": "no template"})
+    with pytest.raises(RuntimeError, match="no template"):
+        mip.apply_chat_template([{"role": "user", "content": "hi"}])
+
+
+# ---------------------------- status drain -----------------------------
+class _PausingStatusQueue:
+    """Hands out messages in order; holds the first one until ``release`` is set."""
+
+    def __init__(self, messages):
+        self.items = list(messages)
+        self.taken_first = threading.Event()
+        self.release = threading.Event()
+
+    def empty(self):
+        return not self.items
+
+    def get_nowait(self):
+        if not self.items:
+            raise queue.Empty
+        item = self.items.pop(0)
+        if not self.taken_first.is_set():
+            self.taken_first.set()
+            self.release.wait(2)  # taken off the queue, not yet applied
+        return item
+
+
+def test_concurrent_status_drains_apply_messages_in_order(mip):
+    """A "loading" applied after "ready" left the model looking busy for good."""
+    mip.current_status = "idle"
+    mip.status_queue = _PausingStatusQueue([{"status": "loading"}, {"status": "ready"}])
+
+    first = threading.Thread(target=mip.update_status)
+    first.start()
+    assert mip.status_queue.taken_first.wait(2)
+    second = threading.Thread(target=mip.update_status)
+    second.start()
+    time.sleep(0.1)  # without the lock, the second drain applies "ready" here
+    mip.status_queue.release.set()
+    first.join(2)
+    second.join(2)
+
+    assert mip.current_status == "ready"

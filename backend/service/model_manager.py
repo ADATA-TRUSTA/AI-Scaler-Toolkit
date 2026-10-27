@@ -4,11 +4,13 @@ Uses separate process for model loading/inference to avoid OOM VRAM issues.
 """
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from threading import Lock
 from typing import Any, cast
 
+import httpx2
 import torch
 
 from .config_models import InferenceConfig, InferenceEngine
@@ -19,10 +21,30 @@ from .inference.async_server_client import (
     resolve_server_endpoint,
     settle_managed_port,
 )
+from .inference.kv_disk_tier import (
+    GIB,
+    DiskTierJanitor,
+    DiskTierNotConfigured,
+    disk_tier_usage,
+    evict_disk_tier,
+)
 from .inference.model_inference_process import ModelInferenceProcess
-from .settings import DEFAULT_GENERATION_TIMEOUT, configure_logging, effective_llama_binary
+from .settings import (
+    DEFAULT_GENERATION_TIMEOUT,
+    VLLM_KV_DISK_CHECK_INTERVAL,
+    configure_logging,
+    effective_llama_binary,
+)
 
 logger = configure_logging(__name__)
+
+
+class SleepModeUnavailable(ValueError):
+    """Sleep/wake was asked of a model that cannot do it, with the reason why."""
+
+
+class ModelSleepingError(RuntimeError):
+    """A generation reached a sleeping model while its auto-wake is off."""
 
 
 class ModelManager:
@@ -65,6 +87,15 @@ class ModelManager:
         # engine never goes through the worker to generate, so without this an OOM on
         # this path reached the UI as an opaque string. See _record_async_error.
         self._last_async_error: dict[str, Any] | None = None
+        # Keeps vLLM's disk KV tier under vllm_kv_offloading_disk_max_gb. It works on
+        # the directory alone, so it runs here rather than in the worker, from load
+        # until unload; vLLM never evicts from that tier itself.
+        self._kv_disk_janitor: DiskTierJanitor | None = None
+        # vLLM sleep mode. Tracked here rather than asked of vLLM on every status poll:
+        # only this service puts the model to sleep. The lock makes concurrent
+        # requests that find it asleep share one wake-up instead of racing.
+        self._sleeping = False
+        self._sleep_lock = asyncio.Lock()
 
         self._initialized = True
 
@@ -184,6 +215,224 @@ class ModelManager:
         except RuntimeError:
             pass  # no running loop; GC will close the underlying httpx2 clients
 
+    # ---------------------- Disk KV tier (vLLM) ----------------------
+    def _start_kv_disk_janitor(self, config: InferenceConfig) -> None:
+        """Start the cap check for a vLLM load that sets vllm_kv_offloading_disk_max_gb."""
+        self._stop_kv_disk_janitor()
+        if (
+            config.engine != InferenceEngine.VLLM
+            or not config.vllm_kv_offloading_disk_path
+            or not config.vllm_kv_offloading_disk_max_gb
+        ):
+            return
+        self._kv_disk_janitor = DiskTierJanitor(
+            config.vllm_kv_offloading_disk_path,
+            int(config.vllm_kv_offloading_disk_max_gb * GIB),
+            VLLM_KV_DISK_CHECK_INTERVAL,
+        ).start()
+        logger.info(
+            "[KV disk] capping %s at %.1f GiB, checked every %.0f s",
+            config.vllm_kv_offloading_disk_path,
+            config.vllm_kv_offloading_disk_max_gb,
+            VLLM_KV_DISK_CHECK_INTERVAL,
+        )
+
+    def _stop_kv_disk_janitor(self) -> None:
+        janitor = getattr(self, "_kv_disk_janitor", None)
+        self._kv_disk_janitor = None
+        if janitor is not None:
+            janitor.stop()
+
+    def _kv_disk_config(self) -> InferenceConfig:
+        """The current config, when it is a vLLM one with a disk KV tier."""
+        cfg = self.config
+        if cfg is None or cfg.engine != InferenceEngine.VLLM:
+            raise DiskTierNotConfigured("No vLLM model is loaded or loading")
+        if not cfg.vllm_kv_offloading_disk_path:
+            raise DiskTierNotConfigured(
+                "The current vLLM model has no disk KV tier (vllm_kv_offloading_disk_path)"
+            )
+        return cfg
+
+    def kv_disk_usage(self) -> dict[str, Any]:
+        """Measure the current model's disk KV tier now."""
+        cfg = self._kv_disk_config()
+        path = cast(str, cfg.vllm_kv_offloading_disk_path)
+        usage = disk_tier_usage(path)
+        janitor = self._kv_disk_janitor
+        if janitor is not None:
+            janitor.last_usage_bytes = usage["total_bytes"]
+        return {"path": path, "max_gb": cfg.vllm_kv_offloading_disk_max_gb, **usage}
+
+    def kv_disk_cleanup(self, target_gb: float = 0.0) -> dict[str, Any]:
+        """Trim the current model's disk KV tier to ``target_gb``, LRU first; 0 empties it."""
+        cfg = self._kv_disk_config()
+        path = cast(str, cfg.vllm_kv_offloading_disk_path)
+        target_bytes = int(target_gb * GIB)
+        janitor = self._kv_disk_janitor
+        if janitor is not None:
+            result = janitor.evict(target_bytes)
+        else:
+            result = evict_disk_tier(path, target_bytes)
+        return {"path": path, **result}
+
+    # ---------------------- Sleep mode (vLLM, Strata) ----------------------
+    def is_sleeping(self) -> bool:
+        """True while a loaded vLLM or Strata model is asleep."""
+        return self._sleeping and self.is_loaded()
+
+    def auto_wake_field(self) -> str:
+        """The config field that switches auto-wake for the loaded engine."""
+        cfg = self.config
+        return (
+            "strata_auto_wake" if cfg and cfg.engine == InferenceEngine.STRATA else "vllm_auto_wake"
+        )
+
+    def auto_wake_enabled(self) -> bool:
+        """Whether a request that finds the model asleep wakes it (else HTTP 503)."""
+        cfg = self.config
+        if cfg is None:
+            return True
+        if cfg.engine == InferenceEngine.STRATA:
+            return cfg.strata_auto_wake
+        return cfg.vllm_auto_wake
+
+    def _sleep_capable_config(self) -> InferenceConfig:
+        """The loaded config, if it is a vLLM or Strata model started with sleep mode."""
+        if not self.is_loaded() or self.config is None:
+            raise SleepModeUnavailable("No model is loaded.")
+        if self.config.engine == InferenceEngine.STRATA:
+            return self.config  # always started with --sleep-mode
+        if self.config.engine != InferenceEngine.VLLM:
+            raise SleepModeUnavailable(
+                "Sleep mode needs the vllm or strata engine; the loaded engine is "
+                f"'{self.config.engine}'."
+            )
+        if not self.config.vllm_enable_sleep_mode:
+            raise SleepModeUnavailable(
+                "The model was loaded without vllm_enable_sleep_mode; reload it with "
+                "vllm_enable_sleep_mode=true to use sleep."
+            )
+        return self.config
+
+    async def _strata_admin(
+        self, config: InferenceConfig, method: str, path: str, http_timeout: float
+    ) -> Any:  # noqa: ANN401 - decoded JSON body
+        """
+        Call a Strata server control route (/sleep, /wake_up, /is_sleeping).
+
+        The routes take JSON from the server's own host only, so the call carries a JSON
+        body and no Origin. A refusal that says the build or the load cannot sleep is
+        reported as unavailable; any other failure (a request still running after the
+        server's wait, the freed VRAM held by another program) raises with its reason.
+        """
+        endpoint = resolve_server_endpoint(config)
+        root = endpoint["base_url"].removesuffix("/v1")
+        async with httpx2.AsyncClient(timeout=http_timeout) as http:
+            if method == "POST":
+                response = await http.post(f"{root}{path}", json={})
+            else:
+                response = await http.get(f"{root}{path}")
+        body = response.json() if response.content else {}
+        if response.status_code >= 400:
+            message = str(((body or {}).get("error") or {}).get("message") or body or response.text)
+            if (
+                response.status_code in (400, 404)
+                or "sleep-mode" in message
+                or "cannot sleep" in message
+            ):
+                raise SleepModeUnavailable(f"Strata cannot sleep: {message}")
+            raise RuntimeError(f"Strata {path} failed (HTTP {response.status_code}): {message}")
+        return body
+
+    async def _vllm_admin(
+        self, config: InferenceConfig, method: str, path: str, http_timeout: float
+    ) -> Any:  # noqa: ANN401 - decoded JSON body or None
+        """Call a vLLM admin endpoint (served at the root, not under /v1)."""
+        endpoint = resolve_server_endpoint(config)
+        root = endpoint["base_url"].removesuffix("/v1")
+        headers = {"Authorization": f"Bearer {endpoint['api_key']}"}
+        async with httpx2.AsyncClient(timeout=http_timeout) as http:
+            response = await http.request(method, f"{root}{path}", headers=headers)
+        if response.status_code == 404:
+            raise SleepModeUnavailable(
+                f"vLLM has no {path} endpoint: its admin API is off. It is only enabled "
+                "while VLLM_SERVER_HOST is a loopback address."
+            )
+        response.raise_for_status()
+        return response.json() if response.content else None
+
+    async def asleep(self, mode: str = "wait") -> dict[str, Any]:
+        """
+        Put the loaded vLLM model to sleep (level 1).
+
+        Level 1 moves the weights to pinned CPU memory and drops the KV cache; vLLM
+        clears the prefix cache itself. Level 2 is not offered: measured on Qwen3.5
+        GPTQ with experts offload, reloading the weights left no room to restore the
+        KV cache and the wake-up failed with CUDA OOM, leaving the server unusable.
+        ``mode`` is vLLM's pause mode for running requests: "wait" lets them finish,
+        "abort" ends them now. Requests that arrive while asleep are queued by vLLM.
+        """
+        if mode not in ("wait", "abort"):
+            raise SleepModeUnavailable(f"mode must be 'wait' or 'abort', not {mode!r}")
+        config = self._sleep_capable_config()
+        async with self._sleep_lock:
+            if self._sleeping:
+                return {"sleeping": True, "changed": False, "seconds": 0.0}
+            start = time.monotonic()
+            if config.engine == InferenceEngine.STRATA:
+                # Strata's sleep waits for the running request itself (up to 300 s);
+                # "abort" ends this service's in-flight generations first.
+                if mode == "abort":
+                    self._signal_async_stop(None)
+                report = await self._strata_admin(config, "POST", "/sleep", http_timeout=900)
+                logger.info("Strata sleep: %s", report)
+            else:
+                # "wait" lasts as long as the longest running generation.
+                await self._vllm_admin(
+                    config, "POST", f"/sleep?level=1&mode={mode}", http_timeout=900
+                )
+            self._sleeping = True
+            seconds = round(time.monotonic() - start, 3)
+        logger.info("%s model asleep after %.3fs (mode=%s)", config.engine, seconds, mode)
+        return {"sleeping": True, "changed": True, "seconds": seconds}
+
+    async def awake(self) -> dict[str, Any]:
+        """Wake the vLLM or Strata model; a no-op when it is already awake."""
+        config = self._sleep_capable_config()
+        admin = self._strata_admin if config.engine == InferenceEngine.STRATA else self._vllm_admin
+        async with self._sleep_lock:
+            if not self._sleeping:
+                return {"sleeping": False, "changed": False, "seconds": 0.0}
+            start = time.monotonic()
+            try:
+                await admin(config, "POST", "/wake_up", http_timeout=300)
+            except Exception:
+                # A failed wake-up (e.g. the freed VRAM was taken meanwhile) can leave
+                # the server in either state; ask it rather than guess.
+                try:
+                    state = await admin(config, "GET", "/is_sleeping", http_timeout=10)
+                    self._sleeping = bool((state or {}).get("is_sleeping", True))
+                except Exception:  # pragma: no cover - server gone; keep "asleep"
+                    pass
+                raise
+            self._sleeping = False
+            seconds = round(time.monotonic() - start, 3)
+        logger.info("%s model awake after %.3fs", config.engine, seconds)
+        return {"sleeping": False, "changed": True, "seconds": seconds}
+
+    async def _ensure_awake(self) -> None:
+        """Before a generation: wake the model, or refuse when auto-wake is off."""
+        if not self.is_sleeping():
+            return
+        if not self.auto_wake_enabled():
+            raise ModelSleepingError(
+                f"The model is asleep and {self.auto_wake_field()} is off; "
+                "POST /inference/wake first."
+            )
+        logger.info("Request arrived while the model sleeps; waking it (auto-wake)")
+        await self.awake()
+
     # ---------------------- Utility Helpers ----------------------
     def _save_config(self, config: InferenceConfig) -> None:
         """
@@ -218,7 +467,9 @@ class ModelManager:
             # Persist the config file and update state
             self._save_config(config)
             self.config = config  # report the user's settings right away
+            self._sleeping = False  # a fresh server starts awake
             self.pending_config = config
+            self._start_kv_disk_janitor(config)
         return True
 
     def start_loading(self, config: InferenceConfig) -> bool:
@@ -236,6 +487,9 @@ class ModelManager:
             # Check whether a model is loaded or still loading
             status = self.inference_process.get_status()
 
+            # Before the early return too: a load that failed leaves its janitor behind.
+            self._stop_kv_disk_janitor()
+
             if not status.get("loaded") and not status.get("is_loading"):
                 logger.info("No model loaded to unload (idempotent success).")
                 return {"status": "success", "message": "No model loaded"}
@@ -247,6 +501,7 @@ class ModelManager:
 
             self.config = None
             self.pending_config = None
+            self._sleeping = False
             # Close the cached async client (and any pending stale ones) so the
             # httpx2 keep-alive connections are released rather than leaked. This
             # is sync, so schedule the async close on the running loop when there
@@ -493,6 +748,7 @@ class ModelManager:
             tools=tools,
             tool_choice=tool_choice,
         )
+        await self._ensure_awake()
         client = await self._acquire_async_client()
         messages = self._as_messages(prompt, system_prompt)
         stop_event = self._register_async_stop(request_id)
@@ -569,6 +825,7 @@ class ModelManager:
             tools=tools,
             tool_choice=tool_choice,
         )
+        await self._ensure_awake()
         client = await self._acquire_async_client()
         messages = self._as_messages(prompt, system_prompt)
         stop_event = self._register_async_stop(request_id)
@@ -599,6 +856,7 @@ class ModelManager:
         status = {
             "loaded": process_status.get("loaded", False),
             "is_loading": process_status.get("is_loading", False),
+            "sleeping": self._sleeping and bool(process_status.get("loaded")),
             "loading_error": process_status.get("loading_error"),
             "error_type": process_status.get("error_type"),
             "is_oom": process_status.get("is_oom", False),
@@ -652,9 +910,19 @@ class ModelManager:
             "vllm_cpu_offload_params": cfg.vllm_cpu_offload_params if cfg else None,
             "vllm_kv_offloading_size": (cfg.vllm_kv_offloading_size if cfg else None),
             "vllm_kv_offloading_disk_path": cfg.vllm_kv_offloading_disk_path if cfg else None,
+            "vllm_kv_offloading_disk_max_gb": (cfg.vllm_kv_offloading_disk_max_gb if cfg else None),
+            "vllm_kv_disk_usage_bytes": (
+                self._kv_disk_janitor.last_usage_bytes if self._kv_disk_janitor else None
+            ),
             "vllm_tensor_parallel_size": cfg.vllm_tensor_parallel_size if cfg else None,
             "vllm_max_num_seqs": cfg.vllm_max_num_seqs if cfg else None,
             "vllm_max_num_batched_tokens": (cfg.vllm_max_num_batched_tokens if cfg else None),
+            "vllm_enable_sleep_mode": cfg.vllm_enable_sleep_mode if cfg else None,
+            "vllm_auto_wake": cfg.vllm_auto_wake if cfg else None,
+            "strata_config_path": cfg.strata_config_path if cfg else None,
+            "strata_max_context": cfg.strata_max_context if cfg else None,
+            "strata_vram_limit_gb": cfg.strata_vram_limit_gb if cfg else None,
+            "strata_auto_wake": cfg.strata_auto_wake if cfg else None,
             "vllm_mm_image_limit": cfg.vllm_mm_image_limit if cfg else None,
             "vllm_mm_audio_limit": cfg.vllm_mm_audio_limit if cfg else None,
             "vllm_mm_video_limit": cfg.vllm_mm_video_limit if cfg else None,
@@ -697,6 +965,7 @@ class ModelManager:
     def cleanup(self) -> None:
         """Release resources (called on application shutdown)."""
         logger.info("Cleaning up ModelManager...")
+        self._stop_kv_disk_janitor()
 
         try:
             # Stop the inference process
@@ -742,6 +1011,7 @@ class ModelManager:
                     logger.exception(f"Error force terminating process: {e}")
 
             # Reset state
+            self._stop_kv_disk_janitor()
             self.inference_process._cleanup_dead_process()
             self.inference_process.current_status = "idle"
             self.config = None
