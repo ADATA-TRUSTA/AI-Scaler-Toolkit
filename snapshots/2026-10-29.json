@@ -1,0 +1,381 @@
+{
+  "generated_at": "2026-10-29T05:42:20.166Z",
+  "repository": "ADATA-TRUSTA/AI-Scaler-Toolkit",
+  "traffic": {
+    "views": {
+      "count": 125,
+      "uniques": 17,
+      "views": [
+        {
+          "timestamp": "2026-10-14T00:00:00Z",
+          "count": 13,
+          "uniques": 3
+        },
+        {
+          "timestamp": "2026-10-15T00:00:00Z",
+          "count": 28,
+          "uniques": 6
+        },
+        {
+          "timestamp": "2026-10-16T00:00:00Z",
+          "count": 28,
+          "uniques": 7
+        },
+        {
+          "timestamp": "2026-10-17T00:00:00Z",
+          "count": 2,
+          "uniques": 2
+        },
+        {
+          "timestamp": "2026-10-18T00:00:00Z",
+          "count": 1,
+          "uniques": 1
+        },
+        {
+          "timestamp": "2026-10-19T00:00:00Z",
+          "count": 30,
+          "uniques": 4
+        },
+        {
+          "timestamp": "2026-10-20T00:00:00Z",
+          "count": 10,
+          "uniques": 5
+        },
+        {
+          "timestamp": "2026-10-21T00:00:00Z",
+          "count": 1,
+          "uniques": 1
+        },
+        {
+          "timestamp": "2026-10-22T00:00:00Z",
+          "count": 2,
+          "uniques": 2
+        },
+        {
+          "timestamp": "2026-10-23T00:00:00Z",
+          "count": 0,
+          "uniques": 0
+        },
+        {
+          "timestamp": "2026-10-24T00:00:00Z",
+          "count": 1,
+          "uniques": 1
+        },
+        {
+          "timestamp": "2026-10-25T00:00:00Z",
+          "count": 0,
+          "uniques": 0
+        },
+        {
+          "timestamp": "2026-10-26T00:00:00Z",
+          "count": 0,
+          "uniques": 0
+        },
+        {
+          "timestamp": "2026-10-27T00:00:00Z",
+          "count": 9,
+          "uniques": 4
+        }
+      ]
+    },
+    "clones": {
+      "count": 464,
+      "uniques": 114,
+      "clones": [
+        {
+          "timestamp": "2026-10-14T00:00:00Z",
+          "count": 257,
+          "uniques": 31
+        },
+        {
+          "timestamp": "2026-10-15T00:00:00Z",
+          "count": 35,
+          "uniques": 15
+        },
+        {
+          "timestamp": "2026-10-16T00:00:00Z",
+          "count": 27,
+          "uniques": 12
+        },
+        {
+          "timestamp": "2026-10-17T00:00:00Z",
+          "count": 13,
+          "uniques": 9
+        },
+        {
+          "timestamp": "2026-10-18T00:00:00Z",
+          "count": 12,
+          "uniques": 8
+        },
+        {
+          "timestamp": "2026-10-19T00:00:00Z",
+          "count": 28,
+          "uniques": 11
+        },
+        {
+          "timestamp": "2026-10-20T00:00:00Z",
+          "count": 9,
+          "uniques": 9
+        },
+        {
+          "timestamp": "2026-10-21T00:00:00Z",
+          "count": 4,
+          "uniques": 4
+        },
+        {
+          "timestamp": "2026-10-22T00:00:00Z",
+          "count": 17,
+          "uniques": 11
+        },
+        {
+          "timestamp": "2026-10-23T00:00:00Z",
+          "count": 6,
+          "uniques": 6
+        },
+        {
+          "timestamp": "2026-10-24T00:00:00Z",
+          "count": 15,
+          "uniques": 7
+        },
+        {
+          "timestamp": "2026-10-25T00:00:00Z",
+          "count": 4,
+          "uniques": 4
+        },
+        {
+          "timestamp": "2026-10-26T00:00:00Z",
+          "count": 22,
+          "uniques": 15
+        },
+        {
+          "timestamp": "2026-10-27T00:00:00Z",
+          "count": 15,
+          "uniques": 11
+        }
+      ]
+    }
+  },
+  "releases": {
+    "release_count": 6,
+    "asset_count": 12,
+    "total_asset_downloads": 23,
+    "items": [
+      {
+        "id": 416946716,
+        "name": "v0.2.0",
+        "tag_name": "v0.2.0",
+        "draft": false,
+        "prerelease": false,
+        "created_at": "2026-10-19T05:53:57Z",
+        "published_at": "2026-10-19T05:56:01Z",
+        "html_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/tag/v0.2.0",
+        "assets": [
+          {
+            "name": "AIScalerToolkit-0.2.0-x64-Setup.exe",
+            "label": "",
+            "content_type": "application/x-msdownload",
+            "size": 30323296,
+            "state": "uploaded",
+            "download_count": 1,
+            "created_at": "2026-10-19T05:54:07Z",
+            "updated_at": "2026-10-19T05:54:29Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.2.0/AIScalerToolkit-0.2.0-x64-Setup.exe"
+          },
+          {
+            "name": "AIScalerToolkit-0.2.0-x86_64.AppImage",
+            "label": "",
+            "content_type": "application/octet-stream",
+            "size": 159828472,
+            "state": "uploaded",
+            "download_count": 3,
+            "created_at": "2026-10-19T05:54:06Z",
+            "updated_at": "2026-10-19T05:56:00Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.2.0/AIScalerToolkit-0.2.0-x86_64.AppImage"
+          }
+        ],
+        "asset_count": 2,
+        "total_asset_downloads": 4
+      },
+      {
+        "id": 413567184,
+        "name": "v0.1.4",
+        "tag_name": "v0.1.4",
+        "draft": false,
+        "prerelease": false,
+        "created_at": "2026-10-15T08:18:10Z",
+        "published_at": "2026-10-15T08:20:21Z",
+        "html_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/tag/v0.1.4",
+        "assets": [
+          {
+            "name": "AIScalerToolkit-0.1.4-x64-Setup.exe",
+            "label": "",
+            "content_type": "application/x-msdownload",
+            "size": 30314872,
+            "state": "uploaded",
+            "download_count": 0,
+            "created_at": "2026-10-15T08:18:19Z",
+            "updated_at": "2026-10-15T08:18:57Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.4/AIScalerToolkit-0.1.4-x64-Setup.exe"
+          },
+          {
+            "name": "AIScalerToolkit-0.1.4-x86_64.AppImage",
+            "label": "",
+            "content_type": "application/octet-stream",
+            "size": 159812088,
+            "state": "uploaded",
+            "download_count": 6,
+            "created_at": "2026-10-15T08:18:19Z",
+            "updated_at": "2026-10-15T08:20:21Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.4/AIScalerToolkit-0.1.4-x86_64.AppImage"
+          }
+        ],
+        "asset_count": 2,
+        "total_asset_downloads": 6
+      },
+      {
+        "id": 413425504,
+        "name": "v0.1.3",
+        "tag_name": "v0.1.3",
+        "draft": false,
+        "prerelease": false,
+        "created_at": "2026-10-15T04:42:55Z",
+        "published_at": "2026-10-15T04:44:49Z",
+        "html_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/tag/v0.1.3",
+        "assets": [
+          {
+            "name": "AIScalerToolkit-0.1.3-x64-Setup.exe",
+            "label": "",
+            "content_type": "application/x-msdownload",
+            "size": 30308232,
+            "state": "uploaded",
+            "download_count": 3,
+            "created_at": "2026-10-15T04:43:06Z",
+            "updated_at": "2026-10-15T04:43:37Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.3/AIScalerToolkit-0.1.3-x64-Setup.exe"
+          },
+          {
+            "name": "AIScalerToolkit-0.1.3-x86_64.AppImage",
+            "label": "",
+            "content_type": "application/octet-stream",
+            "size": 159807992,
+            "state": "uploaded",
+            "download_count": 1,
+            "created_at": "2026-10-15T04:43:06Z",
+            "updated_at": "2026-10-15T04:44:49Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.3/AIScalerToolkit-0.1.3-x86_64.AppImage"
+          }
+        ],
+        "asset_count": 2,
+        "total_asset_downloads": 4
+      },
+      {
+        "id": 412546623,
+        "name": "v0.1.2",
+        "tag_name": "v0.1.2",
+        "draft": false,
+        "prerelease": false,
+        "created_at": "2026-10-14T09:34:18Z",
+        "published_at": "2026-10-14T09:36:09Z",
+        "html_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/tag/v0.1.2",
+        "assets": [
+          {
+            "name": "AIScalerToolkit-0.1.2-x64-Setup.exe",
+            "label": "",
+            "content_type": "application/x-msdownload",
+            "size": 30301392,
+            "state": "uploaded",
+            "download_count": 1,
+            "created_at": "2026-10-14T09:34:27Z",
+            "updated_at": "2026-10-14T09:35:02Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.2/AIScalerToolkit-0.1.2-x64-Setup.exe"
+          },
+          {
+            "name": "AIScalerToolkit-0.1.2-x86_64.AppImage",
+            "label": "",
+            "content_type": "application/octet-stream",
+            "size": 159807992,
+            "state": "uploaded",
+            "download_count": 1,
+            "created_at": "2026-10-14T09:34:27Z",
+            "updated_at": "2026-10-14T09:36:09Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.2/AIScalerToolkit-0.1.2-x86_64.AppImage"
+          }
+        ],
+        "asset_count": 2,
+        "total_asset_downloads": 2
+      },
+      {
+        "id": 412344507,
+        "name": "v0.1.1",
+        "tag_name": "v0.1.1",
+        "draft": false,
+        "prerelease": false,
+        "created_at": "2026-10-14T04:42:45Z",
+        "published_at": "2026-10-14T04:44:36Z",
+        "html_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/tag/v0.1.1",
+        "assets": [
+          {
+            "name": "AIScalerToolkit-0.1.1-x64-Setup.exe",
+            "label": "",
+            "content_type": "application/x-msdownload",
+            "size": 30300568,
+            "state": "uploaded",
+            "download_count": 5,
+            "created_at": "2026-10-14T04:42:53Z",
+            "updated_at": "2026-10-14T04:43:24Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.1/AIScalerToolkit-0.1.1-x64-Setup.exe"
+          },
+          {
+            "name": "AIScalerToolkit-0.1.1-x86_64.AppImage",
+            "label": "",
+            "content_type": "application/octet-stream",
+            "size": 159803896,
+            "state": "uploaded",
+            "download_count": 2,
+            "created_at": "2026-10-14T04:42:53Z",
+            "updated_at": "2026-10-14T04:44:35Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.1/AIScalerToolkit-0.1.1-x86_64.AppImage"
+          }
+        ],
+        "asset_count": 2,
+        "total_asset_downloads": 7
+      },
+      {
+        "id": 412305229,
+        "name": "v0.1.0",
+        "tag_name": "v0.1.0",
+        "draft": false,
+        "prerelease": false,
+        "created_at": "2026-10-14T03:17:37Z",
+        "published_at": "2026-10-14T03:19:33Z",
+        "html_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/tag/v0.1.0",
+        "assets": [
+          {
+            "name": "AIScalerToolkit-0.1.0-x64-Setup.exe",
+            "label": "",
+            "content_type": "application/x-msdownload",
+            "size": 30310664,
+            "state": "uploaded",
+            "download_count": 0,
+            "created_at": "2026-10-14T03:17:47Z",
+            "updated_at": "2026-10-14T03:18:19Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.0/AIScalerToolkit-0.1.0-x64-Setup.exe"
+          },
+          {
+            "name": "AIScalerToolkit-0.1.0-x86_64.AppImage",
+            "label": "",
+            "content_type": "application/octet-stream",
+            "size": 159799800,
+            "state": "uploaded",
+            "download_count": 0,
+            "created_at": "2026-10-14T03:17:47Z",
+            "updated_at": "2026-10-14T03:19:32Z",
+            "browser_download_url": "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/releases/download/v0.1.0/AIScalerToolkit-0.1.0-x86_64.AppImage"
+          }
+        ],
+        "asset_count": 2,
+        "total_asset_downloads": 0
+      }
+    ]
+  }
+}
