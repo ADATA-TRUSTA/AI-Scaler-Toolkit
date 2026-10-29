@@ -53,6 +53,9 @@ def desired(port: int) -> dict[str, str]:
         "SERVICE_PORT": str(port),
         "HF_HOME": str(config.hf_home()),
         "LOG_DIR": str(config.log_dir()),
+        # Where the first Strata load installs Strata from the payload's package. Its
+        # default is beside the backend project, which here is the program directory.
+        "STRATA_INSTALL_DIR": str(config.strata_dir()),
     }
     if not config.IS_WINDOWS:
         # The directory that holds the environment, not the environment: the backend

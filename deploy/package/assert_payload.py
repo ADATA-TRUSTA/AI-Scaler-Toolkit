@@ -25,10 +25,14 @@ EXPECTED = {
         "title": "ADATA-AST",
         # vLLM has no Windows wheels; offering it would be a dead menu entry.
         "vllm_enabled": False,
+        # The deep-sleep Strata package install_strata.ps1 installs from; fetched into
+        # backend/vendor/ by the release build, never committed (the tree goes public).
+        "strata_package": "strata-sleep-*-windows-x86_64.zip",
     },
     "linux": {
         "title": "TRUSTA-AST",
         "vllm_enabled": True,
+        "strata_package": "strata-sleep-*-linux-x86_64.tar.gz",
     },
 }
 
@@ -198,6 +202,11 @@ def main() -> int:
                 f"expected the opposite for {args.platform}"
             )
 
+        # Both brands offer Strata. Without it in the list the engine is installed and
+        # nothing in the interface can reach it.
+        if "strata" not in config.get("enabledEngines", []):
+            failures.append(f"enabledEngines lacks strata for {args.platform}")
+
         api = str(config.get("apiBaseUrl", ""))
         if not api.endswith(f":{args.port}"):
             failures.append(f"apiBaseUrl is {api!r}, which does not use SERVICE_PORT {args.port}")
@@ -209,6 +218,16 @@ def main() -> int:
     for required in ("backend/pyproject.toml", "backend/scripts"):
         if not (root / required).exists():
             failures.append(f"payload is missing {required}")
+
+    # Exactly one: install_strata takes the newest it finds, so a second one left from
+    # another build would ship unused, and none leaves engine="strata" uninstallable.
+    packages = sorted((root / "backend" / "vendor").glob(expected["strata_package"]))
+    if len(packages) != 1:
+        found = ", ".join(p.name for p in packages) or "none"
+        failures.append(
+            f"backend/vendor should hold one {expected['strata_package']}, found {found} "
+            "(ci/scripts/fetch_strata.py in the release repository puts it there)"
+        )
 
     # The console is part of the product and stays in the public layout, but it has no
     # place in an installation. Nothing here runs it, and nothing builds an environment

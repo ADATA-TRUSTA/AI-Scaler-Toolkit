@@ -167,9 +167,38 @@ begin
     Result := ExpandConstant('{%USERPROFILE}\.cache\huggingface');
 end;
 
+// Every entry of Dir except the one named Keep, which stays with Dir around it.
+// Listed first and removed after, rather than removed while the listing is still open.
+procedure RemoveAllBut(Dir: String; Keep: String; What: String);
+var
+  FindRec: TFindRec;
+  Names: TStringList;
+  I: Integer;
+begin
+  Names := TStringList.Create;
+  try
+    if FindFirst(Dir + '\*', FindRec) then
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') and
+           (CompareText(FindRec.Name, Keep) <> 0) then
+          Names.Add(FindRec.Name);
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+    for I := 0 to Names.Count - 1 do
+      RemoveIfExists(Dir + '\' + Names[I], What);
+  finally
+    Names.Free;
+  end;
+end;
+
 procedure CleanUpBeyondTheProgramDirectory();
 var
   ModelCache: String;
+  StrataData: String;
+  KeepStrataData: Boolean;
 begin
   // An autostart entry pointing at a removed executable fails silently at every
   // login, forever. It is written by the application at runtime rather than by this
@@ -184,7 +213,26 @@ begin
   // does not touch it unless we do it here: the virtual environment, the launcher's
   // state and logs, and the staging directory the llama installer uses. The llama
   // runtime itself now lands under the program directory and goes with it.
-  RemoveIfExists(DataDir(), 'launcher data, virtual environment and logs');
+  // Strata's setup keeps what it derives from each model (the expert pack, the draft
+  // layer) in Strata-data beside its install: gigabytes, and minutes of setup to make
+  // again. Asked about like the model cache, so the rest of the data directory goes
+  // either way.
+  StrataData := DataDir() + '\Strata-data';
+  KeepStrataData := False;
+  if DirExists(StrataData) then
+    KeepStrataData := SuppressibleMsgBox(
+         'Also remove the data Strata prepared from your models?' + #13#10#13#10 +
+         StrataData + #13#10#13#10 +
+         'This can be several gigabytes. Strata''s setup made it from the downloaded ' +
+         'models, and makes it again the next time a model is loaded with Strata.',
+         mbConfirmation, MB_YESNO, IDNO) <> IDYES;
+  if KeepStrataData then
+  begin
+    Log('keeping Strata''s data at ' + StrataData);
+    RemoveAllBut(DataDir(), 'Strata-data', 'launcher data, virtual environment and logs');
+  end
+  else
+    RemoveIfExists(DataDir(), 'launcher data, virtual environment and logs');
   RemoveIfExists(ExpandConstant('{localappdata}\Microsoft\WindowsApps\llama.exe'), 'llama binary');
   RemoveIfExists(ExpandConstant('{localappdata}\llama-app'), 'llama staging');
 

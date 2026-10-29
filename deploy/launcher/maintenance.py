@@ -80,6 +80,7 @@ def provisioning_output(*, dry_run: bool = False) -> Removal:
     _remove(config.legacy_llama_binary(), "llama binary (legacy location)", result, dry_run=dry_run)
     _remove(config.gguf_tools_dir(), "GGUF conversion tooling", result, dry_run=dry_run)
     _remove(config.llama_staging_dir(), "llama installer staging", result, dry_run=dry_run)
+    _remove(config.strata_dir(), "Strata engine", result, dry_run=dry_run)
     _remove(config.state_file(), "launcher state", result, dry_run=dry_run)
     # Regenerated on the next start. Leaving a stale port behind is the kind of
     # half-reset that makes the next run behave unlike a real first run.

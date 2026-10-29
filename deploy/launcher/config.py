@@ -429,6 +429,17 @@ def llama_staging_dir() -> Path:
     return Path.home() / ".llama-app"
 
 
+def strata_dir() -> Path:
+    """Where install_strata puts the Strata engine, its venv and its run configs.
+
+    Beside the virtual environment, outside the program directory, for the same reasons:
+    a reinstall or an AppImage payload refresh must not throw away an install whose setup
+    took minutes. Short on purpose -- Strata's tree goes about 130 characters deeper, and
+    install_strata.ps1 refuses a folder longer than 110.
+    """
+    return data_dir() / "strata"
+
+
 def gguf_tools_dir() -> Path:
     """Sparse checkout of the llama.cpp conversion scripts that setup_env creates."""
     return backend_dir() / "service" / "utils" / "llama.cpp"
