@@ -17,6 +17,7 @@ import shutil
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from . import applog, config
@@ -89,23 +90,78 @@ def check_webview2() -> Check:
                  fixer="webview2")
 
 
+# PCI vendor ids, as sysfs and DXGI spell them.
+_PCI_VENDOR_INTEL = "0x8086"
+_PCI_VENDOR_AMD = "0x1002"
+# Where the kernel publishes the DRM nodes. A module-level name so it can be pointed at a
+# synthetic tree: any machine this runs on has one GPU vendor, and the case worth testing
+# is the one it does not have.
+_DRM_CLASS_DIR = Path("/sys/class/drm")
+
+
+@lru_cache(maxsize=1)
+def _windows_adapter_names() -> str:
+    """Every display adapter's name, lowercased and joined. Asked once per process."""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "(Get-CimInstance Win32_VideoController).Name -join ';'"],
+            capture_output=True, text=True, timeout=30,
+            creationflags=config.subprocess_flags(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.lower()
+
+
+def _drm_vendor_ids() -> set[str]:
+    """The PCI vendor id behind each DRM render node, lowercased.
+
+    A node under /dev/dri says that some GPU driver bound a card; it does not say whose.
+    amdgpu opens a render node exactly as i915 and xe do, so taking the node itself as
+    proof of an Intel GPU passed every AMD machine through this check and into an install
+    that cannot work: setup_env's own detection has the same shape, answers "xpu", and
+    spends several gigabytes on Intel PyTorch before its XPU check fails on a machine with
+    no Intel GPU at all. The vendor is published beside the node, so read it.
+    """
+    try:
+        nodes = sorted(_DRM_CLASS_DIR.glob("renderD*/device/vendor"))
+    except OSError:
+        return set()
+    ids: set[str] = set()
+    for node in nodes:
+        try:
+            ids.add(node.read_text().strip().lower())
+        except OSError:
+            continue
+    return ids
+
+
 def _has_intel_gpu() -> bool:
     """An Intel GPU, by the same signals setup_env looks for on this platform."""
     if config.IS_WINDOWS:
-        try:
-            proc = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                 "(Get-CimInstance Win32_VideoController).Name -join ';'"],
-                capture_output=True, text=True, timeout=30,
-                creationflags=config.subprocess_flags(),
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return "intel" in proc.stdout.lower()
-    # Linux: a render node, or WSL2's paravirtualised device with Level Zero beside it.
+        return "intel" in _windows_adapter_names()
+    # Linux: an Intel render node, or WSL2's paravirtualised device with Level Zero beside it.
     if any(Path("/dev/dri").glob("renderD*")):
-        return True
+        vendors = _drm_vendor_ids()
+        if _PCI_VENDOR_INTEL in vendors:
+            return True
+        if not vendors:
+            # A render node whose vendor cannot be read -- a container handed /dev/dri
+            # without /sys, say. Unknowable here, so keep what this branch meant before the
+            # vendor check rather than refusing a machine that used to install. setup_env
+            # makes the same call, and its XPU check is where a wrong guess surfaces.
+            return True
+        # A render node that is not Intel's. AMD, in practice: fall through.
     return Path("/dev/dxg").exists() and Path("/usr/lib/x86_64-linux-gnu/libze_loader.so.1").exists()
+
+
+def _has_amd_gpu() -> bool:
+    """An AMD GPU, asked only to say so in the refusal below."""
+    if config.IS_WINDOWS:
+        names = _windows_adapter_names()
+        return "amd" in names or "radeon" in names
+    return _PCI_VENDOR_AMD in _drm_vendor_ids()
 
 
 def check_accelerator() -> Check:
@@ -138,10 +194,19 @@ def check_accelerator() -> Check:
         found = "Intel, so the XPU build"
     else:
         found = ""
+    if found:
+        return Check("accelerator", "GPU", ok=True, required=True, detail=found)
+    # Name what is here, when something is. "No NVIDIA or Intel GPU" reads as "no GPU",
+    # and for an AMD card that sends someone to check a driver that is working: the card
+    # is fine, it is the PyTorch build that does not exist.
+    amd = _has_amd_gpu()
     return Check(
-        "accelerator", "GPU", ok=bool(found), required=True,
-        detail=found or "no NVIDIA or Intel GPU was found on this machine.",
-        remedy="" if found else
+        "accelerator", "GPU", ok=False, required=True,
+        detail="an AMD GPU was found, which this build has no PyTorch for."
+               if amd else "no NVIDIA or Intel GPU was found on this machine.",
+        remedy="There is no ROCm build here -- cuda and xpu are the only torch extras -- "
+               "so TRUSTA_ACCEL would only install a torch that cannot see the card."
+               if amd else
                "This build installs PyTorch for NVIDIA or Intel; there is no CPU-only "
                "build. If you have one of those and it was not detected, check its "
                "driver, or set TRUSTA_ACCEL=cuda (or xpu) to say so.",
