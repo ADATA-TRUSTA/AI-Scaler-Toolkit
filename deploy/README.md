@@ -207,6 +207,12 @@ ComfyUI used to arrive as Comfy Desktop. It no longer does, for two reasons:
   first time a device of that kind is started rather than all up front: each is
   gigabytes, and most machines only ever use one. They pin the backend's own torch
   versions, so uv's cache can serve what the backend already downloaded.
+- `ComfyUI/custom_nodes/ComfyUI-GGUF` — the one custom node the image and video skills
+  cannot run without (their 14B video, qwen and flux workflows load GGUF models with
+  it). Pinned to a commit in `comfyui.py` and fetched as an archive like ComfyUI; its
+  requirements go into each environment, recorded in `.trusta-nodes.json`. A copy
+  already there is left alone, and a node that fails to install is reported without
+  failing ComfyUI: picking the card again retries.
 
 An environment is marked usable only after it has multiplied two matrices on its
 device, under a timeout. torch reporting the device as available is not evidence —
@@ -237,7 +243,7 @@ kind of wrong.
 ### The Hermes image and video skills: carried, and installed into Hermes
 
 The skills that drive ComfyUI (the `comfyui-skill` repository: imggen, vidgen, recast,
-dramagen, motion) are a fourth source. They are assembled into `skills/` like the
+dramagen, motion) are a fourth source. They are assembled into `hermes-skills/` like the
 others, ride in the payload, and the third card installs them with the pack's own
 `install.py`, run by Hermes's Python, into Hermes's home. Nothing is cloned or
 downloaded but motion's own packages.

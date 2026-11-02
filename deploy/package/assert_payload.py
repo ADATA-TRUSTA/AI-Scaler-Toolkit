@@ -217,7 +217,7 @@ def main() -> int:
     root = Path(args.payload).resolve()
     for required in ("backend/pyproject.toml", "backend/scripts",
                      # What the launcher installs the Hermes skills with.
-                     "skills/install.py", "skills/pyproject.toml"):
+                     "hermes-skills/install.py", "hermes-skills/pyproject.toml"):
         if not (root / required).exists():
             failures.append(f"payload is missing {required}")
 

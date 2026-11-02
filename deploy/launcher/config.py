@@ -283,7 +283,7 @@ def skills_dir() -> Path:
     Not run from here: components.install_skills copies them into Hermes with the
     pack's own installer, so an update of this application never moves files Hermes
     is using."""
-    return payload_dir() / "skills"
+    return payload_dir() / "hermes-skills"
 
 
 def vcruntime_dir() -> Path:

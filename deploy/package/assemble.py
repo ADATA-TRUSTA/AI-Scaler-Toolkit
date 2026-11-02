@@ -126,7 +126,7 @@ def main() -> int:
     assemble_repo("backend", Path(args.backend).resolve(), into / "backend")
     assemble_repo("console", Path(args.console).resolve(), into / "console")
     assemble_frontend(Path(args.frontend).resolve(), into / "frontend")
-    assemble_repo("skills", Path(args.skills).resolve(), into / "skills")
+    assemble_repo("skills", Path(args.skills).resolve(), into / layout.target_dir("skills"))
 
     if args.skip_assert:
         print("[assemble] done (layout not checked)")

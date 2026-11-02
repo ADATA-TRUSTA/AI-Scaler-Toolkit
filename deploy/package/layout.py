@@ -20,6 +20,15 @@ from pathlib import Path, PurePosixPath
 # into Hermes from the payload rather than having anyone clone them.
 SOURCE_KEYS: tuple[str, ...] = ("backend", "console", "frontend", "skills")
 
+# Where a source lands, when that is not its key. The skills pack keeps its own skills/
+# directory, so landing it at skills/ would read skills/skills/imggen; the key stays
+# "skills" because it is also an environment variable name (SRC_SKILLS_URL).
+TARGET_DIRS: dict[str, str] = {"skills": "hermes-skills"}
+
+
+def target_dir(key: str) -> str:
+    return TARGET_DIRS.get(key, key)
+
 # Frontend ships build output, not source, so it arrives as these two directories
 # rather than as a repository checkout.
 FRONTEND_PACKAGES: tuple[str, ...] = ("dist", "dist_client")

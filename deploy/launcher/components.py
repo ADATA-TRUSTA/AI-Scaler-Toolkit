@@ -558,7 +558,10 @@ def select_comfyui(device_id: str) -> tuple[bool, str, str]:
     if not device.usable:
         return False, device.note or f"{device.name} cannot run ComfyUI.", BLOCKED
 
-    if comfyui.source_installed() and comfyui.env_ready(device.backend):
+    # nodes_ready too: an install made before the custom nodes were part of it has a
+    # working environment without them, and picking its card is how they arrive.
+    if (comfyui.source_installed() and comfyui.env_ready(device.backend)
+            and comfyui.nodes_ready(device.backend)):
         comfyui.write_selection(device)
         return True, "", DONE
 
@@ -582,7 +585,7 @@ def select_comfyui(device_id: str) -> tuple[bool, str, str]:
 
 # The skills as published, in the product's public tree: their README and MODELS.md
 # are what the card sends a reader to.
-SKILLS_PAGE = "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/tree/main/skills"
+SKILLS_PAGE = "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/tree/main/hermes-skills"
 
 # Written beside the installed engine once an install has been checked, so the card can
 # tell a copy older than the one this build carries. install.py itself records nothing
@@ -665,6 +668,11 @@ def install_skills(out: Progress) -> bool:
     version = _skills_version(pack)
     out.note(f"Installing the skills{f' {version}' if version else ''} into {home}.")
     env = {**os.environ, "HERMES_HOME": str(home), "PYTHONIOENCODING": "utf-8"}
+    # The uv this release ships, which builds motion's environment. Without it the
+    # pack falls back to Hermes's own uv, then pip.
+    uv = config.uv_binary()
+    if uv is not None:
+        env["UV"] = str(uv)
     code = _stream([str(python), str(installer), "--hermes-home", str(home)], out,
                    "install-skills.log", env=env)
     if code in _SKILLS_INSTALLER_REFUSED:

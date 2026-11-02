@@ -43,7 +43,7 @@ BRAND_BY_PLATFORM = {
 PAYLOAD_DIRS = ("backend",
                 # The Hermes skills: copied into Hermes by the launcher (components.py),
                 # so they install with no download and match this release.
-                "skills")
+                layout.target_dir("skills"))
 
 
 def copy_filtered(src: Path, dest: Path) -> int:
@@ -149,7 +149,7 @@ def check_layout_matches_sources(source: Path, sources: dict[str, Path]) -> None
         else:
             expected = {rel: path.stat().st_size
                         for rel, path in layout.source_files(repo, key).items()}
-        actual = layout.assembled_files(source / key)
+        actual = layout.assembled_files(source / layout.target_dir(key))
         if expected == actual:
             continue
 
@@ -165,7 +165,7 @@ def check_layout_matches_sources(source: Path, sources: dict[str, Path]) -> None
                 detail.append(f"    {len(items)} {label}: {shown}{more}")
         raise SystemExit(
             "\n".join(
-                [f"[payload] {source / key} does not match {repo}:"]
+                [f"[payload] {source / layout.target_dir(key)} does not match {repo}:"]
                 + detail
                 + [f"[payload] Run: python package/assemble.py --into {source}",
                    "[payload] Or pass --skip-source-check to package the layout as it is."]

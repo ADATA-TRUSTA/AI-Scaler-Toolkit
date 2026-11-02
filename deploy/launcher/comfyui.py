@@ -66,6 +66,24 @@ PYTHON = "3.12"
 # repeated. torchaudio stops at 2.11.0 because that is the newest that exists.
 TORCH_VERSIONS = {"torch": "2.13.0", "torchvision": "0.28.0", "torchaudio": "2.11.0"}
 
+# Custom nodes installed with ComfyUI, because the image and video skills beside this
+# application cannot run without them: ComfyUI-GGUF is the UnetLoaderGGUF node that the
+# 14B video workflow and the qwen and flux image workflows load their models with.
+# Pinned to a commit -- it publishes no releases -- and fetched as an archive, like
+# ComfyUI itself, so git is not a prerequisite. Its requirements go into each
+# environment, since every PyTorch build imports it.
+@dataclass(frozen=True)
+class CustomNode:
+    name: str
+    repo: str
+    commit: str
+
+
+CUSTOM_NODES = (
+    CustomNode("ComfyUI-GGUF", "city96/ComfyUI-GGUF", "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"),
+)
+NODE_ARCHIVE = "https://github.com/{repo}/archive/{commit}.zip"
+
 
 @dataclass(frozen=True)
 class Backend:
@@ -546,8 +564,108 @@ def _place_crt(backend: str, out) -> None:
         shutil.copy2(dll, torch_lib / dll.name)
 
 
+def node_dir(node: CustomNode) -> Path:
+    return source_dir() / "custom_nodes" / node.name
+
+
+def _nodes_marker(backend: str) -> Path:
+    """Which custom nodes' requirements this environment has, by commit."""
+    return env_dir(backend) / ".trusta-nodes.json"
+
+
+def _wanted_nodes() -> dict[str, str]:
+    return {node.name: node.commit for node in CUSTOM_NODES}
+
+
+def nodes_ready(backend: str) -> bool:
+    """Every custom node is in place and this environment has its requirements."""
+    if not all(node_dir(node).is_dir() for node in CUSTOM_NODES):
+        return False
+    try:
+        recorded = json.loads(_nodes_marker(backend).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return recorded == _wanted_nodes()
+
+
+def ensure_nodes(out) -> bool:
+    """Download each custom node that is not there yet.
+
+    One already present is left alone, whoever put it there: a node someone cloned by
+    hand, or updated themselves, is theirs, and replacing it would be the kind of
+    surprise this application keeps out of other people's directories.
+    """
+    from .components import _download
+
+    for node in CUSTOM_NODES:
+        target = node_dir(node)
+        if target.is_dir():
+            out.note(f"{node.name} is already in custom_nodes.")
+            continue
+        archive = Path(tempfile.gettempdir()) / f"{node.name}-{node.commit[:12]}.zip"
+        if not _download(NODE_ARCHIVE.format(repo=node.repo, commit=node.commit), archive,
+                         out, what=f"{node.name} {node.commit[:7]}"):
+            return False
+        # Unpacked beside its destination and moved into place whole, as ComfyUI is.
+        work = target.with_name(node.name + ".partial")
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            work.mkdir(parents=True)
+            with zipfile.ZipFile(archive) as bundle:
+                bundle.extractall(work)
+            roots = [p for p in work.iterdir() if p.is_dir()]
+            if len(roots) != 1 or not (roots[0] / "__init__.py").is_file():
+                out.note(f"The archive did not contain {node.name}.")
+                return False
+            (roots[0] / ".trusta-version").write_text(node.commit + "\n", encoding="utf-8")
+            roots[0].replace(target)
+        except (OSError, zipfile.BadZipFile) as exc:
+            out.note(f"Could not unpack {node.name}: {exc}")
+            return False
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            archive.unlink(missing_ok=True)
+        out.note(f"{node.name} {node.commit[:7]} unpacked to {target}.")
+    return True
+
+
+def ensure_node_requirements(backend: str, out) -> bool:
+    """Install every custom node's requirements into one environment."""
+    from .components import _stream
+
+    if nodes_ready(backend):
+        return True
+    uv = _uv()
+    if not uv:
+        out.note("uv was not found, so the custom nodes' requirements cannot be installed.")
+        return False
+    for node in CUSTOM_NODES:
+        requirements = node_dir(node) / "requirements.txt"
+        if not requirements.is_file():
+            continue
+        out.note(f"Installing {node.name}'s requirements into the "
+                 f"{BACKENDS[backend].label} environment.")
+        code = _stream([uv, "pip", "install", "--python", str(env_python(backend)),
+                        "--extra-index-url", BACKENDS[backend].index,
+                        "-r", str(requirements)], out,
+                       f"comfyui-{backend}-{node.name}.log")
+        if code != 0:
+            out.note(f"{node.name}'s requirements did not install.")
+            return False
+    _nodes_marker(backend).write_text(json.dumps(_wanted_nodes()) + "\n", encoding="utf-8")
+    return True
+
+
 def install(device: Device, out) -> bool:
-    return ensure_source(out) and ensure_env(device.backend, out)
+    if not (ensure_source(out) and ensure_env(device.backend, out)):
+        return False
+    # ComfyUI itself works without them, so a node that fails is reported, not fatal:
+    # the next pick of a card tries again, since nodes_ready stays false.
+    if not (ensure_nodes(out) and ensure_node_requirements(device.backend, out)):
+        out.note("ComfyUI is installed, but its custom nodes are not complete. The GGUF "
+                 "video and image workflows will not load until they are; picking the "
+                 "card again retries.")
+    return True
 
 
 # --------------------------------------------------------------------------- runtime
