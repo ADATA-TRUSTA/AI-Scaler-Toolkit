@@ -31,6 +31,11 @@ SOURCE_MUST_EXIST: tuple[str, ...] = (
     "console/uv.lock",
     "frontend/dist/index.html",
     "frontend/dist_client/index.html",
+    # What the launcher runs to install the skills, and the version it compares.
+    "skills/install.py",
+    "skills/pyproject.toml",
+    "skills/engine/paths.py",
+    "skills/skills/imggen/SKILL.md.in",
 )
 
 

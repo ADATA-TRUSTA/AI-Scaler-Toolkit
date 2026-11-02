@@ -640,6 +640,10 @@
         action = '<span class="hint">Only published for Windows.</span>';
       } else if (c.busy) {
         action = '<button disabled>Installing…</button>';
+      } else if (c.needs && !installed) {
+        // Said rather than offered: the install would only refuse, and the card that
+        // installs what it needs is right above this one.
+        action = '<span class="hint">Install ' + escapeHtml(c.needs) + ' first.</span>';
       } else {
         action = '<button class="' + (installed ? "" : "primary") + '" data-install="' +
                  escapeHtml(c.id) + '"' + (c.blocked ? " disabled" : "") + ">" +
@@ -664,8 +668,14 @@
             // tool, which stopped being true for Hermes on Linux once the desktop
             // application was built there; how a component starts is its business,
             // and the card's detail line says what there is to open.
-            (installed && !c.busy
+            (installed && c.openable && !c.busy
               ? '<button data-open="' + escapeHtml(c.id) + '">Open</button>'
+              : "") +
+            // The way to the card where ComfyUI is installed and its card picked. A
+            // pointer, not a prompt: motion works without ComfyUI, and which card it
+            // runs on is the reader's choice, made there.
+            (c.needs_comfyui && !c.busy
+              ? '<button data-scroll="card-comfyui">Pick a card for ComfyUI</button>'
               : "") +
             // Hermes speaks to an OpenAI-compatible endpoint, and this backend is one:
             // the button writes this application's endpoint into Hermes's config.
@@ -1394,6 +1404,13 @@
         Array.prototype.forEach.call(
           el("component-list").querySelectorAll("[data-goto]"), function (b) {
             b.addEventListener("click", function () { showView(b.getAttribute("data-goto")); });
+          });
+        Array.prototype.forEach.call(
+          el("component-list").querySelectorAll("[data-scroll]"), function (b) {
+            b.addEventListener("click", function () {
+              var target = el(b.getAttribute("data-scroll"));
+              if (target) { target.scrollIntoView({ behavior: "smooth", block: "start" }); }
+            });
           });
         Array.prototype.forEach.call(
           el("component-list").querySelectorAll("[data-copy]"), function (b) {

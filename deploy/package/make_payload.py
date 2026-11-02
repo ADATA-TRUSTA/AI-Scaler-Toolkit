@@ -40,7 +40,10 @@ BRAND_BY_PLATFORM = {
 # The console stays in the public layout but not in an installation: nothing here
 # runs it, and only the backend gets an environment built for it, so shipping it put
 # 67 files a user could not run into a directory they might try to run them from.
-PAYLOAD_DIRS = ("backend",)
+PAYLOAD_DIRS = ("backend",
+                # The Hermes skills: copied into Hermes by the launcher (components.py),
+                # so they install with no download and match this release.
+                "skills")
 
 
 def copy_filtered(src: Path, dest: Path) -> int:
@@ -223,6 +226,7 @@ def main() -> int:
         check_layout_matches_sources(source, {
             "backend": siblings / "trusta-ast-backend",
             "frontend": siblings / "trusta-ast-frontend",
+            "skills": siblings / "comfyui-skill",
         })
         print(f"[payload] layout at {source} matches the sources beside it")
 

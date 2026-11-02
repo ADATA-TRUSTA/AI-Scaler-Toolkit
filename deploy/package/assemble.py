@@ -1,4 +1,4 @@
-"""Build the public layout from the three sources.
+"""Build the public layout from the sources.
 
 One engine, two callers. The release pipeline clones each source at its recorded
 commit and points this at the result; a developer points it at their working copies.
@@ -98,7 +98,8 @@ def main() -> int:
   python deploy/package/assemble.py \\
       --backend ../trusta-ast-backend \\
       --console ../trusta-ast-console \\
-      --frontend ../trusta-ast-frontend
+      --frontend ../trusta-ast-frontend \
+      --skills ../comfyui-skill
 
   # the pipeline does the same, against clones checked out at recorded commits
 """,
@@ -113,6 +114,9 @@ def main() -> int:
     parser.add_argument("--frontend", default=str(siblings / "trusta-ast-frontend"),
                         help="directory holding both built frontend packages, dist/ and dist_client/ "
                              "(default: sibling working copy)")
+    parser.add_argument("--skills", default=str(siblings / "comfyui-skill"),
+                        help="comfyui-skill repository root, the Hermes image and video skills "
+                             "(default: sibling working copy)")
     parser.add_argument("--into", default=str(REPO_ROOT), help="layout to write into")
     parser.add_argument("--skip-assert", action="store_true",
                         help="skip the layout check afterwards (the pipeline runs it as its own step)")
@@ -122,6 +126,7 @@ def main() -> int:
     assemble_repo("backend", Path(args.backend).resolve(), into / "backend")
     assemble_repo("console", Path(args.console).resolve(), into / "console")
     assemble_frontend(Path(args.frontend).resolve(), into / "frontend")
+    assemble_repo("skills", Path(args.skills).resolve(), into / "skills")
 
     if args.skip_assert:
         print("[assemble] done (layout not checked)")

@@ -15,8 +15,10 @@ from __future__ import annotations
 import fnmatch
 from pathlib import Path, PurePosixPath
 
-# The three source repositories, and where each lands in the public layout.
-SOURCE_KEYS: tuple[str, ...] = ("backend", "console", "frontend")
+# The source repositories, and where each lands in the public layout. skills is the
+# comfyui-skill repository: the Hermes image and video skills, which the launcher installs
+# into Hermes from the payload rather than having anyone clone them.
+SOURCE_KEYS: tuple[str, ...] = ("backend", "console", "frontend", "skills")
 
 # Frontend ships build output, not source, so it arrives as these two directories
 # rather than as a repository checkout.
@@ -71,6 +73,27 @@ INCLUDE: dict[str, tuple[str, ...]] = {
         ".env.example",
         "README*",
     ),
+    # What install.py needs to install, and what a reader needs to know what was
+    # installed. Not docs/ (the showcase is megabytes of video), bench/ or the test
+    # results: none of it is used on a user's machine.
+    "skills": (
+        "engine",
+        "skills",
+        "comfyui-plugins",
+        "tools",
+        "install.py",
+        "install.sh",
+        "install.ps1",
+        "hermes-comfy.conf.example",
+        # The version the launcher compares an installed copy against.
+        "pyproject.toml",
+        "CHANGELOG.md",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
+        "README*",
+        "INSTALL*",
+        "MODELS*",
+    ),
 }
 
 # Directory names dropped wherever they appear.
@@ -122,6 +145,27 @@ PER_SOURCE_EXCLUDES: dict[str, tuple[str, ...]] = {
         "internal",
         "tests/results",
         "tests/.cache",
+    ),
+    # A checkout that has been installed from or run carries these; a clone never
+    # does (the repository ignores all of them). The config and engine_dir.txt hold
+    # one machine's absolute paths, and a rendered SKILL.md beside its template would
+    # be installed as it is, naming that machine's paths too.
+    "skills": (
+        "hermes-comfy.conf",
+        "engine/out",
+        "engine/jobs",
+        "engine/skill-backups",
+        "skills/imggen/SKILL.md",
+        "skills/vidgen/SKILL.md",
+        "skills/dramagen/SKILL.md",
+        "skills/recast/SKILL.md",
+        "skills/motion/SKILL.md",
+        "skills/vidgen/references/traps-and-misuse.md",
+        "skills/imggen/engine_dir.txt",
+        "skills/vidgen/engine_dir.txt",
+        "skills/dramagen/engine_dir.txt",
+        "skills/recast/engine_dir.txt",
+        "skills/motion/engine_dir.txt",
     ),
 }
 

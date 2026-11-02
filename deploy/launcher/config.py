@@ -277,6 +277,15 @@ def backend_dir() -> Path:
     return payload_dir() / "backend"
 
 
+def skills_dir() -> Path:
+    """The Hermes image and video skills this build carries (the comfyui-skill pack).
+
+    Not run from here: components.install_skills copies them into Hermes with the
+    pack's own installer, so an update of this application never moves files Hermes
+    is using."""
+    return payload_dir() / "skills"
+
+
 def vcruntime_dir() -> Path:
     """The Visual C++ runtime the payload ships, which setup_env places beside the
     binaries that import it. See deploy/package/vcruntime.py for why it is shipped.

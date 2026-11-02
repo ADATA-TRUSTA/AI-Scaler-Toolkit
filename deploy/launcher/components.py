@@ -30,6 +30,7 @@ import contextlib
 import locale
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -216,7 +217,8 @@ def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", "replace")
 
 
-def _stream(command: list[str], out: Progress, log_name: str) -> int:
+def _stream(command: list[str], out: Progress, log_name: str,
+            env: dict[str, str] | None = None) -> int:
     """Run a command, forwarding each line as it appears.
 
     Line by line rather than at the end: these take minutes, and a panel that stays
@@ -238,6 +240,7 @@ def _stream(command: list[str], out: Progress, log_name: str) -> int:
             command,
             stdout=sink,
             stderr=subprocess.STDOUT,
+            env=env,
             creationflags=config.subprocess_flags(),
         )
         deadline = time.monotonic() + _INSTALL_TIMEOUT
@@ -535,7 +538,10 @@ def install_hermes(out: Progress) -> bool:
 
 def install_comfyui(out: Progress) -> bool:
     """Install for the card that would be picked by default -- see comfyui.py."""
-    return comfyui.install(comfyui.default_device(comfyui.devices()), out)
+    if not comfyui.install(comfyui.default_device(comfyui.devices()), out):
+        return False
+    _refresh_skills(out)
+    return True
 
 
 def select_comfyui(device_id: str) -> tuple[bool, str, str]:
@@ -564,11 +570,149 @@ def select_comfyui(device_id: str) -> tuple[bool, str, str]:
         with contextlib.suppress(Exception):
             shortcuts.remove_component("comfyui")
         comfyui.write_selection(device)
+        _refresh_skills(out)
         return True
 
     started, error = start("comfyui", work=work,
                            done=f"ComfyUI is installed and set to use {device.name}.")
     return (True, "installing", DONE) if started else (False, error, BLOCKED)
+
+
+# ------------------------------------------------------------------- hermes skills
+
+# The skills as published, in the product's public tree: their README and MODELS.md
+# are what the card sends a reader to.
+SKILLS_PAGE = "https://github.com/ADATA-TRUSTA/AI-Scaler-Toolkit/tree/main/skills"
+
+# Written beside the installed engine once an install has been checked, so the card can
+# tell a copy older than the one this build carries. install.py itself records nothing
+# that says which release it came from.
+_SKILLS_STAMP = ".ast-skills-version"
+
+# install.py's own exit codes for "did nothing": no Hermes home (2), copied zero files (3).
+# Anything else is the exit code of the check it runs last, doctor.py, which fails on a
+# machine without the model weights -- that is, on every fresh one -- so it decides
+# nothing about whether the skills went in.
+_SKILLS_INSTALLER_REFUSED = (2, 3)
+
+
+def _hermes_python(home: Path) -> Path | None:
+    """Hermes's own interpreter, which the skill documents tell the model to run.
+
+    The installer is run with it for the same reason: it names sys.executable as the
+    skills' interpreter when Hermes's cannot be found, and this application's own
+    Python is frozen into its executable on Windows."""
+    sub = "Scripts/python.exe" if config.IS_WINDOWS else "bin/python"
+    candidate = home / "hermes-agent" / "venv" / sub
+    return candidate if candidate.is_file() else None
+
+
+def _skills_version(pack: Path) -> str:
+    """The version in the pack's pyproject.toml, which its release workflow writes."""
+    with contextlib.suppress(OSError):
+        text = (pack / "pyproject.toml").read_text(encoding="utf-8")
+        found = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
+        if found:
+            return found.group(1)
+    return ""
+
+
+def _installed_skills_version() -> str:
+    with contextlib.suppress(OSError):
+        return (_hermes_home() / "comfy-engine" / _SKILLS_STAMP).read_text(encoding="utf-8").strip()
+    return ""
+
+
+def detect_skills() -> str | None:
+    """Installed means Hermes can load them and they can find their engine.
+
+    imggen stands for all five: install.py installs them together or not at all."""
+    if detect_hermes() is None:
+        return None
+    home = _hermes_home()
+    skills = home / "skills"
+    if (skills / "imggen" / "SKILL.md").is_file() and (home / "comfy-engine" / "paths.py").is_file():
+        return str(skills)
+    return None
+
+
+def install_skills(out: Progress) -> bool:
+    """Copy the skills this build carries into Hermes, with the pack's own installer.
+
+    The pack's installer rather than a copy of our own: it renders each SKILL.md with
+    this machine's paths, builds motion's environment and puts the ComfyUI node in
+    place, and a second implementation of that would drift from the first. Nothing is
+    downloaded but motion's packages -- the skills are in the payload.
+
+    ComfyUI is optional here. Without it the node step is skipped and motion still
+    works; installing ComfyUI later runs this again (_refresh_skills).
+    """
+    pack = config.skills_dir()
+    installer = pack / "install.py"
+    if not installer.is_file():
+        out.note(f"This build carries no skills: {installer} is missing.")
+        return False
+    if detect_hermes() is None:
+        out.note("Install Hermes first: the skills are installed into it.")
+        return False
+    home = _hermes_home()
+    python = _hermes_python(home)
+    if python is None:
+        out.note(f"Hermes has no Python environment at {home / 'hermes-agent' / 'venv'}. "
+                 "Reinstall Hermes, then install the skills again.")
+        return False
+
+    version = _skills_version(pack)
+    out.note(f"Installing the skills{f' {version}' if version else ''} into {home}.")
+    env = {**os.environ, "HERMES_HOME": str(home), "PYTHONIOENCODING": "utf-8"}
+    code = _stream([str(python), str(installer), "--hermes-home", str(home)], out,
+                   "install-skills.log", env=env)
+    if code in _SKILLS_INSTALLER_REFUSED:
+        out.note(f"The installer stopped with code {code} before installing anything.")
+        return False
+    if detect_skills() is None:
+        out.note("The skills did not install.")
+        return False
+    if code != 0:
+        out.note("The installer's own check reported problems, most likely the model "
+                 "weights it could not find. The skills are installed; the models are "
+                 "downloaded separately (MODELS.md).")
+    with contextlib.suppress(OSError):
+        (home / "comfy-engine" / _SKILLS_STAMP).write_text(version + "\n", encoding="utf-8")
+    out.note("Restart Hermes so it loads them.")
+    return True
+
+
+def _refresh_skills(out: Progress) -> None:
+    """ComfyUI has just arrived: install the skills again, so they find it.
+
+    Only when they are already installed. Their documents name ComfyUI's paths, written
+    in at install time, and the node they need goes into ComfyUI's custom_nodes -- both
+    of which an install done before ComfyUI existed had to skip.
+    """
+    if detect_skills() is None or not (config.skills_dir() / "install.py").is_file():
+        return
+    out.note("Installing the Hermes skills again, so they pick up ComfyUI.")
+    if not install_skills(out):
+        out.note("The skills could not be updated for ComfyUI. Reinstall them from their card.")
+
+
+def describe_skills() -> tuple[str, bool]:
+    """What the card should say beyond "Installed": an update, or what is still missing.
+
+    ComfyUI is said here, not asked for in a dialog: motion works without it, and which
+    card ComfyUI runs on is the reader's choice, made on the ComfyUI card."""
+    carried = _skills_version(config.skills_dir())
+    installed = _installed_skills_version()
+    if carried and installed != carried:
+        return (f"Version {installed or 'unknown'} is installed; this release carries "
+                f"{carried}. Reinstall to update them.", False)
+    if comfyui.detect() is None:
+        return ("motion works now. imggen, vidgen, recast and dramagen render with "
+                "ComfyUI: pick a card for it below. The models are not included — see "
+                "MODELS.md.", False)
+    return ("Installed into Hermes. The models they render with are downloaded "
+            "separately — see MODELS.md.", True)
 
 
 # ------------------------------------------------------------------------ catalogue
@@ -711,6 +855,11 @@ class Component:
     open_command: Callable[[], list[str] | None] | None = None
     # Where that command's output goes, relative to the log directory.
     open_log: str = ""
+    # The id of a component this one installs into, which has to be there first. It
+    # comes earlier in the catalogue, so the card above is the one that installs it.
+    requires: str = ""
+    # Whether there is anything to Open. Not for something Hermes loads by itself.
+    openable: bool = True
 
 
 CATALOGUE: tuple[Component, ...] = (
@@ -732,6 +881,24 @@ CATALOGUE: tuple[Component, ...] = (
         # what is left to open is the command line tool, and that needs a terminal.
         # With the desktop build present, open_command starts it and this is not used.
         terminal=not config.IS_WINDOWS,
+    ),
+    # Beside Hermes, not under ComfyUI: Hermes is what loads them, and they live in its
+    # home. ComfyUI is only what four of the five render with, and they start it
+    # themselves.
+    Component(
+        id="skills",
+        name="Hermes image & video skills",
+        description="Lets Hermes make images, video and explainer animation on this "
+                    "computer: imggen, vidgen, recast, dramagen and motion.",
+        note="Carried by this application, so nothing is downloaded but motion's own "
+             "packages. Installs into Hermes; the models they render with are not "
+             "included.",
+        page=SKILLS_PAGE,
+        detect=detect_skills,
+        install=install_skills,
+        describe=describe_skills,
+        requires="hermes",
+        openable=False,
     ),
     Component(
         id="comfyui",
@@ -868,6 +1035,9 @@ def start(component_id: str, work: Callable[[Progress], bool] | None = None,
         return False, "Unknown component."
     if component.windows_only and sys.platform != "win32":
         return False, f"{component.name} is only published for Windows."
+    required = BY_ID.get(component.requires)
+    if required is not None and required.detect() is None:
+        return False, f"Install {required.name} first: {component.name} installs into it."
 
     with _job_lock:
         if _job is not None and _job.running:
@@ -1276,12 +1446,15 @@ def listing() -> list[dict]:
     job = current_job()
     busy = job["id"] if job and job["running"] else ""
     out = []
+    found: dict[str, str | None] = {}
     for component in CATALOGUE:
         try:
             located = component.detect()
         except Exception:
             log.exception("detecting %s failed", component.id)
             located = None
+        found[component.id] = located
+        required = BY_ID.get(component.requires)
         detail, detail_settled = "", True
         if located is not None and component.describe is not None:
             try:
@@ -1305,6 +1478,14 @@ def listing() -> list[dict]:
             # to know which components are command-line tools or which platform it is
             # on -- both are this file's business.
             "terminal": component.terminal,
+            # The name of what has to be installed first, while it is not.
+            "needs": required.name if required is not None and found.get(required.id) is None
+                     else "",
+            "openable": component.openable,
+            # The skills card offers a way to the ComfyUI card, which is where the card
+            # it runs on is picked -- not a dialog: motion needs no ComfyUI at all.
+            "needs_comfyui": component.id == "skills" and located is not None
+                             and comfyui.detect() is None,
             "can_point_here": component.id == "hermes" and located is not None,
             # ComfyUI's card is a device picker with Start and Stop rather than an
             # Install button; its contents come from comfyui_state.

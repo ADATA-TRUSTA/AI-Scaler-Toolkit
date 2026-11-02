@@ -160,7 +160,7 @@ If ADATA icons arrive, put `adata-icon-1024.png` in `deploy/assets` and make
 
 ## Optional third-party components
 
-The Components tab in settings installs Hermes and ComfyUI. `launcher/components.py`
+The Components tab in settings installs Hermes, its image and video skills, and ComfyUI. `launcher/components.py`
 owns the catalogue, the detection and the install; the page polls a single in-flight
 job for its log.
 
@@ -233,6 +233,29 @@ not started protected.
 Detection is looser than the install path on purpose: it finds copies this application
 never installed, because telling someone to install what they already have is its own
 kind of wrong.
+
+### The Hermes image and video skills: carried, and installed into Hermes
+
+The skills that drive ComfyUI (the `comfyui-skill` repository: imggen, vidgen, recast,
+dramagen, motion) are a fourth source. They are assembled into `skills/` like the
+others, ride in the payload, and the third card installs them with the pack's own
+`install.py`, run by Hermes's Python, into Hermes's home. Nothing is cloned or
+downloaded but motion's own packages.
+
+- **Their card sits under Hermes, not ComfyUI.** Hermes loads them and they live in its
+  home; ComfyUI is only what four of the five render with, and they start it themselves.
+  The card says "Install Hermes Agent first" until Hermes is there.
+- **ComfyUI is pointed to, not asked for.** motion needs no ComfyUI, so the skills
+  install without it, and the card offers a way to the ComfyUI card while it is
+  missing. When ComfyUI is installed later the skills are installed again in the same
+  job, which puts their ComfyUI node in `custom_nodes` and renders ComfyUI's paths into
+  their documents.
+- **Success is what is on disk.** `install.py` exits with its doctor's verdict, which
+  fails on any machine without the model weights; only its own codes 2 and 3 mean it
+  did nothing. `.ast-skills-version` beside the installed engine records which release
+  installed them, so the card can say when this release carries a newer one.
+- **The models are not included** — 11 GB for the smallest set, 170 GB for all of them.
+  The card says so and points at MODELS.md.
 
 ### Hermes on Linux: the desktop application, and Chromium's sandbox
 

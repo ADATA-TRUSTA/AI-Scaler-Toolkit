@@ -215,7 +215,9 @@ def main() -> int:
             failures.append("hideChatPanel is not true; the desktop window would show the full chat UI")
 
     root = Path(args.payload).resolve()
-    for required in ("backend/pyproject.toml", "backend/scripts"):
+    for required in ("backend/pyproject.toml", "backend/scripts",
+                     # What the launcher installs the Hermes skills with.
+                     "skills/install.py", "skills/pyproject.toml"):
         if not (root / required).exists():
             failures.append(f"payload is missing {required}")
 
