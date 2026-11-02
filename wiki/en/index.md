@@ -1,51 +1,76 @@
-# Wiki Index (English)
+# AI Scaler Toolkit Wiki (English)
 
-> Directory of knowledge-base pages. Read this first to find the relevant page.
-> Chinese version: [`../zh/index.md`](../zh/index.md) · Last updated: 2026-07-16
+> 繁體中文: [`../zh/index.md`](../zh/index.md)
+>
+> Written against **backend 0.3.0**. For installation and day-to-day use, see
+> [`docs/`](../../docs/installation.en.md). This wiki covers why it behaves the way it does,
+> how to tune it, and how to build on its API.
+
+## Where to start
+
+| You want to know | Read |
+|---|---|
+| What AST is and what it is made of | [Overview](overview.md) |
+| Which inference engine to use for your model | [Choosing an inference engine](engines/index.md) |
+| How to run a model larger than your GPU | [Offload: four different things](memory/offload.md) |
+| Whether a configuration will fit | [Memory estimation](memory/estimation.md) |
+| Something went wrong | [Troubleshooting by symptom](operations/troubleshooting.md) |
+| How fast it actually runs | [Measured results](benchmarks/index.md) |
 
 ## Overview
-- [Project Overview](overview.md) — what the Trusta AST service is
-- [Trusta AST Overview](overview/trusta-ast-overview.md) — architecture-level overview
-- [Trusta AST Summary](overview/trusta-ast-summary.md) — quick summary & getting started
 
-## Entities
-- [Trusta AST Inference Service](entities/trusta-ast-inference-service.md)
-- [ModelManager](entities/model-manager.md)
+- [Overview](overview.md) — a local LLM platform on one machine; four components, three layers of hardware fitting, one model at a time
+- [Service architecture](architecture.md) — three processes, two inference paths, where state lives
+- [Glossary](glossary.md) — terms that mean something specific here, or that mean different things in different places
 
-## Concepts — Service
-- [Multi-Process Isolation](concepts/multi-process-isolation.md)
-- [OpenAI API Compatibility](concepts/openai-api-compatibility.md)
-- [Inference Engine Comparison](concepts/inference-engine-comparison.md)
-- [Qwen3.5 Inference Optimization](concepts/qwen3-5-inference-optimization.md)
-- [GPU Offload Mechanism](concepts/offload-mechanism.md)
+## Inference engines
 
-## Concepts — Methodology
-- [LLM Wiki Pattern](concepts/llm-wiki-pattern.md)
-- [File Format Conversion](concepts/file-format-conversion.md)
+- [Choosing an inference engine](engines/index.md) — the four engines' trade-offs at a glance
+- [transformers](engines/transformers.md) — load a fresh adapter directly; `device_map` caveats
+- [llama.cpp (llama_server)](engines/llama-server.md) — GGUF, slot cache, mmproj, `--jinja`
+- [vLLM](engines/vllm.md) — concurrency, KV offload, sleep/wake, automatic tool-parser detection
+- [Strata](engines/strata.md) — experts of a large MoE in DRAM; deep sleep keeps the conversation (NVIDIA)
 
-## Comparisons
-- [Legacy vs OpenAI API](comparisons/legacy-vs-openai-api.md)
-- [Trusta AST vs Market Solutions](comparisons/trusta-ast-vs-market-solutions.md) — qualitative; competitor figures not benchmarked here
+## Memory and model formats
 
-## Summary
-- [Trusta AST Core Differentiation](summary/trusta-ast-core-differentiation.md)
+- [Offload: four different things](memory/offload.md) — weights, MoE experts, KV cache, training state
+- [Memory estimation](memory/estimation.md) — two estimators for HF and GGUF models, five GGUF endpoints
+- [GGUF conversion and LoRA merge](models/gguf-conversion.md) — shard-by-shard merge, quantization, conversion pitfalls
 
-## Synthesis — TRUSTA Enterprise SSD Product Line
-- [Overview](synthesis/overview.md)
-- [Products](synthesis/products.md)
-- [Applications](synthesis/applications.md)
-- [Features](synthesis/features.md)
-- [Technical](synthesis/technical.md)
-- [Business](synthesis/business.md)
-- [All Q&A Index](synthesis/index-all-qa.md)
+## Fine-tuning (Linux)
 
-## Sources
-- [Inference Manual](sources/inference_manual.md)
-- [Fine-tune Manual](sources/finetune_manual.md)
-- [README (ingested)](sources/README.md)
+- [Fine-tuning overview](training/index.md) — flow, phases, the event stream and SSE, two ordering invariants
+- [Multimodal fine-tuning](training/multimodal.md) — `multimodal_scope` and four model-specific pitfalls
+- [DeepSpeed ZeRO-3 offload](training/deepspeed-offload.md) — five profiles, NVMe and pinned DRAM, version pins
 
-## Meta
-- [Research Evidence](research-evidence.md)
-- [Schema](schema.md)
-- [Purpose](purpose.md)
-- [Log](log.md)
+## API
+
+- [API overview](api/index.md) — route groups, one model at a time, sleep/wake
+- [Chat (OpenAI-compatible)](api/chat.md) — extension fields, thinking and `reasoning_effort`, tool calls, model-specific overrides
+- [Error model](api/errors.md) — what status codes mean here, the three shapes of `detail`, errors mid-stream
+- [Remote access and the trust boundary](api/remote-access.md) — separate rules for this machine, other machines, and web pages
+
+## Operations
+
+- [Troubleshooting by symptom](operations/troubleshooting.md) — see X, check Y
+- [Pitfalls found by running it](operations/known-pitfalls.md) — things the code does not tell you
+- [Behind a reverse proxy](operations/reverse-proxy.md) — SSE buffering, timeouts, `X-Forwarded-For`
+
+## Measured results
+
+- [Index of measured results](benchmarks/index.md) — each with its hardware and conditions
+  - [vLLM native KV cache offload to DRAM/NVMe](benchmarks/vllm-kv-offload.md)
+  - [vLLM vs llama.cpp on an 8 GB VRAM budget](benchmarks/vllm-vs-llamacpp-8gb.md)
+  - [Accuracy of the GGUF memory estimate](benchmarks/gguf-estimation-accuracy.md)
+  - [What Gen5 NVMe does for local AI workloads](benchmarks/gen5-ssd.md)
+  - [Handing the GPU to another program: three ways](benchmarks/gpu-handoff.md)
+  - [LoRA training a 35B MoE on a 16 GB GPU](benchmarks/deepspeed-lora-16gb.md)
+
+## Products
+
+- [TRUSTA enterprise SSDs](products/trusta-ssd.md) — product lines and use cases
+
+## About this wiki
+
+- [About this wiki](about.md) — scope, conventions, version
+- [Changelog](log.md)

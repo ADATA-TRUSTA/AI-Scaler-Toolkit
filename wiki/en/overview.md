@@ -1,37 +1,87 @@
 ---
-type: overview
-title: Project Overview
-created: 2026-04-29
-updated: 2026-04-29
-tags: [overview, llm, inference, trusta]
-related: []
-sources: ["inference_manual.md"]
+title: Overview
+summary: AI Scaler Toolkit is a local platform for running and fine-tuning LLMs on one machine; this page covers its components, the three layers of hardware fitting, and its most important limits.
+updatedAt: 2026-10-29
 ---
-# Project Overview
 
-This wiki documents the architecture, components, and usage patterns of the **Trusta AST Inference Service**, a high-performance LLM inference server designed for stability and flexibility. The project aims to provide a unified, production-ready interface for deploying various Large Language Models while abstracting the complexities of different inference backends.
+# Overview
 
-## Core Architecture
+## In one sentence
 
-The system is built on a **Multi-process Isolation** architecture, where the HTTP server (FastAPI) is strictly separated from the model inference logic (Worker Process). This design ensures that memory-intensive tasks and potential Out-Of-Memory (OOM) errors in the inference process do not crash the main service. When a worker dies, its status becomes `error` and recovery is manual (re-issue `load_model`, or call `force_cleanup_gpu`). The **ModelManager** acts as the central coordinator, managing the lifecycle of models and handling communication between the API layer and the isolated workers.
+**A platform for running LLMs on your own computer**: download models, chat, convert and
+quantize, and fine-tune, all on local hardware. Your data does not leave the machine.
 
-## Engine Agnosticism
+**The core of the product is "it runs on a GPU that is not big enough."** That goal shapes most
+of the design: four inference engines, layered offload, GGUF quantization, DeepSpeed ZeRO-3.
+The NVMe SSD is treated as **part of the memory hierarchy**, not only as a place to keep files.
 
-A key strength of the service is its **Engine Agnostic** design. It supports three distinct inference engines:
-1.  **Hugging Face Transformers**: For broad compatibility and CPU offloading.
-2.  **vLLM**: For high-throughput production environments with GPU acceleration.
-3.  **llama-server**: For efficient GGUF model deployment on CPU or limited hardware.
+## Components
 
-Users can switch between these engines via configuration without changing the API interface.
+| Component | What it is | Where in the repo |
+|---|---|---|
+| **Backend** | FastAPI service: 54 routes, four inference engines, fine-tuning, RAG | `backend/` |
+| **Web interface** | A prebuilt single-page app, served by the backend | `frontend/` |
+| **Console** | A headless Python client for the same API | `console/` |
+| **Desktop app** | Launcher, Windows installer, Linux AppImage | `deploy/` |
 
-## Standardization and Compatibility
+```
+┌─ Web interface ─┐   ┌─ console ─┐   ┌─ Other apps (Hermes, coding assistants…) ─┐
+└────────┬────────┘   └─────┬─────┘   └──────────────────────┬────────────────────┘
+         │ HTTP / SSE        │ HTTP                          │ OpenAI-compatible /v1/
+         └───────────────────┴───────────────┬───────────────┘
+                                             ▼
+                               ┌─ Backend (FastAPI) ─┐
+                               │ main process+workers │
+                               └──────────┬──────────┘
+                                          │ manages child processes
+                  ┌───────────────────────┼────────────────────────┐
+                  ▼                       ▼                        ▼
+            llama-server              vllm serve                 Strata
+              (GGUF)              (HF safetensors)           (GGUF, MoE)
+```
 
-The service has fully adopted the **OpenAI API** standard for chat interactions (`POST /v1/chat/completions`), deprecating all legacy custom endpoints. This ensures compatibility with the broader ecosystem of LLM tools and clients. The implementation supports streaming (SSE), session management for multi-turn conversations, and advanced features like Tool Calling.
+The `transformers` engine is not in the picture: it runs **inside the backend's own worker
+process**, not as a separate server. That difference is the subject of
+[Service architecture](architecture.md).
 
-## Specialized Optimizations
+## Three layers of hardware fitting
 
-The wiki also details specific optimizations required for certain model families, such as the **Qwen3.5** model. Due to the unique architecture of Qwen3.5 (MoE), the service implements **Model-Aware Parameter Adjustment** logic to automatically force specific generation parameters (temperature, top_p, etc.) to prevent artifacts and ensure reliable output.
+| Layer | Means | See |
+|---|---|---|
+| **Weights** | Quantization (int4/int8/GGUF), CPU offload, MoE expert offload | [Offload](memory/offload.md) |
+| **KV cache** | vLLM's DRAM tier → NVMe tier; llama.cpp's slot cache | [Offload](memory/offload.md), [vLLM](engines/vllm.md) |
+| **Training** | DeepSpeed ZeRO-3 with CPU/NVMe offload | [DeepSpeed ZeRO-3 offload](training/deepspeed-offload.md) |
 
-## Future Scope
+## The most misunderstood limit: one at a time
 
-Future development may focus on expanding engine support, refining memory estimation tools, and creating migration scripts for legacy clients. The wiki serves as the central knowledge base for understanding the current state of the inference service and guiding its evolution.
+| Resource | How many at once | Beyond that |
+|---|---|---|
+| Inference model | **1** | `409`; unload first |
+| Training job | **1** | Refused |
+| Generation requests | 8 (`MAX_CONCURRENT_GENERATIONS`) | Queued |
+| **Training and inference on the same GPU** | **Not prevented** | Only a warning in the server log; on a 16 GB card this is usually an OOM |
+
+Mind the last row: **unload the inference model before you start training.**
+
+## What each platform can do
+
+| Feature | Windows | Linux |
+|---|---|---|
+| transformers, llama.cpp | ✅ | ✅ |
+| vLLM | ❌ | ✅ (installed by default with NVIDIA; Intel needs `TRUSTA_SETUP_VLLM=1`) |
+| Strata | Depends on the package | Depends on the package; **NVIDIA only** |
+| Fine-tuning | ❌ | ✅ (WSL2 counts as Linux) |
+
+The backend reports the engines and fine-tuning this machine can actually run through
+`GET /health`, and the web interface shows options accordingly. Calling an unsupported feature
+returns `501` with a sentence explaining why.
+
+## Where to go next
+
+| You want to know | Go to |
+|---|---|
+| The backend's processes and state | [Service architecture](architecture.md) |
+| Which inference engine to use | [Choosing an inference engine](engines/index.md) |
+| How to build on the API | [API overview](api/index.md) |
+| How to let another computer connect | [Remote access and the trust boundary](api/remote-access.md) |
+| Terms | [Glossary](glossary.md) |

@@ -1,37 +1,85 @@
 ---
-type: overview
-title: 專案總覽
-created: 2026-04-29
-updated: 2026-04-29
-tags: [overview, llm, inference, trusta]
-related: []
-sources: ["inference_manual.md"]
+title: 全貌
+summary: AI Scaler Toolkit 是在一台機器上執行與微調 LLM 的本地平台；本頁說明它的元件、硬體適配的三層手段與最重要的幾個限制。
+updatedAt: 2026-10-29
 ---
-# 專案總覽
 
-本 wiki 記載了 **Trusta AST Inference Service** 的架構、元件與使用模式，這是一個為穩定性與彈性而設計的高效能 LLM 推論伺服器。本專案旨在提供一個統一、可用於生產環境的介面，用以部署各種大型語言模型，同時抽象化不同推論後端的複雜性。
+# 全貌
 
-## 核心架構
+## 一句話
 
-本系統建構於 **Multi-process Isolation** 架構之上，HTTP 伺服器（FastAPI）與模型推論邏輯（Worker Process）被嚴格分離。此設計確保推論行程中記憶體密集的任務與潛在的記憶體不足（Out-Of-Memory，OOM）錯誤不會使主服務當機。當某個 worker 死亡時，其狀態會變為 `error`，且恢復是手動的（重新發出 `load_model`，或呼叫 `force_cleanup_gpu`）。**ModelManager** 扮演中央協調者的角色，管理模型的生命週期，並處理 API 層與隔離 worker 之間的通訊。
+**在自己的電腦上跑 LLM 的平台**：下載模型、對話、量化轉換、微調，全部在本機的硬體上完成，
+資料不離開這台電腦。
 
-## 引擎無關性
+**產品的核心是「在不夠大的顯卡上也跑得動」。** 這個目標決定了大部分設計：
+四個推論引擎、多層 offload、GGUF 量化、DeepSpeed ZeRO-3。
+NVMe SSD 在這裡被當成**記憶體階層的一部分**，不只是放檔案的地方。
 
-本服務的一項關鍵優勢在於其 **Engine Agnostic**（引擎無關）的設計。它支援三種不同的推論引擎：
-1.  **Hugging Face Transformers**：用於廣泛的相容性與 CPU 卸載。
-2.  **vLLM**：用於具備 GPU 加速的高吞吐量生產環境。
-3.  **llama-server**：用於在 CPU 或有限硬體上有效率地部署 GGUF 模型。
+## 元件
 
-使用者可透過組態在這些引擎之間切換，而無需變更 API 介面。
+| 元件 | 是什麼 | 在 repo 的哪裡 |
+|---|---|---|
+| **後端** | FastAPI 服務：54 條路由、四個推論引擎、微調、RAG | `backend/` |
+| **網頁介面** | 預先建置好的單頁應用，由後端直接提供 | `frontend/` |
+| **console** | 無介面的 Python 用戶端，打的是同一組 API | `console/` |
+| **桌面程式** | 啟動器、Windows 安裝檔、Linux AppImage | `deploy/` |
 
-## 標準化與相容性
+```
+┌─ 網頁介面 ─┐   ┌─ console ─┐   ┌─ 其他應用程式（Hermes、程式助理…）─┐
+└─────┬──────┘   └─────┬─────┘   └─────────────────┬──────────────────┘
+      │ HTTP / SSE      │ HTTP                      │ OpenAI 相容 /v1/
+      └─────────────────┴──────────────┬────────────┘
+                                       ▼
+                         ┌─ 後端（FastAPI）─┐
+                         │  主行程 + worker  │
+                         └────────┬─────────┘
+                                  │ 管理子行程
+              ┌───────────────────┼────────────────────┐
+              ▼                   ▼                    ▼
+        llama-server          vllm serve            Strata
+          （GGUF）          （HF safetensors）      （GGUF，MoE）
+```
 
-本服務已完全採用 **OpenAI API** 標準來進行聊天互動（`POST /v1/chat/completions`），並淘汰了所有舊有的自訂端點。這確保了與更廣泛的 LLM 工具與用戶端生態系相容。此實作支援串流（SSE）、用於多輪對話的工作階段管理，以及如工具呼叫（Tool Calling）等進階功能。
+`transformers` 引擎不在圖上——它**在後端自己的 worker 行程裡**執行，不是獨立的伺服器。
+這個差異是 [服務架構](architecture.md) 的主題。
 
-## 特定最佳化
+## 硬體適配的三層手段
 
-本 wiki 也詳述了某些模型系列所需的特定最佳化，例如 **Qwen3.5** 模型。由於 Qwen3.5（MoE）的獨特架構，本服務實作了 **Model-Aware Parameter Adjustment** 邏輯，以自動強制設定特定的生成參數（temperature、top_p 等），藉此防止輸出瑕疵並確保可靠的輸出。
+| 層 | 手段 | 詳見 |
+|---|---|---|
+| **權重** | 量化（int4／int8／GGUF）、CPU offload、MoE 專家 offload | [Offload](memory/offload.md) |
+| **KV cache** | vLLM 的 DRAM 層 → NVMe 層；llama.cpp 的 slot 快取 | [Offload](memory/offload.md)、[vLLM](engines/vllm.md) |
+| **訓練** | DeepSpeed ZeRO-3 + CPU／NVMe offload | [DeepSpeed ZeRO-3 offload](training/deepspeed-offload.md) |
 
-## 未來範疇
+## 最容易被誤解的限制：一次一個
 
-未來的開發可能聚焦於擴展引擎支援、精進記憶體估算工具，以及為舊有用戶端建立遷移腳本。本 wiki 作為理解目前推論服務狀態並引導其演進的中央知識庫。
+| 資源 | 同時幾個 | 超過時 |
+|---|---|---|
+| 推論模型 | **1** | `409`，要先卸載 |
+| 訓練 job | **1** | 拒絕開始 |
+| 生成請求 | 8（`MAX_CONCURRENT_GENERATIONS` 可調） | 排隊 |
+| **訓練與推論同時用一張 GPU** | **不會擋** | 只在伺服器 log 留一行警告；16 GB 的卡上通常直接 OOM |
+
+最後一列要特別注意：開始訓練前**先卸載推論模型**。
+
+## 各平台能用的功能
+
+| 功能 | Windows | Linux |
+|---|---|---|
+| transformers、llama.cpp | ✅ | ✅ |
+| vLLM | ❌ | ✅（NVIDIA 預設安裝；Intel 要 `TRUSTA_SETUP_VLLM=1`） |
+| Strata | 依安裝包 | 依安裝包；**只支援 NVIDIA** |
+| 微調 | ❌ | ✅（WSL2 也算 Linux） |
+
+後端用 `GET /health` 回報這台機器實際能用的引擎與微調；網頁介面依此決定要顯示哪些選項。
+不支援的功能被呼叫時回 `501`，`detail` 是一句說明原因的話。
+
+## 從這裡往哪裡讀
+
+| 你想知道 | 去 |
+|---|---|
+| 後端的行程與狀態 | [服務架構](architecture.md) |
+| 該用哪個推論引擎 | [推論引擎怎麼選](engines/index.md) |
+| 在 API 上開發 | [API 總覽](api/index.md) |
+| 讓別台電腦連進來 | [遠端存取與信任邊界](api/remote-access.md) |
+| 術語 | [術語表](glossary.md) |
