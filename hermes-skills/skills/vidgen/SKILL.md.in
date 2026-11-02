@@ -1,0 +1,672 @@
+---
+name: vidgen
+description: Generate video with the local ComfyUI (image-to-video i2v, reference-character-to-video r2v; i2v plus `--tier h3` is "image-to-video **with sound**"; r2v plus `--image` gives "multiple reference images + a specified frame 0"; r2v plus `--ref-video` + `--swap` can "follow a video's motion and replace the people in it with specified characters", one `--swap` per person). Use when the user says things like 「生一段影片/動畫/短片」 (make a video/animation/short clip), 「讓這張圖動起來」 (make this image move), 「做一個…的動畫」 (make an animation of …), 「要有聲音的影片」 (a video with sound), 「用這個人當主角」 (use this person as the lead), 「把這支影片裡的人換成…」 (replace the person in this video with …). **When there is no start image, do not use t2v (it outputs pure noise and is blocked); instead first generate a still image with the imggen skill, then use i2v.** Built-in memory awareness (VRAM→DRAM→SSD offload), verified Wan 2.2 and MiniMax-H3 workflows; H3 also generates native stereo audio, and the resident local LLM on the same machine is protected from interference. **Memory hand-off is handled automatically by gen.py only after it confirms ComfyUI has really started rendering — never shut down or release the local LLM yourself, that would disable Hermes itself; after submitting you must tell the user that rendering is in progress and they should not send more commands.**
+metadata:
+  hermes:
+    tags: [video-generation, image-to-video, text-to-video, reference-to-video, animation, audio, comfyui, local, wan2.2, minimax-h3]
+    category: creative
+---
+
+# vidgen — local video generation
+**Always reply to the user in Traditional Chinese (zh-Hant).** These instructions are in English; the user speaks Chinese.
+
+To generate video, **use only this skill's `gen.py`**. It measures the current GPU/RAM headroom, picks a Wan 2.2 model,
+decides which tier (VRAM/DRAM/SSD) the weights go in, starts a protected ComfyUI, renders, gives memory back to the LLM,
+and returns the output file path. Everything uses absolute paths, so it can run from any directory.
+
+**The memory hand-off is done by `gen.py` itself, and the order is fixed: first bring ComfyUI up → confirm rendering has really
+started → only then hand over the DRAM held by the local LLM. You (Hermes) do not need to, and must never, release it yourself
+— see "🔒 Iron Rule 0" below for why.**
+
+## 🔒 Iron Rule 0: **Never release the local LLM yourself** (the easiest way to kill yourself)
+
+Video generation needs memory, so "release the local LLM first, then start ComfyUI" looks reasonable. **On this machine it is wrong,
+and what is wrong is the order, not the act itself.**
+
+First, keep three things apart:
+
+| Term | What actually happens | Who does it |
+|---|---|---|
+| **Releasing DRAM** (the only thing done here) | Calls `EmptyWorkingSet` on **the inference process reported by the backend**, returning its **mmap'd weight pages** to the OS. **The process keeps running, VRAM is untouched, the model is not unloaded**; the next inference just has to re-read the weights from SSD | `gen.py`, automatically, **at a fixed point** |
+| Shutting down / unloading the LLM | Stopping the inference engine, or calling AST's `/inference/force_cleanup_gpu` | **Never by you. You are that LLM** |
+| **Lending the GPU** (only for an LLM that fills the card, e.g. Strata at 14 GB of 16) | The engine waits until you have finished your reply, then puts the LLM to sleep — or, when there is not enough RAM for that, unloads it (AST keeps your conversation and restores it) — renders, and loads it back (~35 s) | `gen.py`, automatically, inside each render. **You do nothing**; just stop after submitting |
+| Releasing ComfyUI's models | `/free`; `gen.py` does it itself after every render | `gen.py`, automatically |
+
+**Why the order is fixed: the agent driving this whole flow is that LLM — that is, you.**
+Once the weights are handed over, your next inference has to re-read about 10 GB from SSD. So if you release before ComfyUI has
+really started rendering:
+
+- ComfyUI fails to start / the planner refuses in preflight → **the memory was thrown away for nothing**, not a single frame of video was made, and you are already blind
+- You need to report the result, read `status`, or say one sentence to the user → every sentence reloads the weights, **which looks like the whole
+  Hermes is frozen**, and that is exactly the symptom the user reported
+
+**Correct order (already hard-coded in the engine, you don't need to manage it)**:
+```
+start protected ComfyUI  →  submit prompt  →  confirm it appears in queue_running (really rendering)
+                                              →  only now does EmptyWorkingSet release DRAM
+```
+`memplan.release_llm_dram()` is the only place that releases, and it **checks `/queue` itself**,
+not trusting the caller — so the order cannot be written wrong, and you don't need to supervise it.
+
+**Therefore you are forbidden to do any of the following**:
+- Use `taskkill` / `Stop-Process` to stop the inference process, or call AST's `/inference/force_cleanup_gpu`
+  (it restarts the worker, which is the same as unloading yourself)
+- Call `EmptyWorkingSet` yourself, or write your own script to clear the working set
+- Set `VIDGEN_LLM_RECLAIM=release` to "release early" — that old meaning has been removed (it is now the same as `auto`)
+- "Free up memory" before running `gen.py`. **Not needed. When `gen.py` measures, it already counts the LLM's reclaimable pages as available**
+
+When VRAM really is not enough, `gen.py` returns `ok:false` and tells you to shrink `--seconds` or lower `--short`. **Do what it says;
+do not touch the LLM.**
+
+## Iron rules (must follow)
+1. **Never write your own Python / call the ComfyUI API directly to generate video.** Only run `gen.py`. A self-written script bypasses
+   the memory protection (it may crush the LLM on the same machine), gives worse results, and leaves clutter. The moment you think "write a generate.py", stop and use `gen.py` instead.
+2. **Never use `video_gen.py` or `run_workflow.py`.** These are internal tools and do not contain the memory-protection logic.
+   The user may try these tools to generate video directly, but that is wrong — `video_gen.py` lacks the plan stage and automatic
+   VRAM/RAM measurement, and will crush the LLM. Only let the user call `gen.py`; the internal tools are transparent to the user.
+3. **🚫 Never use `t2v` (pure text-to-video) — on this machine it outputs pure noise.** The only 14B workflow here
+   is an **I2V** model (the Lightning LoRA is I2V-only too); `t2v` gets no start frame, which means sampling from nothing. Worst of all,
+   **it still returns `ok:true` plus an mp4 path**; without opening the file you cannot see the failure, so it is very easy to wrongly report "generated successfully".
+   When the user says "make a video of …" but gives no image, **always use the two-step flow**: first generate a still with imggen, then use `i2v`
+   to animate it (see the "⭐ Two-step" section below). `gen.py` now blocks `t2v` outright and returns a complete command example; just follow it.
+4. **Run `gen.py plan` before acting** to see how long a video the current headroom allows, then report/generate accordingly. Video is very VRAM-hungry.
+5. **Use `--wait` to wait for rendering; do not poll with the LLM.** Rendering takes several minutes, but every `status` poll is a full
+   LLM inference — the resident 35B on the same machine re-reads a dozen-plus GB of weights from SSD just to look at one boolean, competing with ComfyUI for memory
+   and disk (measured: the whole render was about 28% slower). `--wait` polls ComfyUI inside Python and never touches the LLM:
+   - **⚠️ Always run these commands with the `terminal` tool; do not wrap them in an `execute_code` subprocess.**
+     Only `terminal` can provide the two paths below — `background`/`notify_on_complete` are its parameters;
+     `execute_code` does not have them. Wrapped, you can only wait in the foreground until killed by the timeout, **hit in practice**.
+   - **Always use `background=true` + `notify_on_complete=true`; do not try to judge "will this one be fast".**
+     The foreground wait budget is the terminal timeout (measured: killed at about 384 seconds), and the render-time estimate is a number tied to the GPU,
+     which on a machine that has not been re-calibrated is naturally too low. Using a number that is wrong by default to decide whether to lock the session
+     only buys you the convenience of "getting `file` in the same turn", which is not worth it. **Hit twice in practice**: once estimated 4 minutes,
+     actually 11 minutes; once estimated "~10 minutes", right on the threshold — both times it waited in the foreground until the timeout killed it, and during that time
+     the user could not send a single message. When running in the background, first report the `job_id` to the user; when done, the notification brings back the result.
+   - **Background execution has no timeout; that is its real point.** `timeout` only applies to the foreground path;
+     `background=true` goes through the process registry, and once spawned there is no deadline at all, it will never be killed however long it runs.
+     So the right answer to "vidgen should have no timeout" is **never run in the foreground**, not raising the timeout value.
+   - **Do not use `timeout=` to lengthen the foreground** (there is a hard cap of 600 seconds, beyond which the tool rejects it outright),
+     **and even less change `terminal.timeout` in `config.yaml`** — that is the global default every command uses;
+     removing it lets any stuck command freeze the whole session indefinitely.
+   - **🔁 Terminal timeout ≠ render failure; never resubmit.** The timeout only kills "the gen.py that is waiting";
+     rendering runs on an independent detached worker + ComfyUI server, **will finish by itself and write the mp4**.
+     `--wait` prints the `job_id` to stderr right at the start; after a timeout, **pick it up with that id**:
+     `gen.py status <job_id>` → if still running, wait a bit and check again; if done, take `file` directly.
+     (Hit in practice: after a timeout the whole thing was resubmitted, and the first one finished 4 seconds later — a wasted render.)
+   - Keep `gen.py status <job_id>` for "the user suddenly asks about progress"; do not use it as a waiting mechanism. Without `--wait`,
+     `i2v`/`r2v` still return a `job_id` immediately (asynchronous); that is for situations where you need to let go right away.
+6. **Do not `comfy launch` yourself.** `gen.py` handles the launch and sets `--reserve-vram` to protect the LLM —
+   that value is computed **at launch time** from "the VRAM already occupied by others", and cannot be changed afterwards.
+   **If ComfyUI is already running but was started without reserve** (started by someone else, or started in a previous round before the LLM was loaded),
+   `gen.py` prints a warning on stderr: it means ComfyUI will treat the VRAM occupied by the LLM as free space.
+   When you see it, restart ComfyUI with the command it gives; do not ignore it. imggen uses the same server, and the rules are exactly the same.
+
+## 🧰 Things on this machine that waste your turns (copy the right answer, do not experiment)
+
+Every row was hit in practice, and more than once. **Hitting one burns an inference for nothing**, and during rendering it directly competes with ComfyUI for resources.
+(The first four rows are **Windows-specific**: `python` points to the Store stub, `jq` is not installed, `Get-Image` is not a cmdlet.
+On Linux these rows do not apply, but the right-hand answers still hold — the point is **use the tools the skill gives you, do not build your own**.)
+
+| What you want to do | ❌ Don't | ✅ Right answer |
+|---|---|---|
+| Run python | `python` / `python3` (points to the Windows Store stub, replies telling you to install it from the Store) | The venv python by full path (the one in the commands below) |
+| Parse JSON | `jq` (not installed) | What `gen.py` returns is already JSON; read the fields directly; if you really must process it, use venv python `-c` |
+| Check image dimensions | Write your own PIL / PowerShell | `gen.py crop` returns `size` and `source_size`; aspect-ratio problems are reported in `plan`'s `warning` |
+| Crop an image | `Get-Image` (not a cmdlet, and blocked by the security layer), hand-rolled PIL in execute_code (backslashes get eaten) | `gen.py crop <img> --rect x,y,w,h` |
+| Look at an image / video | `imggen` (only generates images, cannot read them), writing a temp script | `vision_analyze` / `video_analyze`; **if unavailable, report the path to the user and move on** |
+| Stop rendering | Calling `/interrupt`, `/queue`, `/free` yourself | `gen.py stop` (does all three at once, and also gives memory back to the LLM) |
+| Can't find the job you just ran | Guessing the job_id, digging through `process list` | `gen.py status` (no argument = the most recent job) |
+| Run the skill | Wrapping it in `execute_code` (Windows paths get eaten by bash, measured turning into `C:UsersYou…`) | Use `terminal`, `background=true` + `notify_on_complete=true` |
+
+**One more with no exceptions: there is only one engine, and you should not run anything inside it directly — only run `gen.py`.**
+The engine is at `@@ENGINE@@`.
+On 2026-09-09 one round of the agent used a filename search, found an old copy somewhere else, read its `video_gen.py`,
+then ran it directly, bypassing all memory protection — and that copy could not even run, wasting four turns.
+Those old copies were all removed on 2026-09-10,
+**so if you find a second `video_gen.py` on disk, it is not the engine; do not run it.**
+
+> ⛔ **Even less should you "write" anything into the engine directory — especially do not add a module yourself to make an import error go away.**
+> Measured 2026-09-10: after a sync mistake the engine was missing a module, and the agent made its own
+> stub in the engine directory, with every function returning `None`/empty values. The error did disappear — but that made the planner think "no resident LLM is visible",
+> so it treated the whole GPU as free space, **and the next render could push the LLM out**. That round also hit `max_turns`
+> (94 tool calls) before it stopped.
+> **A fake module that makes the error disappear is far more dangerous than the error itself.** If the engine is broken, report the error message to the user as is;
+> that is a job for reinstalling (`install.py`), not for you to patch on the spot.
+
+## How to use it (one call)
+**Run with the `terminal` tool (do not wrap in `execute_code`), and always pass `background=true` +
+`notify_on_complete=true`.** No need to judge how long it will run — a foreground wait will always be killed by the terminal timeout, and
+**that turn cannot be closed; the user cannot send a single message until rendering finishes** (measured twice: estimated 4 minutes, actually 11 minutes;
+estimated "~10 minutes", right on the threshold; both times the whole session was locked).
+`--wait` means gen.py polls in Python without ever touching the LLM; it does **not** mean you should wait in the foreground.
+
+**Always use the full absolute path of `gen.py`** (it uses absolute paths internally and runs from any directory; do not use a relative path, do not cd first, do not assume it is in your working directory):
+```
+"@@PY@@" "@@VIDGEN@@" plan                                            # first see how long it can be (instant, no rendering)
+"@@PY@@" "@@VIDGEN@@" i2v "<action/scene>" --image <start image> --wait [options]  # this call is always background=true
+# No start image? Do not use t2v (it is blocked). First generate one with imggen, then feed it to the i2v line above:
+"@@PY@@" "@@IMGGEN@@" zimage "<describe the scene as a still image>"
+"@@PY@@" "@@VIDGEN@@" r2v "<scene>" --ref <character image> --wait [options]         # with sound; always background=true
+"@@PY@@" "@@VIDGEN@@" i2v "<action>" --image <start image> --tier h3 --wait [options]  # also starts from this image, but with sound
+"@@PY@@" "@@VIDGEN@@" r2v "" --ref-video <video> --swap "<person to replace>=<character image>@<start>-<end>" --steps 8 --wait   # character swap: run plan first to get the shot list; one --swap per person
+"@@PY@@" "@@VIDGEN@@" status <job_id>                                  # only when the user asks about progress
+```
+Rendering is always `background=true` + `notify_on_complete=true`, still with `--wait`; `plan` and
+`status` are instant, so just run those two in the foreground.
+
+| mode | Purpose | Required | Returns |
+|------|------|------|------|
+| `i2v`  | Image-to-video: make an image move (**silent, fastest**) | `--image <start image>` | `--wait`: `file`; without it: `job_id` |
+| `i2v --tier h3` | Also makes this image move, but via MiniMax-H3: **native sound**, and **frame 0 is exactly the image you gave** | `--image <start image>` | Same as above |
+| ~~`t2v`~~ | **🚫 Disabled: outputs pure noise.** Pure-text requests always go through the two-step "imggen generates an image → `i2v`" flow | — | `gen.py` blocks it and returns the two-step commands |
+| `r2v`  | **Reference-character-to-video, with sound** (MiniMax-H3) | `--ref <reference image>` ×1~9 | Same as above |
+| `r2v` + `--image` | **Both at once**: multiple reference images decide the characters, `--image` decides **frame 0** (the opening composition is yours, not something H3 makes up) | `--ref` ×1~9 **and** `--image <start frame>` | Same as above |
+| `r2v` + `--ref-video` | **Character swap**: re-enact this video's motion, camera work, and rhythm, replacing the person in it with your character; **default 720p, the whole video, the original audio**, rendered per shot | `--ref-video <video>` **and** `--swap "who=image@start-end"` (one per person) | Same as above, plus `swap_passes` |
+| `plan` | Only measures and reports how long/how large it can generate right now, **no rendering** | None | Instant result |
+| `status`| Check a job's progress/result (only when the user suddenly asks) | `<job_id>` | Instant status |
+
+Options: `--seconds N` (default 3), `--fps N` (16), `--short 480|576|608|720|768` (short side, 480), `--portrait`,
+`--fast` (Lightning 4+4, fast; **this is what you get if you pass nothing**) / `--quality` (full steps, about 3.3× slower, **must be paired with background**), `--seed N`,
+`--tier auto|5b|14b|h3` (auto=14B GGUF; h3=MiniMax-H3), `--steps N` (H3 default 20),
+`--easycache T` / `--no-easycache` (H3 step cache, **on by default at 0.2**; measured about 21% faster, image almost identical;
+use `--no-easycache` only when you suspect the image looks broken, or to **reproduce an earlier result with the same seed** (the cache's step-skipping decision has runtime error,
+so two runs with the same seed differ in details, e.g. the apron style); do not raise the threshold yourself — 0.3 was measured not to be any faster),
+`--last-frame <end frame>` (**only usable when there is a pinned start frame**: `i2v --tier h3` or `r2v --ref … --image …`; automatically adds `--tier h3`).
+For `r2v`, `--image` = **frame 0** (not a reference image); `--ref` is the reference image. Giving `r2v --image` alone without `--ref` is blocked and you are asked to clarify.
+
+## 📢 How to wrap up after submitting (do this every time)
+
+Rendering occupies the GPU, and on a machine with a resident LLM, this is exactly when your weights are handed over (Iron Rule 0).
+The user **cannot see** this, so you must say it.
+
+**After submitting, the last line of your reply must be that notice, and then stop — do not call any more tools.**
+
+**⚠️ Always copy the notice text verbatim from what `gen.py` gives you; do not rewrite it from memory.**
+- Asynchronous submit → the returned JSON has a **`notice`** field
+- `--wait` → it is in the `[vidgen]` lines printed on stderr
+
+**Why it must be copied verbatim**: the content of this text **changes with how things are installed**. The engine first checks whether there is actually a visible
+resident LLM on the same machine, then decides which reason to give:
+
+| Situation | The engine's notice says |
+|---|---|
+| A resident LLM on the same machine (the usual case) | The LLM's DRAM has been handed back; do not send any prompt meanwhile (every call re-reads the weights from SSD) |
+| **No resident LLM visible** (e.g. the LLM is on another machine/another OS, as in a WSL split install) | Only says not to send commands that **use the GPU** — because there is no DRAM hand-off at all |
+| **A local LLM that fills the GPU** (Strata) | The LLM is asleep/unloaded for the render, so **any message fails until it is loaded back** after the render (~35 s) |
+
+**Reciting "the LLM's DRAM has been handed back to it" from memory is false in the second case**, and the only purpose of this notice
+is to let the user know **why** they should wait; giving a reason they cannot verify and that is not true only confuses them more.
+Likewise, do not shorten it to "please wait" — with no reason given, they will think it has crashed and keep asking, which is exactly the most damaging behavior.
+
+**Run `gen.py` in the foreground** — an asynchronous submit returns its job_id and the notice within
+seconds. Do not start it as a background process and then wait or poll for its output: with a local LLM
+that fills the GPU, the render takes your GPU once you have been quiet for ~45 s, and a turn still waiting
+on a background process then fails mid-way (measured: the failed request was misread as a context
+overflow and the session was compressed from 65 messages to 15). Relay the notice, end the turn.
+
+**During rendering you must follow the same rule yourself**:
+- ❌ Do not poll progress with `status` (each poll = one full inference = reloading the weights; measured about 28% slower)
+- ❌ Do not "while you're at it" do something else, do not start chatting with the user
+- ✅ Use `--wait` to let Python do the waiting; if it is really long, `background=true` + `notify_on_complete=true`
+- ✅ Only when the user **asks on their own** about progress, run `gen.py status <job_id>` once, and after checking, repeat the notice above
+
+**After it finishes**: the returned JSON has a `note` field reminding that the next answer will be slower (weights must be reloaded from SSD);
+this is normal, not a crash. You can mention it when reporting the output path, so the user does not misjudge it.
+
+## 🔊 When to use `r2v` (MiniMax-H3)
+
+**Only H3 generates sound.** If the user mentions any of the following, use H3 — but H3 takes images in **two** ways,
+`r2v` (the image is a reference) and `i2v --tier h3` (the image is frame 0); see the next section for which to pick:
+
+- 「要**有聲音**/有配樂/有對白/有音效的影片」 (a video **with sound** / music / dialogue / sound effects)
+- 「用**這個人**當主角」「維持這個角色」「這幾張圖裡的人物」 (use **this person** as the lead; keep this character; the people in these images)
+- Needs **the same character** to appear in a new scene (not just making the original image move)
+
+The simplest test: **how many images of people did the user give?**
+
+| Images given / what the user wants | Which to use | Why |
+|---|---|---|
+| **2 or more images of people** | **Always `r2v`** | Only `r2v` can take multiple images of people. `i2v` only accepts one; the rest are thrown away |
+| 1, wants **this person to appear in a new scene** (composition can be redrawn) | `r2v` | The image is a "reference": H3 keeps the face and frames the shot itself |
+| **Multiple images of people, but the opening shot must follow mine** | **`r2v --ref … --image <start frame>`** | The reference images decide the characters, `--image` pins frame 0 — both hold at once |
+| 1, wants it to **start moving from exactly this frame**, and **with sound** | **`i2v --tier h3`** | The image is "frame 0": the video grows out of this frame itself, also with native audio |
+| 1, just wants it to move, **no sound needed** (fastest) | `i2v` (no `--tier`, uses Wan) | Wan is faster, silent |
+| **Gave a video + a photo of a person**, wants "replace the person in it with my character" | **Use the `recast` skill instead** (it calls this skill shot by shot) | Writes a description per shot, automatically checks for background leakage/cut-point lag and re-rolls the seed. "🎭 Character swap" below covers the low-level parameters it uses |
+
+### The three steps of r2v
+
+**1. Plan first (remember `--tier h3`, so you get H3's plan rather than Wan's)**
+```
+"@@PY@@" "@@VIDGEN@@" plan --tier h3 --seconds 5 --short 768
+```
+
+**2. Each image automatically gets a name in `--ref` order: first = Picture 1, second = Picture 2** (up to 9)
+
+**3. Use these names in the prompt to say who is who, then submit**
+```
+"@@PY@@" "@@VIDGEN@@" r2v ^
+  "The woman from Picture 1 walks down a street; the man from Picture 2 runs up behind her." ^
+  --ref "C:\path\woman.png" --ref "C:\path\man.png" --seconds 5 --wait
+```
+
+Just write `Picture 1`, `Picture 2` like this — **no angle brackets, no special syntax to remember**; the engine handles the format.
+With multiple images, writing the names into the prompt is how H3 identifies people; once written, it generates according to your images — this is the key step that makes the result "look like the real person".
+
+With a single image it is even simpler; just describe the motion:
+```
+"@@PY@@" "@@VIDGEN@@" r2v "<scene and action>" --ref "<absolute path of character image>" --seconds 5 --wait
+```
+
+### 🎬 H3's three ways of taking an image: is the image a "reference", "frame 0", or both
+
+Give the same image to H3 with **a different role and you get completely different results**; this is where choosing wrong wastes a render:
+
+| | `r2v --ref IMG` | `i2v --tier h3 --image IMG` | `r2v --ref A --ref B --image START` |
+|---|---|---|---|
+| Underlying | ref2va | fl2va | ref2va + this pack's custom node |
+| Role of the image | **Reference**: only borrows looks/style | **Frame 0**: the video really starts from this frame | A/B are **references**, START is **frame 0** |
+| Composition | H3 reframes (the first frame will not be your image) | Fully keeps your image | **The opening keeps your image**, then H3 develops on its own |
+| How many | 1~9, named in the prompt with `Picture 1/2/…` | **Only takes 1** | 1~9 references + 1 start frame |
+| `--last-frame` | ✗ | ✓ | ✓ |
+| Sound | Yes | Yes | Yes |
+
+```
+# Make "this frame" move, with sound — the video's first frame is hero.png itself
+"@@PY@@" "@@VIDGEN@@" i2v "she slowly turns to the camera and smiles, wind in her hair" ^
+  --image "C:\path\hero.png" --tier h3 --seconds 5 --wait
+
+# Advanced: also specify the end frame, so it interpolates between the two images (automatically adds --tier h3)
+"@@PY@@" "@@VIDGEN@@" i2v "the camera pushes in as day turns to dusk" ^
+  --image "C:\path\day.png" --last-frame "C:\path\dusk.png" --seconds 5 --wait
+```
+
+```
+# Multiple character references + a specified opening shot (this is the fix for "r2v scrambles the composition")
+"@@PY@@" "@@VIDGEN@@" r2v ^
+  "The woman from Picture 1 and the man from Picture 2 talk on the balcony at dusk" ^
+  --ref "C:\path\woman.png" --ref "C:\path\man.png" ^
+  --image "C:\path\opening_shot.png" --seconds 5 --wait
+```
+
+> ### 🔒 If you pin the start frame, you must pin the camera too (2026-09-09, 12 clips measured)
+>
+> **The start frame is a "condition", not a "hard constraint".** H3 cuts by itself within a single clip (written up as an advantage elsewhere in this document),
+> so when the prompt describes an intimate/close-up kind of action without saying anything about the camera, **it starts straight from the close-up it wants**,
+> and the frame you gave never even appears.
+>
+> Same seed, same canvas, changing only one variable:
+>
+> | prompt | steps | Reference images | Difference between frame 0 and the given image | |
+> |---|---|---|---|---|
+> | "…walks in and gives him a kiss on the cheek" | 8 | 1 | 53.99 | ✗ |
+> | Same as above | 8 | 2 | 76.65 | ✗ |
+> | Same as above, 5 seconds | 8 | 2 | 59.96 | ✗ |
+> | Same as above **+ "The video opens exactly on <Picture N>"** | 8 | 1 | 58.26 | ✗ |
+> | Same as above | **20** | 1 | 58.93 | ✗ |
+> | Same as above **+ "static camera, wide shot"** | 8 | 2 | **7.76** | ✓ |
+> | Same as above **+ "the camera stays wide and static throughout, no cuts"** | 8 | 1 | **7.35** | ✓ |
+>
+> **Steps, number of reference images, clip length, even "declaring the video starts from this frame" made no difference; only camera language works.**
+> (Around 7.4 is the noise floor of the VAE + h264 round trip, i.e. a pixel-by-pixel match.)
+>
+> **So: whenever you pass `--image`, the prompt must include a camera instruction**, for example
+> `the camera stays wide and static throughout, no cuts`. With it added the picture still moves,
+> it just no longer reframes on its own. **`gen.py` blocks requests that "pin `--image` but do not pin the camera"**,
+> and the error message includes a sentence you can copy directly. If you really want H3 to reframe freely, do not pass `--image` (use plain `r2v` instead),
+> or explicitly add `--allow-recut`. `plan` checks this too, but **only if you pass the prompt to plan as well** —
+> in practice a whole session only ran `plan --short 480 --seconds 3` (without the prompt), and it was only discovered after all five rounds failed to anchor.
+>
+> **⚠️ And do not trust only the up-front check. The finished JSON has `start_frame_check`, which is actually measured:**
+> a `frame0_diff` of about 5–8 means frame 0 really is the image you gave (that is the VAE+h264 round-trip noise floor);
+> 35 or more means H3 opened its own separate scene. **`anchored: false` means it did not comply — regenerate;
+> do not report it to the user as a success.**
+>
+> **⚠️ When it fails to anchor, the first thing to do is change the seed, not the prompt.** Even with the camera sentence it still misses, and the miss rate
+> is much higher than originally thought. Fixed-seed comparison (2026-09-15, same `--ref` + `--image`,
+> changing only the opening sentence):
+>
+> | Opening state in the prompt | seed 1 | 2 | 3 | 4 | 4242 |
+> |---|---|---|---|---|---|
+> | **Contradicts the start image** (the image is standing, but it says `sitting on a chair`) | 7.65 ✓ | 73.72 ✗ | 74.80 ✗ | 35.01 ✗ | 7.59 ✓ |
+> | **Consistent with the start image** (`stands with his arms crossed by the tree…`) | — | 7.91 ✓ | 7.55 ✓ | 7.44 ✓ | 7.49 ✓ |
+>
+> Two things:
+> 1. **The same request changes with a different seed** (rerunning the same seed gives exactly the same numbers, so it really is the seed that decides).
+>    The contradicting set hit only 2 of 5 seeds — so the right answer to `anchored: false` is `--seed N` with a different one,
+>    or just add **`--anchor-retries N`** to let the engine re-roll by itself (it puts each attempt's seed and `frame0_diff`
+>    into the returned `anchor_attempts`, stops once anchored, and each retry is a full render).
+> 2. **The opening state in the prompt must match the start image.** Describing a state that is not in the image (the image is standing under a tree,
+>    but you write "sitting on a chair") raises the miss rate from 0/4 to 3/5, and camera language cannot save it — H3 builds a separate scene following the prompt,
+>    carrying over only the person's looks from the reference image. If you write an action, continue from the pose already in the image.
+>    (Note: this overturns the earlier rule of thumb "describe the initial state clearly and it will anchor" — that was a misattribution from a single sample.)
+>
+> **⚠️ And the fact that "this conversation has already pinned a start frame" is something you must remember yourself and pass every time.**
+> After the user says in the first round "use X.jpg as the start frame", every later regeneration must keep passing `--image X.jpg` —
+> dropping it **raises no error**; it just silently becomes a different product (plain `r2v`, H3 frames the shot itself), and the canvas also
+> jumps from the start image's aspect ratio back to 16:9. Measured 2026-09-14, it happened twice in the same session: in round four the user only said
+> 「再加一張參考圖讓臉更準」 (add another reference image so the face is more accurate), the agent focused on adding `--ref` and dropped `--image`; in round six the user
+> wrote explicitly 「起始幀一樣用那張圖」 (keep the same start frame), and the agent dropped it again while switching characters. Neither round had any error message.
+> **How to tell: `start_frame_check.pinned`.** This field is always present for h3:
+> only `pinned: true` comes with `frame0_diff` / `anchored`; `pinned: false` means this clip was not pinned at all,
+> and H3 framed it itself — if the user wants a pinned start frame in this conversation, then it was dropped; add `--image` and regenerate.
+>
+> Conversely, **if what you want is "let H3 cut by itself"** (wide shot → close-up and the like), then do not pass `--image`;
+> use plain `r2v`; passing it without pinning the camera only gets you a clip where "the start frame is ignored".
+
+**Four differences you must know:**
+
+1. **`i2v --tier h3` does not take `--ref`; passing it is blocked** (the fl2va graph has no reference-image input).
+   If you want both the character and the opening composition, use the `r2v --ref … --image …` above; do not fall back to `i2v`.
+2. **⚠️ H3 "stretches" the start frame to the canvas, it does not crop** (Wan crops). So a 1:1 or odd-ratio image dropped into a
+   16:9 canvas will be **visibly distorted**. `plan` tells you how far off it is directly in the `warning` field — when you see it, first crop the image to
+   the target ratio and then render; do not force it. Portrait images are no worry: when `--portrait` is not passed, the planner decides portrait/landscape from the image itself.
+3. **Whether it fits is different from `r2v`.** The start frame is stretched to the canvas, so it always costs exactly "one canvas" worth of tokens
+   (`ref_image_size` has no effect on it), unlike `r2v --ref-image-size max` which can easily eat tens of thousands of tokens.
+   At the same length `i2v --tier h3` usually fits more easily than `r2v`; `r2v --ref … --image …` is the sum of both,
+   and `plan` lists them separately for you (`N keyframe(s) + M ref(s)`).
+4. **`r2v --ref … --image …` requires the ComfyUI plugin `hermes_minimax_h3_refkf`** (included in this pack, installed by `install.py`;
+   after installing, **restart ComfyUI**). Without it, it does not silently degrade; it throws a tensor shape mismatch in the sampler —
+   `doctor.py` checks this item for you first. The reason is written in the plugin's own docstring: upstream splits H3 into two task families, fl2va/ref2va,
+   but the DiT actually takes keyframes and references through the same condition-latent mechanism;
+   it is only that ComfyUI core, when both are present, overwrites the keyframe's latent and also puts it at the wrong time position.
+
+### 🎭 Character swap: follow a video's motion and replace the person in it (`--ref-video` + `--swap`)
+
+> **When the user wants a character swap, use the `recast` skill first; do not run the whole video directly with `--swap` here.** Measured 2026-10-28: one job with a generic description → the person facing away was not swapped, the whole clip was expressionless, and the first few frames after a cut were still the original character; recast writes a description per shot + automatically checks and re-rolls, and all 4 shots were swapped successfully.
+> Start with `"@@PY@@" "@@RECAST@@" plan "<video>"`. Below are the parameters recast uses under the hood; used alone they only suit small changes of "one shot, one person".
+
+Use this when the user gives **a video** and **a character image** and wants 「把影片裡的人換成這個角色」 (replace the person in the video with this character) or 「照這支影片的動作演」 (act out this video's motion).
+H3 re-enacts the video (called `Video 1` in the prompt): **pose, composition, background, camera work, and rhythm of motion follow the original frame by frame**,
+replacing only the specified person with the looks of the character image. **The output defaults to 720p, length = the whole video, audio = the original soundtrack** (frame-aligned).
+
+**How it achieves long clips + 720p**: the engine automatically detects the video's **cut points** and renders one segment per shot,
+each segment using **the corresponding segment of the original** as its reference (not chaining from the previous segment's last frame, so it does not drift more and more), then joins them back
+and applies the original audio. So **length is not limited by VRAM**, and there is no need to lower the resolution to fit into memory.
+
+**⚠️ The most important point: only one person can be swapped at a time.** (Measured 2026-10-27)
+To swap two people in the same frame, H3 swaps only one of them; swapping the second person on an output where one person was already swapped also **often fails**.
+So: **one `--swap` per person, and use `@start-end` (start-end, in seconds) to mark which shots this person appears in**.
+- People in different shots (most common) → each shot is rendered only once, fast and stable
+- Shots not covered by any `--swap` (e.g. empty scenes, crowds) → **the original footage is reused directly, costing no render time**
+- If a single shot really has two people who both need swapping → the engine runs that shot twice, but the second pass is not guaranteed to succeed; tell the user first
+
+**Three steps:**
+
+**1. Run `plan` first to get the shot list** (instant, no rendering; just give any `--swap` for now)
+```
+"@@PY@@" "@@VIDGEN@@" plan --ref-video "C:/path/clip.mp4" --swap "the man=C:/path/bob.png" --steps 8
+```
+The returned `chunks` is the shot list (`start`-`end` in seconds), and `cuts` are the detected cut points.
+Read the list to the user (e.g. 「0-3.6 秒、3.6-8.7 秒、8.7-11.3 秒、11.3-13.7 秒」),
+and **ask them which segments each person appears in** — you cannot see the video content; do not guess.
+
+**2. One `--swap "who=image@start-end"` per person (who=image@start-end), then submit**
+```
+"@@PY@@" "@@VIDGEN@@" r2v "Keep the dance club atmosphere and lighting." ^
+  --ref-video "C:/path/clip.mp4" ^
+  --swap "the long-haired man in the blue shirt=C:/path/bob_face.png@0-8.6" ^
+  --swap "the young woman in the cap and white apron=C:/path/alice_face.png@8.6-" ^
+  --steps 8 --wait
+```
+- **`who`**: write in English the features by which this person can be recognized **in the original video** (position, clothes, hairstyle), for example
+  `the man on the left`, `the woman in the red robe`. **Not** what the person in the character image looks like.
+- **`image`**: the character image; for several images of the same person separate them with `|` (up to 9). **First crop to head-and-shoulders with `gen.py crop`**
+  (see below; this also prevents the clothes from being swapped).
+- **`@start-end`**: seconds; you can write only one side, e.g. `@8.6-` (8.6 seconds to the end), `@-5` (start to 5 seconds).
+  If a shot is covered more than half by a range, that shot swaps this person.
+- **The prompt can be left empty `""`**: the engine writes the swap instruction; your prompt is appended after it as extra detail (atmosphere, lighting).
+
+**3. When done, report `file`** (the 720p output, with the original audio applied). `swap_passes` lists who was swapped in each shot.
+
+**Options:**
+| Option | Default | Description |
+|---|---|---|
+| `--short` | **720** | Defaults to 720 when `--ref-video` is present; for higher use `--short 768`. H3's canvas must align to 32, so 720 is rendered at 704 first and then upscaled to 720 |
+| `--ref-video-audio` | `original` | `original` = apply the original soundtrack (memes and dance clips must use this); `generate` = H3 dubs it itself (it breaks at every shot); `reference` = also give the original audio to H3 as a reference |
+| `--ref-video-size` | 384 | The short side the reference video is scaled to. When blocked by VRAM lower it to 256; do not raise it |
+| `--ref-video-start` / `--seconds` | Whole video | Use only when you want just a part of it |
+| `--steps` | 20 | **8** is enough for character swap (all measurements used 8 steps) |
+| `--easycache` / `--no-easycache` | 0.2 (on) | Step cache, about 21% faster; the plan line says `EasyCache 0.20`, and `no cache` when turned off |
+
+**Time and memory (measured baseline, RTX 5080 16GB, LLM resident):** at 720p each segment's activation is about 4~5 GB,
+well below the available 7.4 GB; time is roughly "each second of output ≈ 1.5~2 minutes" (a 13.7-second clip, 4 shots each swapped once ≈ 24 minutes).
+**Always run `plan` first and tell the user the `~N min` before submitting.**
+
+**Measured key points (tell the user up front, so they don't think it is broken):**
+
+| Symptom | Cause / what to do |
+|---|---|
+| The character's **clothes are swapped to the clothes in the character image too** | If the character image shows clothes, H3 swaps them as well (writing "keep the clothes" in the prompt cannot stop it). **To keep the original clothes, first crop the character image to head-and-shoulders with `gen.py crop`** |
+| Occasionally some features of the original character remain (e.g. a lock of the original hair) | Known H3 flaw; re-render with a different `--seed` |
+| The person's looks differ slightly at the boundary between shots | Each shot is rendered separately; the original already cuts there, so it is usually not noticeable |
+| The second person in the same shot was not swapped | The one-person-at-a-time limit. Split into different time ranges if possible; if not, explain it clearly first |
+
+**Without `--swap`** (only one person, and you want to write the prompt yourself): `--ref <image>` + the prompt must mention
+`Video 1` (e.g. `"Replace the woman in Video 1 with the woman from Picture 1, keeping Video 1's motion and camera"`),
+otherwise it is blocked. On this path multiple `--ref` are treated as different angles of **the same person**.
+
+### 😐 What to do when the output "face doesn't look like the real person" (compiled from 2026-08-14 measurements)
+
+Writing Picture 1/2 only guarantees H3 **is looking at** your images, not that it **sees them clearly**. A face that doesn't match is almost always one of the four things below,
+in order of return on effort; **item 1 matters most and is free**:
+
+**1. First crop the reference image to a head-and-shoulders close-up — this is the biggest step, and it costs nothing extra.**
+H3 defaults to `ref_image_size=match`, which scales every reference image **to the same pixel area as the output frame**. So a full-body portrait phone photo
+gets scaled to mush:
+
+| Reference image | When fed to the model | Face height | Reference tokens |
+|---|---|---|---|
+| 3213×5712 full body → 608p | 608×1056 | **62 px** | 2,508 |
+| 3213×5712 full body → 768p | 768×1344 | **78 px** | 4,032 |
+| Same image cropped to 1200×1500 head-and-shoulders → 608p | 704×896 | **191 px** | 2,464 |
+
+**Same cost, a face 3× larger.** A 60–80 px face cannot reproduce anyone.
+Cropping rules: keep only head + shoulders, the face should take up 1/3 of the frame or more, and no second person in the background (H3 gets confused about who Picture N is).
+
+**Crop with `gen.py crop`; do not write your own PowerShell or PIL.** (Hit in practice: the agent tried `Get-Image`,
+a cmdlet that does not exist, was blocked by the security layer, then hand-rolled PIL in execute_code and had it eaten by path escaping.)
+`--rect` is **a fraction of the original image**, not pixels, so you can glance at the image with vision first, judge which region the face is in, and go;
+the same numbers hold for both the thumbnail and the original file:
+```
+"@@PY@@" "@@VIDGEN@@" crop "<original image>" --rect 0.02,0.02,0.30,0.42        # x,y,width,height (0~1)
+  -> {"ok":true,"file":"...\out\<name>_crop.jpg"}          # use this path as --ref
+```
+The returned `size` / `source_size` are the cropped dimensions; **do not open a separate script to measure them**.
+A crooked crop is worse than no crop, so after cropping **take a look**: if `vision_analyze` is available use it; **if not, report the path to the user for confirmation and move on**.
+Do not use `imggen` to look at images (it only generates images, it cannot read them), and do not write a temp script for this — in practice one round, to look at one cropped image,
+tried imggen, a one-line PIL, a /tmp script, and ls in a row, burning six calls, while `crop`'s return already contained `size`.
+(Hit in practice: the agent cropped correctly, but to print the width and height it went off to write a python script in /tmp, and then hit `python` pointing to the Windows Store stub.)
+
+**2. Check whether the prompt has words that "grow face-covering props".**
+The model reads these words as **costume** rather than action; hit in practice:
+- `fencing` → a fencing mask, the whole face sealed in
+- `warrior` / `martial arts` / `battle` / `armor` → Ming-dynasty armor + red-tasseled helmet + cheek guards
+Use neutral verbs instead: `spar`, `cross swords`, `duel`, `flowing silk robes`.
+Then **positive description first, negative as a follow-up**:
+`heads completely bare and uncovered` + `no helmet, no mask, no face guard, no hood`.
+
+**3. Bring the camera closer, and this matters as much as removing the helmet — but it only applies when "no start frame is pinned".**
+Two people fighting full-body in frame, at 864×480 each face is only 60–70 px; no amount of reference-image tuning helps.
+With plain `r2v` (no `--image` passed) you must write: `medium close shot at eye level, faces large and sharp in frame`.
+
+> ⛔ **If you passed `--image`, do not write this sentence.** "Pin frame 0" and "push the camera in" directly conflict,
+> and **push-in wins**: measured 2026-09-10, the same shot with only the camera-pinning sentence added → frame0 diff 7.06 (a pixel-by-pixel match);
+> keeping that sentence and adding `medium close shot at eye level, faces large and sharp in frame`
+> → frame0 diff **47–58**, the start frame did not appear at all.
+> This trap is especially easy to fall into, because it is this very tip: the user says "the face doesn't look right", you add close-up language per this tip,
+> and break the start frame that was nicely anchored in the previous round. **`gen.py` now blocks prompts that contain both.**
+>
+> With a pinned start frame and wanting a better face match, the right approach is:
+> 1. **Crop the reference images** (item 1 above, free and the biggest effect)
+> 2. **Switch to a start frame that is itself a close shot** — if you want a close-up, start from a close-up
+> 3. If you really need H3 to reframe by itself, do not pass `--image` (use plain `r2v` instead), or explicitly add `--allow-recut`
+
+**4. Write an appearance anchor, to make verification easy afterwards.**
+Pick a distinct feature in the reference image and write it into the prompt (round glasses, a blue printed shirt, a suit and tie). If the output has that feature
+= the reference image really took effect; this is the easiest check.
+
+**`--ref-image-size max` is a last resort, not a first resort.**
+`max` keeps a 2048 short side (best recognizability), but the reference tokens go through every sampling step, so it **costs VRAM and time**:
+one 3213×5712 original image under max is **34,144 tokens**, and the single-segment limit at 608p drops from 15.79 s to 13.67 s.
+Crop first; if after cropping you still want a closer match, then add max (a cropped image under max needs only 12,104 tokens, limit 15.08 s).
+The planner already counts this cost into `act`; you can see `refs max: N tokens` in the plan string.
+
+**Fixed properties of H3 (do not try to override them)**:
+- fps is always **24** (`--fps` has no effect on H3)
+- Length snaps to a **17k+5** frame grid, so "5 seconds" actually gives 124 frames ≈ 5.17 seconds; **this is normal, not a bug**
+- The native training resolution is `--short 768` (1344×768); 480 is only 40% of native, and the image is noticeably blurrier.
+  **If the user complains the quality is blurry → raise `--short` to 768**, at the cost of being much slower.
+- There must be at least one `--ref`; H3 cannot generate from text alone (`t2v --tier h3` is blocked)
+
+### Long clips: always a single segment, never chain
+
+**H3 cuts by itself within a single segment.** A measured 25-second single-segment output went "wide shot with blocking → medium shot → handbag close-up → back view",
+with the person and clothes consistent throughout. So long clips do not need chaining; **a single segment is the finished product**.
+
+**Longest single segment per resolution (measured, with the resident LLM occupying 7GB):**
+
+> ⚠️ **The table below was measured on an RTX 5080 Laptop 16GB + 32GB RAM**, assuming the resident LLM occupies 7GB VRAM
+> (`VIDGEN_LLM_VRAM_BUDGET`). On another machine the numbers differ — **more VRAM allows longer, less allows shorter**.
+> So **always go by `plan`'s live report**; this table is only an order-of-magnitude reference. `gen.py` itself blocks lengths that do not fit the current headroom,
+> and will not force-run according to this table.
+>
+> **This is GPU-vendor neutral.** The engine asks only one thing: "how much of this card is already occupied, and how much is left";
+> only what is left goes to video. **Vendor tools first; only if none exist, ask a service API**: `VIDGEN_GPU_QUERY_CMD` (custom)
+> → `nvidia-smi` → `intel-ze` (Intel Level Zero) → `xpu-smi` (Intel CLI) → `rocm-smi` (AMD)
+> → ComfyUI's `/system_stats` → TRUSTA-AST's `/system/resources`.
+> So non-NVIDIA accelerators take the same path, and **you don't need to change how you use it**;
+> the `budget` reported by `plan` is what was actually measured that time.
+
+| `--short` | Resolution | Longest single segment | Frames | Measured time |
+|---|---|---|---|---|
+| 480 | 864×480 | **25.00 s** | 600 | 45 min |
+| 576 | 1024×576 | **17.21 s** | 413 | 43 min |
+| 608 | 1056×608 | **15.79 s** | 379 | 43 min |
+| 720 | 1280×704 | **11.54 s** | 277 | 45 min |
+| 768 | 1344×768 | **10.12 s** | 243 | 46 min |
+
+The limit comes from VRAM (the activation does not fit), not time. **For longer, lower `--short`** — that is the only trade-off.
+
+**When the limit is exceeded, `gen.py` blocks it and tells you what to do**; just do what it says. Three options:
+1. Shorten to that resolution's single-segment limit
+2. Lower `--short` (the error message has already computed which resolution fits the length you want)
+3. Really need longer → **split into several independent `r2v` calls, each one must pass `--ref`**, then join them at the end.
+   **Giving the reference images again for every segment is the key**: that way each segment re-aligns to your character, rather than to the previous segment's already-drifted frames.
+
+**Why not chain automatically**: the engine feeds `--ref` only to **the first segment** (ref2va); later segments continue from the previous segment's last frame
+(fl2va), with no reference image at all. So chaining necessarily drifts more with every segment, and if one segment in the middle collapses, everything after it is ruined.
+Automatic chaining is off by default (maintainers can restore it with `VIDGEN_H3_ALLOW_CHAIN=1`).
+
+**Flow**: first `plan` to see the headroom → report the summary to the user (say "about N minutes") → submit once with `--wait`, and when you get
+`{"ok":true,"file":"<absolute path>","seconds":<elapsed>}` report the path. `ok:false` means it refused (it would endanger the LLM or
+the OS); handle it per `error`. While waiting, **do not disturb the LLM again** — that is exactly why `--wait` exists.
+
+## ⭐ Making cartoon / stylized video = two-step (best practice)
+This machine **has no usable pure text-to-video path** (`t2v` outputs noise and is blocked), so any request without a start image goes this way.
+For an animation in a **cartoon/illustration/specific style**, first use the `imggen` skill
+to generate a **start image** in that style, then use `vidgen i2v` to make it move — the whole clip keeps that style:
+```
+# 1) First generate the cartoon still (imggen skill, fast, uses little VRAM)
+"@@PY@@" "@@IMGGEN@@" zimage "cartoon cat and dog fighting, dynamic pose, thick black outlines, flat 2D, vibrant"
+#    -> returns {"status":"ok","outputs":["...\\z_image_00013_.png"]}  # take this path as --image for the next step
+# 2) Then make it move (vidgen i2v, using the image above as the start frame)
+"@@PY@@" "@@VIDGEN@@" i2v "cartoon cat and dog playfully fighting, fast bouncing action, dust puffs, lively motion" \
+       --image "@@OUT@@/z_image_00013_.png" --seconds 5 --fast
+```
+Measured: this path produces a clean, consistent 5-second cartoon animation. **Realistic subjects are exactly the same** — just use `realvis`/`flux`/`qwen` in the first step
+to generate a realistic still (or use the user's photo directly), then go through `i2v`. **There is no situation where `t2v` should be used.**
+
+## Memory reality (important; decides how long you can generate)
+A large LLM (Qwen3.5-35B-A3B) is resident on the same machine, and `gen.py` protects it:
+- **VRAM is the "length limit"** — the activation (latent) **cannot** be offloaded and must be in VRAM.
+  Free VRAM ≈ 7GB → can generate a full 5 seconds (480p/81 frames); less means shorter (the planner automatically reduces the frame count and states it in `plan`).
+- **Weights go via SSD** — GGUF weights are mmap'd from SSD; under pressure they fall back to disk (slow but safe), **they don't pin RAM and don't touch the LLM**.
+  So as long as VRAM is enough and RAM has ~1.5GB for buffering, it can slowly finish even when RAM is very tight.
+- **"Available RAM" is not the number Windows reports** — if the LLM was loaded with mmap, the weights in its working set are clean
+  file-backed pages that the OS can drop at any time and re-read from the GGUF later. The planner counts this part as available (`llm_reclaimable_gb`),
+  which is also why fp16 `--tier 5b` may still be allowed while the LLM is resident. If the LLM was started with `--no-mmap`, those are dirty
+  private pages, and the planner automatically counts them as 0 (dropping them requires writing the pagefile), so it refuses fp16 as before — **this decision is automatic; you don't need to configure it**.
+- **"When" those pages are actually handed over**: only after ComfyUI confirms rendering has started does the engine actively call `EmptyWorkingSet`
+  to return them to the OS (rather than waiting for the OS to reclaim them slowly under pressure). **Before that the LLM loses not a single page**, so if the launch fails or
+  is refused, you lose nothing. After the release your inference becomes slower (weights must be re-read from SSD); this is expected behavior,
+  and it is exactly why you **should not send more prompts** during rendering (see "How to wrap up after submitting" above).
+- If `plan`/generation returns `ok:false` (refused): the current headroom would endanger the LLM. **Handle it per the error message** —
+  usually "shorten `--seconds` / lower `--short`", or ask the user to **free up VRAM** (reduce the LLM's GPU usage).
+  **Do not** change the protection parameters just to force it through.
+
+**Seesaw reminder**: moving the LLM from GPU to RAM frees VRAM but eats RAM; and vice versa. The smoothest state is
+the LLM idle with ~7GB of VRAM free. Always run `plan` first and report the feasible length to the user based on the current state.
+
+**The LLM's VRAM allowance is "reserved up front"**: the planner always reserves `VIDGEN_LLM_VRAM_BUDGET` for the 35B (default **7.0 GB**),
+even if the LLM is not loaded at the moment. This is deliberate — otherwise memory used while the LLM is away would crush it when it comes back.
+Using the reference machine (16 GB card) as an example: after subtracting the 7 GB allowance and the 1.5 GB margin, **about 7.5 GB is available for video**, and H3's planning is based on that.
+**This allowance must be reset when changing machines**: change `VIDGEN_LLM_VRAM_BUDGET` in `hermes-comfy.conf` to the VRAM your resident
+LLM actually occupies (with no resident LLM set it to 0, giving the whole card to video).
+
+**H3's cost is completely different from Wan's**: memory grows **linearly** with the number of latent tokens, but time grows **quadratically**
+(08-13 calibration: exponent about 1.33 in the low range, about 1.70 in the high range). Long clips will not OOM; **VRAM is the hard length limit** —
+beyond it the request is blocked with a suggestion to lower `--short` or switch to multiple independent calls; it will not secretly split into segments.
+**Note that `plan`'s `~N min` under-reports near the limit** (at the extreme it estimated about 18 min, actually about 45 min);
+when reporting to the user, saying "up to about 45 minutes" is safer.
+
+## Examples
+```
+"@@PY@@" "@@VIDGEN@@" plan                                   # how long can it be right now?
+"@@PY@@" "@@VIDGEN@@" i2v "slow dolly-in, gentle wind" --image "C:/x.png" --seconds 3
+# Pure-text request (no start image) = two-step, not t2v:
+"@@PY@@" "@@IMGGEN@@" realvis "a red fox standing in deep snow, side view"
+#   -> {"status":"ok","outputs":["...\\realvisxl_00012_.png"]}  # use this path as --image
+"@@PY@@" "@@VIDGEN@@" i2v "the fox trots forward through the snow" --image "...\\realvisxl_00012_.png" --seconds 3
+"@@PY@@" "@@VIDGEN@@" i2v "waves crashing, slow motion" --image "C:/x.png" --quality --seconds 3   # finer, slower
+
+# With sound, and starting to move from this image itself (MiniMax-H3 fl2va)
+"@@PY@@" "@@VIDGEN@@" i2v "she slowly turns to the camera, petals falling" --image "C:/girl.png" --tier h3 --seconds 5 --wait
+"@@PY@@" "@@VIDGEN@@" i2v "the camera pushes in as day turns to dusk" --image "C:/day.png" --last-frame "C:/dusk.png" --seconds 5 --wait
+
+# Multiple reference characters + a specified frame 0 (the opening composition is not scrambled)
+"@@PY@@" "@@VIDGEN@@" r2v "the woman from Picture 1 greets the man from Picture 2" --ref "C:/a.png" --ref "C:/b.png" --image "C:/opening.png" --seconds 5 --wait
+
+# With sound + specified characters (MiniMax-H3)
+"@@PY@@" "@@VIDGEN@@" r2v "she waves at the camera under falling petals" --ref "C:/girl.png" --seconds 5 --wait
+"@@PY@@" "@@VIDGEN@@" r2v "the woman from Picture 1 greets the man from Picture 2" --ref "C:/a.png" --ref "C:/b.png" --seconds 5 --wait
+"@@PY@@" "@@VIDGEN@@" r2v "cinematic chase scene" --ref "C:/hero.png" --seconds 15 --short 608 --wait   # 15-second single segment (768 only reaches 10.12 s)
+
+# Character swap: replace the people following the video's motion (run plan first for the shot list; one --swap per person with a time range; default 720p + original audio)
+"@@PY@@" "@@VIDGEN@@" plan --ref-video "C:/clip.mp4" --swap "the man on the left=C:/bob.png" --steps 8   # first get the shot list and timings
+"@@PY@@" "@@VIDGEN@@" r2v "" --ref-video "C:/clip.mp4" --swap "the man on the left=C:/bob.png@0-8.6" --swap "the woman on the right=C:/alice.png@8.6-" --steps 8 --wait
+```
+
+## Rules
+1. **You don't need to pick the seed yourself**; it is random by default; pass `--seed` only to reproduce.
+2. Given an image to animate → `i2v` (**for sound add `--tier h3`**); **no image given → first generate a start image with imggen,
+   then `i2v` (see above), never `t2v`**. Given a **video** to replace a person → `r2v --ref-video … --swap …`,
+   **one `--swap` per person, with `@start-end` (start-end) marking the shots they appear in** (only one person can be swapped at a time).
+   If unsure, run `plan` first.
+3. For speed `--fast`, for detail `--quality`; by default auto judges by the headroom.
+4. To change the underlying model/VAE/LoRA/memory parameters → edit `@@ENGINE@@/` (`memplan.py`,
+   `workflows\`), not here. The engine is in `@@ENGINE@@/video_gen.py`+`memplan.py`.
+
+## Output and advanced
+- Output: `@@COMFY_OUTPUT@@\wan14b_0000N_.mp4` (mp4/h264).
+- **Adaptive RAM margin**: the RAM margin that protects the LLM is decided automatically before every run based on the RAM available at that moment
+  (free≥12GB→6, 6–12→3, <6→1; 2.5 when the LLM is mlocked). Set `VIDGEN_RAM_MARGIN=<GB>` to override only if you want a fixed value.
+- Advanced knobs (env, normally left alone; for humans to tune, not for the model): `VIDGEN_VRAM_MARGIN` (default 1.5),
+  `VIDGEN_SSD_MIN_FREE_RAM` (0.6), `VIDGEN_SSD_INCR_RAM` (1.0), `VIDGEN_LLM_MLOCK` (0),
+  `VIDGEN_RAM_MARGIN` (unset = adaptive).
+- If **the LLM's VRAM usage has been adjusted**, ComfyUI's reserve becomes stale → rerun
+  `"@@PY@@" "@@ENGINE@@/start_comfy.py"` once (close the old one first) so it re-measures.
+
+## Advanced: what to do when RAM is short
+The planner already counts the resident LLM's droppable mmap weights as available memory, so "RAM looks like only 2 GB left" is usually no longer a problem.
+When it really is refused, handle it in this order:
+1. **See what `error` says** — it tells you directly whether VRAM (the activation does not fit) or RAM (fp16 weights) is short.
+2. **VRAM short** → shrink `--seconds`, lower `--short`, or ask the user to move the LLM off the GPU.
+3. **RAM short and the LLM's weights were not loaded via mmap** → those pages cannot be dropped (they would need writing to the pagefile).
+   Switch to `--tier 14b` (GGUF), or suggest the user have the backend reload the model with mmap.
+4. **Knobs for humans to tune** (the model must not set them on its own): `VIDGEN_LLM_RECLAIM=off` returns to the conservative mode that neither counts reclaimable memory
+   nor releases anything at all; `VIDGEN_OS_FLOOR` (default 1.5 GB) is the floor reserved for the operating system.
+   (`=release` is an old value, now the same as the default `auto`. Its original "release before measuring" meaning **has been removed** —
+   that would throw away your own weights before ComfyUI was even up; see Iron Rule 0.)
+
+## Related documents
+- [`references/traps-and-misuse.md`](references/traps-and-misuse.md) - Common misuse and traps, including the consequences of misusing internal tools and the right way to do it

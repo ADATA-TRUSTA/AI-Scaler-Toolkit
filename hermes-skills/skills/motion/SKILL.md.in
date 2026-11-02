@@ -1,0 +1,138 @@
+---
+name: motion
+description: Make an explainer / promo animation out of screenshots and photos by writing code — pan and zoom over a product's real UI, rows of a table appearing one by one, values outlined, a QR code being scanned, panels cut from the screen, sound effects — with every letter on screen staying the original image's pixels. Use when the user says things like 「把這張截圖做成動畫」(animate this screenshot)、「做一段產品功能介紹影片」(make a feature walkthrough video)、「宣傳片」(promo video)、「操作示範動畫」(UI demo animation)、「讓表格一列一列出現」(make the table rows appear one by one)、「把這個數字框起來再推近」(outline this number and zoom in). For people or scenes that have to MOVE realistically, generate those shots with vidgen and combine them here.
+metadata:
+  hermes:
+    tags: [motion-graphics, explainer-video, screenshot-animation, promo, ui-demo, ocr, qr]
+    category: creative
+---
+
+# motion — screenshots and photos → explainer animation, by code
+
+**Always reply to the user in Traditional Chinese (zh-Hant).** These instructions are in English; the user speaks Chinese.
+
+You write one short Python script per **5-second segment**, on the library in `@@MOTIONLIB@@`. The library
+does the hard parts: finding things on the image by their content, mapping coordinates, hiding and
+revealing, outlines and light effects, writing a spec-checked video with sound. Your script only
+describes the **timeline**. No GPU and no ComfyUI are involved.
+
+## 🔒 The rule that makes this usable: every letter is the original pixels
+
+A product video that shows a wrong number is worse than no video. So:
+
+1. Text and numbers on screen are **always the original image's pixels** — scaled, panned, cropped,
+   brightened, but **never re-typed in a font and never drawn by an AI model**.
+2. Animation is only: **hide** (paint a region with its own background colour) then **reveal** the original
+   pixels; move / zoom / fade / blur transitions; and **light added on top** (outlines, translucent bands,
+   scan bands, corner brackets) that never hides what it marks.
+3. A panel built from some columns of a table takes **whole rows at the same y-range** — a value must
+   never end up next to another row's name. Only whole columns or truly empty space may be dropped.
+4. Never compute or invent a number that is not on the image.
+
+## Commands
+
+```
+"@@MOTIONPY@@" "@@MOTION@@" check                                   # dependencies + ffmpeg
+"@@MOTIONPY@@" "@@MOTION@@" new "<project dir>" --image "<screenshot>" --find-text "<a label on it>"
+"@@MOTIONPY@@" "<project dir>/segment_01.py"                         # render that segment
+"@@MOTIONPY@@" "@@MOTION@@" sheet "<project dir>/out/segment_01.mp4"  # 10-frame contact sheet to look at
+"@@MOTIONPY@@" "@@MOTION@@" sample-ui "<out.png>"                     # a synthetic admin screen to practise on
+```
+
+**Always run scripts with `@@MOTIONPY@@`** — it is the interpreter that has the OCR and barcode packages.
+Never install packages into Hermes's own venv and never `pip install` anything: if `check` reports
+something missing, tell the user to re-run the installer.
+
+`new` writes a **working** 5-second segment (rows appear → the `--find-text` label is outlined → push in);
+run it once first, then change it. Output: `out/segment_01.mp4` (1280x720, 24 fps, exactly 120 frames,
+H.264 + AAC 48 kHz stereo, spec-checked) and `out/segment_01.wav`.
+
+## How a segment script looks
+
+```python
+import sys; sys.path.insert(0, r"@@MOTIONLIB@@")
+import numpy as np
+from PIL import Image
+import locate, reveal, overlay
+from stage import Stage, ease_box
+from segment import render_segment
+
+img = np.array(Image.open(r"<screenshot>").convert("RGB"))
+stg = Stage(img); full = stg.full_box()
+tbl = locate.find_table(img)                      # header, rows, column x, white box
+rows = [tuple(r) for r in tbl["rows"]]
+hidden = reveal.hide(img, rows)                    # blank every row with its own background
+target = locate.find_text_rect(img, "Total 12 items")["rect"]
+zoom = stg.box_around(target, margin=0.35)
+
+def frame_fn(t):                                   # t in seconds, returns a 1280x720 RGB frame
+    lay = reveal.reveal_rows(hidden, img, rows, t, t0=0.4, per_row=0.16, fade=0.2)
+    if t >= 2.6:
+        overlay.outline(lay, target, (255, 140, 0), width=3)
+    box = ease_box(full, zoom, float(np.clip((t - 3.4) / 1.0, 0, 1)))
+    return stg.render(lay, box)[0]
+
+render_segment(frame_fn, r"<project>/out/segment_01", sounds=[(0.3, "swoosh", {}), (2.6, "beep", {})])
+```
+
+**One coordinate system only: pixels of the original image.** Draw every outline/band on the
+original-size layer, then `stg.render(layer, box)` — effects then follow any zoom by themselves.
+
+## Library (all inputs are original-image coordinates)
+
+| Module | Use |
+|---|---|
+| `stage` | `Stage(img)` trims a white top margin and fits the image into 16:9 (`full_box()`; never crops left/right — that cuts columns; a portrait image gets blurred side fill). `box_around(rect, margin)` = 16:9 view around a rect. `render(layer, box) -> (frame, mapper)`; `mapper.pt/rect` map to frame coordinates. `ease_box(a, b, t)` smooth push-in / pull-out |
+| `locate` | Find by **content**: `find_text_rect(arr, "text")` (OCR; `rect` = the matched text's ink box), `ocr_find_all(arr)` (every text line), `find_field_right_of(arr, "Label")` (the input box right of a label), `find_table(arr)` (header / rows incl. a half-cut last row / column x / white box — built for full-width admin tables with a grey header band; for other layouts use OCR lines), `find_codes(arr)` (QR / DataMatrix with their **content**) |
+| `reveal` | `hide(img, rects)` paints each rect with the median colour around it; `reveal_ltr(hidden, orig, rect, progress, steps=None)` left-to-right, `steps=len(text)` jumps per character; `reveal_rows(hidden, orig, rows, t, t0, per_row, fade)` rows fade in top to bottom; `assert_hidden` / `assert_revealed` for checks |
+| `overlay` | `outline(layer, rect, color, width=3, glow=True)` (lines only, never filled), `column_band`, `scan_band`, `aim(layer, rect, 'search'/'ok', t)` (corner brackets, red then green), `lower_third(frame, tag, text, ...)` (only when the user asks for captions) |
+| `panel` | `make_panel(orig, col_ranges, header_rect, row_rects)` cuts chosen columns, row-aligned, into a white rounded card; `paste_panel(frame, panel, xy, alpha, slide, rows_visible)` |
+| `compose` | for AI shots from vidgen: `fit_clip` (1280x704 → 1280x720 by stretching, never padding), `restore_outside(ai, orig, mask)`, `skin_mask` (keep only a hand the AI added, restore the UI it redrew), `retime`, `cutout`, `clean_plate`, `portrait_in_16x9`, `matte` (needs the optional rembg) |
+| `fx` | blur transitions, fades, `fade_to_color` |
+| `segment` | `render_segment(frame_fn, out_stem, seconds=5.0, fps=24, sounds=[(t, kind, kwargs)])` — kinds `beep` `tick` `swoosh` `chime`; raises on any spec violation. `assemble(segments, ending, out_path, expected_frames)` joins segments (+ an untouched end card) and checks the total frame count |
+| `verify` | `frame_difference`, `check_solid_color`, `create_frame_collage`, `verify_output_specs` |
+
+## Locating: OCR and barcode detection, never vision coordinates
+
+- **Never ask vision for a coordinate or a box.** It can say *what* is in a picture, not *where* in
+  pixels (the picture it sees is usually downscaled). Use vision only for yes/no questions on a crop,
+  at most twice per segment, ~30 s each.
+- Text positions come from OCR by **content** (`find_text_rect`). Barcode positions come from
+  `find_codes`, whose decoded content proves the box is right.
+- Sanity-check every box (a one-line serial number is not 600 px wide; a QR code is square). If a box is
+  implausible, measure again — do not invent a reason or a number.
+- Hide with the region's real background colour (a white input, a grey window and a pale-blue header
+  differ). Start **every** frame — the opening wide shot included — from the hidden base image.
+- A column panel: take each column between two separator lines, inset 3 px, and check that its left and
+  right edges are blank on every row; otherwise it cuts the neighbouring column's text.
+- After drawing an outline, OCR inside it and confirm the text is still readable.
+
+## Working rhythm (measured: these are what made earlier runs fail)
+
+1. **Output a first version early.** Within the first ~10 minutes of a segment there must be an
+   `out/segment_XX.mp4`, even a plain one. Then improve in small steps.
+2. **Do not announce and stop.** Until the video exists, every step is a tool call. A reply that is
+   only text ends your turn, and the video never gets made.
+3. **One measurement script at most**; positions come from the library, not from scanning pixels by hand.
+4. Before writing a segment, turn the request into 3–6 **checks a program can verify**; after rendering,
+   verify each (OCR inside outlines, frame count, the final frame matching the original where nothing
+   was added), then look at `sheet` once.
+5. If the library is missing something, add it to the script; do not rewrite what the library has.
+6. Copying a number into your reply: check it against the image again (a part number was once reported
+   as a day count).
+
+## Several segments, transitions, AI shots
+
+- 0.3–0.5 s blur or fade transitions between segments; the last one fades to the end card's first-frame colour.
+- People, hands, objects moving in a real scene: make those shots with **vidgen** (`i2v --tier h3` keeps
+  the start frame and adds sound), then bring them in with `compose` (`fit_clip`, `skin_mask`,
+  `restore_outside` so the UI the AI redrew is replaced by the original pixels).
+- Join with `segment.assemble`; it copies the end card untouched and checks the total frame count.
+
+## Output and delivery
+
+- Each segment: 1280x720, 24 fps, 5.0 s (120 frames), H.264 yuv420p + AAC 48 kHz stereo; light synthetic
+  sound effects only (no narration, no music) unless the user asks.
+- Report: the video path(s), what each segment shows, the checks and their results, and the contact sheet path.
+- When the user asks for a change ("框改成綠色", "推近慢一點", "第 3 列先出現"), edit that segment's
+  timeline and render only that segment again.

@@ -1,0 +1,176 @@
+# vidgen common traps and misuse
+
+## ❌ Mistake: using internal tools directly
+
+### Wrong way
+```bash
+# Never do this!
+"@@PY@@" "@@ENGINE@@/video_gen.py" run "..."
+"@@PY@@" "@@ENGINE@@/run_workflow.py" --workflow "..."
+```
+
+### Why not?
+1. **No memory protection**: `video_gen.py` lacks the full plan stage and cannot measure the current VRAM/RAM headroom
+2. **May crush the LLM**: the 35B LLM resident on the same machine gets pushed out for lack of memory, making inference slow or failing
+3. **No automatic offload strategy**: it cannot intelligently decide which tier (SSD/DRAM/VRAM) the weights go in
+4. **Too many parameters to set by hand**: users easily set them wrong
+
+### ✅ Right way
+Only use the skill's `gen.py`:
+```bash
+"@@PY@@" "@@VIDGEN@@" plan
+"@@PY@@" "@@VIDGEN@@" i2v "<prompt>" --image "<image>" --wait
+```
+
+---
+
+## ❌ Mistake: starting ComfyUI by hand
+
+### Wrong way
+```bash
+# Do not start ComfyUI directly
+"@@COMFY_PY@@" "@@ENGINE@@/start_comfy.py"
+```
+
+### Why not?
+1. **Duplicate launch**: ComfyUI may already be running; launching it again will fail
+2. **Memory settings overridden**: `start_comfy.py`'s `--reserve-vram` is computed dynamically from the current usage; a manual launch loses this protection
+3. **Not needed**: `gen.py` checks for and starts ComfyUI automatically
+
+### ✅ Right way
+No manual launch is needed at all. `gen.py` will:
+1. Check whether ComfyUI is running
+2. If not, start it automatically and wait until it is ready
+3. Set the correct `--reserve-vram`
+
+---
+
+## ❌ Mistake: "releasing the local LLM to free memory" before generating video
+
+### Wrong way
+```bash
+# All of the following is forbidden — this is cutting off your own hands
+taskkill /IM <inference process>.exe /F                    # shut down the LLM (<inference process> = inference process)
+curl -X POST http://127.0.0.1:8000/inference/force_cleanup_gpu   # also forbidden: restarts the worker
+export VIDGEN_LLM_RECLAIM=release                # trying to "release early" (old meaning removed)
+python -c "...EmptyWorkingSet..."                # clearing the working set yourself
+# and only then starting ComfyUI
+```
+
+### Why not?
+1. **The agent driving this flow is that LLM.** Once its weights are handed over, your next inference has to re-read about 10 GB
+   from SSD — before you have even submitted the video, you have made yourself slow or look frozen.
+2. **Getting the order backwards is pure loss.** If ComfyUI fails to start, or the planner refuses in preflight, the memory has already been thrown away,
+   and not a single frame of video was made.
+3. **Not needed.** When `gen.py` measures, it **already** counts the LLM's clean mmap pages as available memory
+   (`llm_reclaimable_gb`); you get that allowance without releasing it first.
+
+### ✅ Right way
+Do nothing. The engine's order is hard-coded:
+
+```
+start ComfyUI → submit prompt → confirm it appears in queue_running → only now release DRAM
+```
+
+`memplan.release_llm_dram()` is the only release point, and it **checks `/queue` itself**, not trusting the caller —
+the order cannot be written wrong. What it releases is `EmptyWorkingSet` (mmap'd weight pages); **the inference process keeps running, VRAM is untouched,
+the model is not unloaded**; the next inference just has to re-read from SSD. Which process to act on is learned by asking the AST backend, not a hard-coded name.
+
+When VRAM really is not enough, `gen.py` returns `ok:false` and tells you to shrink `--seconds` / lower `--short`. **Do that; do not touch the LLM.**
+
+---
+
+## ❌ Mistake: polling via the LLM while waiting
+
+### Wrong way
+```bash
+# Repeatedly checking ComfyUI status during video generation
+while ! curl -s http://127.0.0.1:8188/system_stats | grep -q "running"; do
+    sleep 5
+done
+```
+
+### Why not?
+1. **The LLM gets woken up**: every curl is a full LLM inference, waking the dormant LLM
+2. **Memory contention**: the LLM reloads 10+ GB of weights, competing with ComfyUI for memory and disk
+3. **Performance drop**: measured to make the whole render about 28% slower
+
+### ✅ Right way
+Use the `--wait` option; it will:
+1. Poll the ComfyUI API at the Python level
+2. **Not touch the LLM at all**
+3. Return the result directly once it finishes
+
+---
+
+## ✅ The correct workflow
+
+### 1. Check the headroom first
+```bash
+"@@PY@@" "@@VIDGEN@@" plan
+```
+
+### 2. Generate based on the result
+```bash
+# Adjust parameters based on the plan result
+"@@PY@@" "@@VIDGEN@@" i2v "<prompt>" --image "<image>" --wait --seconds 5
+```
+
+### 3. After submitting, notify the user immediately (especially important for asynchronous submits)
+
+As soon as rendering starts, the LLM's DRAM is handed over. The user cannot see this, so **the last line of your reply must say it**,
+and then stop and call no more tools. The notice the tool gives looks like this (it is Chinese data shown to the user as is):
+
+> ⚠️ ComfyUI 正在算圖,本機 LLM 佔用的 DRAM 已交還給它。在這次算完之前,請不要再下任何
+> prompt 或指令 —— 每一次呼叫都會把 LLM 的權重從 SSD 重新讀回記憶體,不但那次回答會很慢,
+> 還會跟 ComfyUI 搶記憶體與磁碟,拖慢甚至弄壞這次算圖。算完我會回報輸出路徑。
+
+You don't need to write this yourself: the asynchronous JSON response has a `notice` field; copy it verbatim (in `--wait` mode it is printed on stderr).
+
+### 4. Get the result
+```json
+{
+  "ok": true,
+  "file": "@@COMFY_OUTPUT@@/wan14b_00030_.mp4",
+  "seconds": 142,
+  "note": "算圖已結束,記憶體已還給 LLM。下一次回答會慢一點(權重要從 SSD 重新載入),這是正常現象,不是當機。"
+}
+```
+
+---
+
+## Common misconceptions
+
+### Q: "Why is gen.py so slow?"
+A: Video generation itself takes time (from a few minutes to tens of minutes). `gen.py` being slow is normal; it waits for completion automatically.
+
+### Q: "Can I first generate a still with imggen and then make it move?"
+A: **Yes, and it is recommended!** This is the best way to make cartoon/stylized video. First generate a stylized start image with `imggen`, then use `vidgen i2v` to make it move.
+
+### Q: "Why is the output path named like `wan14b_00030_.mp4`?"
+A: That is ComfyUI's automatic numbering. Each generation increments the sequence number.
+
+### Q: "After rendering, my answers are especially slow — is something broken?"
+A: **Nothing is broken; this is expected behavior.** During rendering the LLM's weights were handed back to the OS, and the next inference has to re-read about 10 GB from SSD,
+so the first answer is noticeably slower, and after that it returns to normal. The `note` field in the returned JSON says exactly this;
+mention it when reporting the result, and the user won't think it has crashed.
+
+### Q: "Should I shut down the local LLM to free memory before generating video?"
+A: **No, not even once.** You are that LLM. The memory hand-off is done automatically by `gen.py` after it confirms rendering has really started,
+and it only releases the mmap'd DRAM pages — it does not kill the process and does not touch VRAM. See "Mistake: releasing the local LLM to free memory before generating video" above.
+
+---
+
+## Troubleshooting
+
+### "plan returns ok:false"
+- Cause: the current VRAM/RAM is not enough to generate the video
+- Fix: shorten `--seconds`, lower `--short`, or ask the user to free up memory
+
+### "ComfyUI not running"
+- Cause: ComfyUI was closed or has not been started yet
+- Fix: `gen.py` starts it automatically; no manual intervention needed
+
+### "RAM margin too small"
+- Cause: not enough system RAM
+- Fix: close other applications, or shorten the video

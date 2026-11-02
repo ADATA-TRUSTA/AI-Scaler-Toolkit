@@ -1,0 +1,227 @@
+---
+name: imggen
+description: Generate or modify images (text-to-image, image-to-image, image editing, multi-image compositing) with the local ComfyUI. Use it whenever a new image has to be produced:「生一張圖/照片」(make an image/photo),「畫一個…」(draw a…),「用某張圖改成…」(turn a given image into…),「幫角色換衣服/改手勢/改姿勢」(change a character's outfit / hand gesture / pose),「把人往左/右移」(move the person left/right),「把這些角色放進這張背景圖」(put these characters into this background image),「把 A 圖和 B 圖合成」(combine image A and image B). Always run this skill's gen.py; never write your own script, never cut out / paste / composite with PIL/numpy, and never call the ComfyUI API directly.
+metadata:
+  hermes:
+    tags: [image-generation, text-to-image, img2img, image-edit, outfit-change, comfyui, local, qwen-image-2.1, qwen-image, flux-schnell, z-image, realvisxl]
+    category: creative
+---
+
+# imggen — local image generation
+**Always reply to the user in Traditional Chinese (zh-Hant).** These instructions are in English; the user speaks Chinese.
+
+When generating images, **use only this skill's `gen.py`**. It automatically starts a memory-protected ComfyUI,
+applies a verified workflow, and returns the output file paths.
+
+## Iron rules (must follow)
+
+**The only legal image-generation action is running the line below.** Check it yourself before sending: if the command string does not
+contain the text `imggen/gen.py`, it is wrong — stop and use this instead:
+```
+"@@PY@@" "@@IMGGEN@@" <model> "<prompt>"
+```
+
+**Copy the line above exactly; do not "helpfully" rewrite the paths.** The absolute paths of the interpreter and `gen.py` were filled in at install time, and they
+always use **forward slashes** (Python on Windows accepts forward slashes too). Two pitfalls hit in real tests:
+
+- Hermes's terminal on Windows is bash, so the backslashes in `C:\Users\...` get eaten and it becomes `C:Users<you>...`.
+- A bare `python` on Windows hits the Microsoft Store stub (`Python was not found`); on Linux it may
+  point to the system python instead of the one that has the dependencies. That is why the line above **uses an absolute path even for the interpreter**.
+
+If you hit one of these, do not invent another workaround; just change the command to the form above and rerun it.
+
+**Run that line with the `terminal` tool; do not wrap it in `execute_code`.** Calling `gen.py` with `subprocess.run(...)` inside
+`execute_code` also counts as a detour: that sandbox is killed outright after 300 seconds, so `gen.py` gets killed before it can tell you
+"still rendering", and you get nothing back. Measured: because of this the model resubmitted four times with four different models, all four images queued up behind each other in
+ComfyUI, and not a single one reached the user.
+
+Everything below counts as a detour and is forbidden without exception — **every one of these has failed in real tests** (hand-written scripts crashed on their own, images got generated but nobody knew where they went,
+bypassing memory protection got the LLM resident on the same machine squeezed out):
+- Writing your own `.py`/`.json` file and running it (`gen_xxx.py`, `run_workflow.py` and the like). `run_workflow.py` **does not exist** on this machine; do not go looking for it.
+- Using `execute_code` to build a workflow dict in memory and submit it
+- Using `urllib`/`requests` to call `/prompt` or `/history` on `127.0.0.1:8188`
+- Running `comfy launch` yourself, filling in `filename_prefix` yourself, or picking checkpoint/VAE/CLIP file names yourself
+- Using `computer_use` to click around ComfyUI's web interface
+- Using PIL/numpy/OpenCV to cut out, paste and layer images yourself to "composite" characters and a background (measured: red hair was removed as background, people floated in mid-air, and hand gestures could not be changed at all). Compositing, background swaps and putting several characters in one frame always use `qwen21_edit`, with the background as the first `--ref`
+- Reading "fast mode" as something else: the `qwen21` family **is turbo (fast) by default**; add `--no-turbo` only when the user asks for "highest quality / take your time"
+
+**When `gen.py` fails, detours are even more forbidden.** The correct response has only three steps: read the `error` it prints → adjust using the parameters written in this document
+(change `<model>`, rewrite the prompt, add `--seed`) → run the same `gen.py` again. If it keeps failing, report the `error` text verbatim to
+the user and stop; **inventing your own path only makes it slower and more wrong**.
+
+**Always report when it finishes**: paste the absolute paths from `outputs` to the user. Generated but not reported = not done.
+
+## How to use
+**Always use the full absolute path of `gen.py`** (it uses absolute paths internally and runs from any directory; do not use a relative path, do not cd first, do not assume it is in your working directory):
+```
+"@@PY@@" "@@IMGGEN@@" <model> "<prompt>" [--image <path>] [--ref <path> ...] [--denoise <0-1>] [--seed <int>] [--no-turbo] [--move-x <fraction>] [--move-y <fraction>] [--keep-loaded]
+```
+
+`--ref` can be repeated (up to 16 images) and is **supported only by `qwen21` / `qwen21_edit`** (`qwen21_move` takes only 1 image): each reference image is fed to the Qwen3-VL vision tower so its content is understood, and its VAE latent is attached to the sequence.
+In the prompt, use `<image1>`, `<image2>`… to refer to the Nth `--ref` (same order as on the command line).
+
+- `qwen21 --ref`: **generates a new image**; the character/style stays close to the reference, but composition, scene and pose are redone according to the prompt. Good for "this character standing on a Tokyo street".
+- `qwen21_edit --ref`: **edits an image**; the first `--ref` (`<image1>`) is the image being modified, and the output keeps its size and composition, changing only what the prompt asks for.
+  Good for "change the outfit / change the background / add something / keep everything else". The other `--ref` images are materials (for example `<image2>` is the clothing to put on).
+
+### How to write `qwen21_edit` prompts (follows the official ComfyUI template, verified in tests)
+Use **a single English instruction sentence** that states explicitly "what to change" plus "what to keep":
+```
+Keep the character, face, hair and pose in <image1> unchanged, replace the outfit with a white hoodie and black joggers, keep the original framing, background and lighting.
+```
+- **Always list what to keep** (face / hair / pose / background / framing). If you only write "Replace the outfit", the model freely rebuilds the pose.
+- **Do not ask for things outside the frame**: the original image only goes down to the thighs, but you ask for "white sneakers" → the model turns the person into a crouching/sitting pose to squeeze the shoes into the frame.
+- **Do not describe the character's appearance at length in the prompt**: the appearance comes from `<image1>`; a text description overrides the reference image and makes the character drift.
+- `--image <image>` also works; it is equivalent to the first `--ref`.
+- **Moving a person's position (shift left / right / up / down)**: `qwen21_edit` cannot do it (three tests, nothing moved); **use `qwen21_move` instead**, see "Moving position" below.
+
+Eight models:
+| model | What it is | When to pick it |
+|-------|------|--------|
+| `qwen21`  | Qwen-Image-2.1 (20B, int8 + Qwen3-VL-8B encoder), **new generation, highest prompt adherence, can draw correct Chinese characters** | **Default first choice**: complex prompt / must follow precisely, Chinese subject matter, text inside the image. Beats the old `qwen` in quality and adherence |
+| `qwen21_edit` | Qwen-Image-2.1 image editing (same model, the reference image is the edit target; follows the official template: no PE, cfg 1) | An image was given and should be **edited locally with everything else kept**: change outfit, change background, add/remove objects, change hand gesture. **`--ref` is required**. Turbo by default: about 36 s with 1 ref, about 48 s with 2 (90 / 118 s with `--no-turbo`) |
+| `qwen21_move` | **Shifts** the person/subject across the whole image: crops one side, hands the strip freed on the other side to Qwen-Image-2.1 to extend the background, and **pastes all other pixels back untouched** | The user wants to "move left/right/up/down" or "leave more space on the right". Requires `--ref` + `--move-x`/`--move-y`. About 36 s |
+| turbo (default) | `qwen21` / `qwen21_edit` / `qwen21_move` **use the Viggle Turbo LoRA v0.2.1 by default** (6 steps, no CFG, LoRA not merged) | Measured (RTX 5060 Ti): text-to-image 70→22 s, edit with 1 ref 90→36 s, with 2 refs 118→48 s, 3 refs also fine, no visible quality difference. If the image needs **small text**, or a multi-image composite shows **ghosting / duplicated people**, retry with `--no-turbo` (base, 25 steps); passing `--steps` also switches to base automatically; if this ComfyUI lacks the turbo nodes or the LoRA it **falls back to base automatically**, and the `turbo` field of the output JSON reads `off (base sampler): <reason>` — just tell the user plainly "this time it used normal speed" |
+| `qwen`    | Qwen-Image (20B, Qwen2.5-VL encoder), high prompt adherence, can draw correct Chinese characters | Old-version fallback; the backup when the `qwen21` model files are missing |
+| `flux`    | FLUX.1-schnell (12B GGUF Q8, Apache license), 4 steps, strong aesthetics and detail, good prompt adherence | Want the Flux look / Western aesthetics, English prompt, **commercial use** (clean license). Medium speed (4 steps + weight offload) |
+| `zimage`  | Z-Image Turbo, 8 steps, fast | Want speed, cartoon/illustration/simple subjects |
+| `realvis` | RealVisXL, photorealistic | Want real portraits / real scenes / product shots (fast) |
+| `img2img` | Generates a new image from a provided image | The user gave an image and wants its style changed / it redrawn |
+
+### Moving position: `qwen21_move`
+```
+"@@PY@@" "@@IMGGEN@@" qwen21_move "" --ref "<previous turn's output>" --move-x -0.15
+```
+- `--move-x`: a fraction of the width, **negative moves left, positive moves right**; `--move-y`: a fraction of the height, **negative moves up, positive moves down**. Both can be given together. Maximum 0.4.
+- "Move left a little" ≈ `-0.1`–`-0.15`; "move left a lot" ≈ `-0.25`; "leave some more space on the right" = move left.
+- The prompt can be left empty `""`; to say what should be drawn in the newly freed area, write it in the prompt (e.g. `"more palm trees"`).
+- The person and the original background are **pixel-for-pixel unchanged** (verified in tests); only the new strip is drawn by the AI, so nothing drifts.
+- **Limitation**: moving left crops off the leftmost strip of the original image. If the person is already touching that side, the body gets cut off → look at the image first; the move must be smaller than the distance from the person to that edge; report the result truthfully.
+- The same applies in multi-turn conversations: use the previous turn's output as `--ref`.
+- **When reporting the move, copy `move.moved` from the JSON verbatim** (e.g. `left 160 px (15% of the width)`); do not estimate it by eye. In a test an agent once described 15% as "leaving 1/3 more space".
+
+## ⚠️ Check what language the prompt is in before choosing a model (the step most likely to fail silently)
+
+**`realvis` and `flux` cannot read Chinese/Japanese/Korean.** Their text encoders are SDXL's CLIP and
+T5-XXL+CLIP-L respectively, and they only understand English. A Chinese prompt sent to them **does not raise an error**; instead it produces an image that is "clean-looking,
+but completely unrelated to what you asked for" — this kind of failure is the hardest to notice, because the JSON comes back `ok`.
+
+Real test (the same Chinese prompt「一隻橘色小貓坐在木頭窗台上曬太陽,寫實攝影風格」— an orange kitten sunbathing on a wooden windowsill, realistic photo style):
+
+| model | Encoder | Chinese | Test result |
+|---|---|---|---|
+| `qwen21` | Qwen3-VL-8B | ✅ | Correct (new-generation encoder) |
+| `qwen` | Qwen2.5-VL-7B | ✅ | Correct |
+| `zimage` / `img2img` | Qwen3-4B | ✅ | Correct |
+| `realvis` | SDXL CLIP | ❌ | Produced **a woman in a bathrobe and a dog on a bed** |
+| `flux` | T5-XXL + CLIP-L | ❌ | Produced **a night street scene + garbled calligraphy** |
+
+**So the rule is**: when the user describes the image in Chinese —
+
+- Wants the `realvis`/`flux` style → **translate the prompt into English first**, then send it (translate it yourself; do not send it as-is)
+- Does not care which model → use `qwen21` or `zimage` directly; they understand Chinese natively
+
+`gen.py` blocks the "Chinese prompt + realvis/flux" combination and suggests the two routes above. **When you see that error, do what it says**;
+do not rephrase and force it through.
+
+**License**: the `qwen21` family (Qwen-Image-2.1) and Viggle Turbo are under the **Qwen research license, non-commercial use only**. When the user says it is for **commercial use** (ads, product images, things to be sold), use `flux` or the old `qwen` (Apache, commercial use allowed) instead, and tell them why.
+
+**Model selection key points**: the user complains「跟 prompt 不像/沒照做」(doesn't match the prompt / didn't do what I said) → use `qwen21` (or the old `qwen`). Want Flux aesthetics / an **English** prompt / a clean commercial license → `flux`. Want speed, simple subject → `zimage`; want a realistic photo → `realvis` (remember to write the prompt in English).
+`qwen21` is the new generation of Qwen-Image (2.1); it beats the old `qwen` in quality and adherence, so prefer it for complex/Chinese prompts; `flux` renders Chinese text worse than the qwen family, but its overall aesthetics and detail are outstanding.
+
+On success it prints `{"status":"ok","outputs":["<absolute path>"]}`; on failure it prints `{"status":"error",...}`.
+Report the output paths to the user.
+
+### When it prints `"status":"running"` (slow card, large model)
+
+`gen.py` waits in the foreground for at most about 7 minutes; if the image is not finished by then, it prints:
+
+```
+{"status":"running","prompt_id":"<id>","progress":"step 6/8","next":"<full command to fetch the result>"}
+```
+
+This is **not a failure**. ComfyUI finishes rendering in the background on its own, and the image will not be lost. In this case:
+
+1. **Do not resubmit the same image** — resubmitting only queues another identical one behind it, which is slower. (`gen.py` also guards against this: if the same image is still queued, it simply takes over that one.)
+2. Tell the user "still rendering, currently at `progress`", and give the `prompt_id`.
+3. To get the result, run the `next` line (i.e. the line below). If it is not done yet it prints `running` again; once done it prints `ok` and the image path:
+   ```
+   "@@PY@@" "@@IMGGEN@@" status <prompt_id>
+   "@@PY@@" "@@IMGGEN@@" status <prompt_id> --wait 300     # wait up to another 300 seconds
+   ```
+
+Only `"status":"error"` is a failure, for example "made no progress for 600 s" (ComfyUI is stuck)
+or "not in ComfyUI's queue or history" (the server was restarted; render it again).
+
+## Examples (note: all use the absolute path of gen.py)
+```
+# text-to-image (default zimage)
+"@@PY@@" "@@IMGGEN@@" zimage "一隻戴太空頭盔的柴犬,扁平向量插畫,粗黑外框"
+
+# realistic photo
+"@@PY@@" "@@IMGGEN@@" realvis "rainy Taipei street at night, neon reflections, 35mm"
+
+# image-to-image: change the style but keep the composition (<absolute path of the user's image> = absolute path of the image the user gave)
+"@@PY@@" "@@IMGGEN@@" img2img "glossy 3D rendered toy, soft studio light, white background" --image "<absolute path of the user's image>" --denoise 0.85
+
+# qwen21 + reference image: same character, new scene (--ref can be repeated, up to 16 images)
+"@@PY@@" "@@IMGGEN@@" qwen21 "The character from <image1> standing on a rainy Tokyo street at night, neon reflections, same anime illustration style" --ref "<reference image>"
+
+# qwen21_edit: edit the image, change only the outfit, keep the rest
+"@@PY@@" "@@IMGGEN@@" qwen21_edit "Keep the character, face, hair and pose in <image1> unchanged, replace the outfit with a white hoodie and black joggers, keep the original framing, background and lighting." --ref "<image to edit>"
+
+# qwen21_edit: put the clothing from <image2> on the character in <image1>
+"@@PY@@" "@@IMGGEN@@" qwen21_edit "Keep the character and pose in <image1> unchanged, put the shirt from <image2> on the character, keep the original background and lighting." --ref "<character image>" --ref "<clothing image>"
+
+# qwen21_edit: one background + several characters (background goes first; the output size follows the background)
+"@@PY@@" "@@IMGGEN@@" qwen21_edit "Place the character from <image2> on the left and the character from <image3> on the right of the scene in <image1>, keep both characters' faces, hair and outfits unchanged, keep the background unchanged, match the lighting." --ref "<background image>" --ref "<character A>" --ref "<character B>"
+
+# multi-turn refinement: each next turn always uses "the previous turn's output" as the first --ref; the prompt only states this turn's new change + the keep list
+"@@PY@@" "@@IMGGEN@@" qwen21_edit "Keep the character, face, hair, outfit and background in <image1> unchanged, change her right hand to a peace sign, keep the original framing." --ref "<previous turn's output>"
+```
+
+## Why you must go through `gen.py` (memory protection, same scheme as vidgen)
+
+Image generation and video generation use **the same ComfyUI**, so the same protection rule applies fully here —
+image generation also loads models of several GB and will likewise squeeze the LLM resident on the same machine.
+
+**The key to the protection is `--reserve-vram`, and it is decided "at the moment ComfyUI starts"; it cannot be changed afterwards.**
+`start_comfy.py` first measures the VRAM **already occupied by others** (the resident LLM is in there), then uses that to
+decide how much to reserve for it, so that ComfyUI does not treat that memory as space it can use freely.
+`gen.py` ensures this automatically: if ComfyUI is not running it starts it the protected way; if it is already running it reuses it.
+
+So the following two things directly break the protection:
+
+1. **Running `comfy launch` / starting ComfyUI yourself** — no reserve, and the LLM can get squeezed out at any moment.
+2. **Bypassing `gen.py` and calling the API directly** — you connect to a server that may or may not be protected.
+
+**If ComfyUI was started by someone else (or by you in a previous turn) without a reserve**, `gen.py` prints a warning on stderr
+and tells you how to restart it. When you see that warning, do what it says; do not ignore it — it means this render risks squeezing out the LLM.
+
+> **The measurement is GPU-vendor neutral**: the engine only asks "how much of this card is already occupied, and how much is left".
+> **Vendor tools first; only if none are available does it ask a service API**: `VIDGEN_GPU_QUERY_CMD` (custom) → `nvidia-smi`
+> → `intel-ze` (Intel Level Zero) → `xpu-smi` (Intel CLI) → `rocm-smi` (AMD)
+> → ComfyUI's `/system_stats` → TRUSTA-AST's `/system/resources`.
+> Non-NVIDIA accelerators go down the same path; you do not need to change how you use it.
+
+## Rules
+1. **Translation is your job, and you must do it proactively, not wait to be blocked.**
+   The user describes the image in Chinese/Japanese/Korean and you picked `realvis` or `flux` → **translate it into English yourself before sending**.
+   You are a bilingual model, and you hold the user's full intent, so your translation will fit better than any automatic translation.
+   `gen.py`'s block is a safety net, not part of the workflow — hitting it means you skipped this step.
+   (`qwen21`/`qwen`/`zimage`/`img2img` understand Chinese natively; no translation needed.)
+2. **Do not compute a seed yourself**; it is random by default. Pass `--seed <number>` (a number) only when you need to reproduce a result.
+3. **img2img denoise**: 0.6 ≈ almost unchanged, **0.85 = change the style and keep the composition (default starting point)**, 0.95 ≈ nearly a full redraw.
+4. The user only says「生一張…」(make a…) without specifying a style → use `zimage` (fast). Wants **high quality / a complex description / Chinese** → `qwen21`. Says「照片/寫實」(photo/realistic) → `realvis`. Gave an image and wants its **style changed / it redrawn** → `img2img`; gave an image and wants a **new image that keeps the character/style/subject** → `qwen21 --ref <image>` (several allowed); gave an image and wants **only part of it changed (outfit/background), everything else kept as is** → `qwen21_edit --ref <image>`.
+5. To swap the underlying model, edit the workflow files in `@@ENGINE@@/workflows/`, not here.
+   Those are **for humans to edit**; when you generate an image, do not read or edit those files — just run `gen.py`.
+
+6. **After generating, VRAM is handed back by default (`"vram": "freed"`)**; you do not need to do anything.
+   Add `--keep-loaded` only when generating several images in a row, to save the model reload for each one;
+   but it keeps the GPU occupied the whole time — measured: a resident image model eats 3.1 GB,
+   and `vidgen plan`'s available budget drops from 7.4 GB to 5.6 GB, making it recommend an unnecessarily downsized video.
+   So **after the burst is finished, run once more without the flag, or POST `/free` yourself**, and only then go plan a video.
+   The co-resident LLM is also waiting for this VRAM.
+## Where it runs
+`gen.py` references the workflows and the launcher by absolute path, so it can be run from any directory. Output goes by default to
+`@@OUT@@`; override with `--out`.

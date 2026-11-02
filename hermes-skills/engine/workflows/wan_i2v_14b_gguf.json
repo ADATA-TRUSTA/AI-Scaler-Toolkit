@@ -1,0 +1,124 @@
+{
+  "10": {
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {"title": "Load Wan 14B High-Noise (GGUF, SSD-mmap)"},
+    "inputs": {"unet_name": "Wan2.2-I2V-A14B-HighNoise-Q5_K_M.gguf"}
+  },
+  "11": {
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {"title": "Load Wan 14B Low-Noise (GGUF, SSD-mmap)"},
+    "inputs": {"unet_name": "Wan2.2-I2V-A14B-LowNoise-Q5_K_M.gguf"}
+  },
+  "12": {
+    "class_type": "ModelSamplingSD3",
+    "_meta": {"title": "Shift (high)"},
+    "inputs": {"model": ["10", 0], "shift": 5.0}
+  },
+  "13": {
+    "class_type": "ModelSamplingSD3",
+    "_meta": {"title": "Shift (low)"},
+    "inputs": {"model": ["11", 0], "shift": 5.0}
+  },
+  "14": {
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {"title": "Lightning LoRA (high) — bypassed in quality mode"},
+    "inputs": {"model": ["12", 0], "lora_name": "Wan22_Lightning_I2V_high_noise.safetensors", "strength_model": 1.0}
+  },
+  "15": {
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {"title": "Lightning LoRA (low) — bypassed in quality mode"},
+    "inputs": {"model": ["13", 0], "lora_name": "Wan22_Lightning_I2V_low_noise.safetensors", "strength_model": 1.0}
+  },
+  "16": {
+    "class_type": "CLIPLoader",
+    "_meta": {"title": "Load umt5 (Wan)"},
+    "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan"}
+  },
+  "17": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Positive"},
+    "inputs": {"text": "a cinematic shot", "clip": ["16", 0]}
+  },
+  "18": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Negative"},
+    "inputs": {"text": "低画質, ぼやけ, blurry, low quality, distorted, watermark", "clip": ["16", 0]}
+  },
+  "19": {
+    "class_type": "VAELoader",
+    "_meta": {"title": "Load Wan 2.1 VAE"},
+    "inputs": {"vae_name": "wan_2.1_vae.safetensors"}
+  },
+  "20": {
+    "class_type": "LoadImage",
+    "_meta": {"title": "Start image"},
+    "inputs": {"image": "__START_IMAGE__"}
+  },
+  "21": {
+    "class_type": "WanImageToVideo",
+    "_meta": {"title": "Wan I2V conditioning"},
+    "inputs": {
+      "positive": ["17", 0],
+      "negative": ["18", 0],
+      "vae": ["19", 0],
+      "width": 480,
+      "height": 832,
+      "length": 49,
+      "batch_size": 1,
+      "start_image": ["20", 0]
+    }
+  },
+  "22": {
+    "class_type": "KSamplerAdvanced",
+    "_meta": {"title": "Sample — high-noise expert"},
+    "inputs": {
+      "model": ["14", 0],
+      "add_noise": "enable",
+      "noise_seed": 0,
+      "steps": 8,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": ["21", 0],
+      "negative": ["21", 1],
+      "latent_image": ["21", 2],
+      "start_at_step": 0,
+      "end_at_step": 4,
+      "return_with_leftover_noise": "enable"
+    }
+  },
+  "23": {
+    "class_type": "KSamplerAdvanced",
+    "_meta": {"title": "Sample — low-noise expert"},
+    "inputs": {
+      "model": ["15", 0],
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 8,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": ["21", 0],
+      "negative": ["21", 1],
+      "latent_image": ["22", 0],
+      "start_at_step": 4,
+      "end_at_step": 8,
+      "return_with_leftover_noise": "disable"
+    }
+  },
+  "24": {
+    "class_type": "VAEDecode",
+    "_meta": {"title": "VAE Decode"},
+    "inputs": {"samples": ["23", 0], "vae": ["19", 0]}
+  },
+  "25": {
+    "class_type": "CreateVideo",
+    "_meta": {"title": "Create Video"},
+    "inputs": {"images": ["24", 0], "fps": 16.0}
+  },
+  "26": {
+    "class_type": "SaveVideo",
+    "_meta": {"title": "Save Video"},
+    "inputs": {"video": ["25", 0], "filename_prefix": "wan14b", "format": "mp4", "codec": "h264"}
+  }
+}

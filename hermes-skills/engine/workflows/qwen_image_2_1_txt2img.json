@@ -1,0 +1,59 @@
+{
+  "10": {
+    "class_type": "UNETLoader",
+    "_meta": {"title": "Load Qwen-Image-2.1 (int8_convrot)"},
+    "inputs": {"unet_name": "qwen_image_2.1_int8_convrot.safetensors", "weight_dtype": "default"}
+  },
+  "12": {
+    "class_type": "CLIPLoader",
+    "_meta": {"title": "Load Qwen3-VL-8B Text Encoder (int8_convrot)"},
+    "inputs": {"clip_name": "qwen3vl_8b_int8_convrot.safetensors", "type": "qwen_image"}
+  },
+  "13": {
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {"title": "Qwen Image 2.1 Text Encode (t2i)"},
+    "inputs": {
+      "clip": ["12", 0],
+      "vae": ["15", 0],
+      "prompt": "a photograph",
+      "negative_prompt": "低品質, 模糊, 變形, 多餘手指, 浮水印, blurry, low quality, distorted, extra fingers, watermark",
+      "resolution": 1024
+    }
+  },
+  "15": {
+    "class_type": "VAELoader",
+    "_meta": {"title": "Load Qwen-Image-2.1 VAE"},
+    "inputs": {"vae_name": "qwen_image_2.1_vae_bf16.safetensors"}
+  },
+  "16": {
+    "class_type": "EmptyLatentImage",
+    "_meta": {"title": "Empty Latent"},
+    "inputs": {"width": 1024, "height": 1024, "batch_size": 1}
+  },
+  "3": {
+    "class_type": "KSampler",
+    "_meta": {"title": "KSampler"},
+    "inputs": {
+      "model": ["10", 0],
+      "seed": 0,
+      "steps": 25,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": ["13", 0],
+      "negative": ["13", 1],
+      "latent_image": ["16", 0],
+      "denoise": 1.0
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "_meta": {"title": "VAE Decode"},
+    "inputs": {"samples": ["3", 0], "vae": ["15", 0]}
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "_meta": {"title": "Save Image"},
+    "inputs": {"images": ["8", 0], "filename_prefix": "qwen21"}
+  }
+}

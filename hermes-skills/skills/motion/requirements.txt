@@ -1,0 +1,7 @@
+# motion's own interpreter (install.py creates <hermes home>/motion-venv from this).
+# Versions are the ones the library was built and tested with.
+numpy==2.4.6
+Pillow==12.3.0
+rapidocr-onnxruntime==1.4.4     # OCR (Apache-2.0); pulls onnxruntime, opencv-python, pyclipper, shapely
+zxing-cpp==3.1.1                # QR / barcode read and write (Apache-2.0)
+# optional, only for compose.matte() (background removal):  rembg

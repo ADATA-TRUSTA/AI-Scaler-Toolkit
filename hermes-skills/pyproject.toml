@@ -1,0 +1,10 @@
+# Not a package: nothing here is installed with pip. It exists for the version, which
+# the release workflow bumps on every release (trusta-ast-release,
+# ci/scripts/source_release.py) and AI Scaler Toolkit reads back to tell whether the
+# skills a user has installed are older than the ones it carries.
+[project]
+name = "comfyui-skill"
+version = "0.1.0"
+description = "Image, video and animation skills for a Hermes agent on a local ComfyUI"
+license = "Apache-2.0"
+requires-python = ">=3.11"

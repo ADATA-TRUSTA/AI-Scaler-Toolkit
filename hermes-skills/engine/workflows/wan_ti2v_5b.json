@@ -1,0 +1,173 @@
+{
+  "10": {
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Wan 2.2 TI2V-5B"
+    },
+    "inputs": {
+      "unet_name": "wan2.2_ti2v_5B_fp16.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "11": {
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "Model Sampling (shift)"
+    },
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "shift": 8.0
+    }
+  },
+  "12": {
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load umt5 (Wan)"
+    },
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan"
+    }
+  },
+  "13": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive"
+    },
+    "inputs": {
+      "text": "a cinematic shot",
+      "clip": [
+        "12",
+        0
+      ]
+    }
+  },
+  "14": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Negative"
+    },
+    "inputs": {
+      "text": "低画質, ぼやけ, blurry, low quality, distorted, watermark",
+      "clip": [
+        "12",
+        0
+      ]
+    }
+  },
+  "15": {
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load Wan 2.2 VAE"
+    },
+    "inputs": {
+      "vae_name": "wan2.2_vae.safetensors"
+    }
+  },
+  "16": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Start image (i2v only)"
+    },
+    "inputs": {
+      "image": "__START_IMAGE__"
+    }
+  },
+  "17": {
+    "class_type": "Wan22ImageToVideoLatent",
+    "_meta": {
+      "title": "Wan2.2 5B image->latent (16x VAE)"
+    },
+    "inputs": {
+      "vae": [
+        "15",
+        0
+      ],
+      "width": 480,
+      "height": 832,
+      "length": 49,
+      "batch_size": 1,
+      "start_image": [
+        "16",
+        0
+      ]
+    }
+  },
+  "18": {
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    },
+    "inputs": {
+      "model": [
+        "11",
+        0
+      ],
+      "seed": 0,
+      "steps": 8,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": [
+        "13",
+        0
+      ],
+      "negative": [
+        "14",
+        0
+      ],
+      "latent_image": [
+        "17",
+        0
+      ],
+      "denoise": 1.0
+    }
+  },
+  "19": {
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    },
+    "inputs": {
+      "samples": [
+        "18",
+        0
+      ],
+      "vae": [
+        "15",
+        0
+      ]
+    }
+  },
+  "20": {
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video"
+    },
+    "inputs": {
+      "images": [
+        "19",
+        0
+      ],
+      "fps": 16.0
+    }
+  },
+  "21": {
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Save Video"
+    },
+    "inputs": {
+      "video": [
+        "20",
+        0
+      ],
+      "filename_prefix": "wan5b",
+      "format": "mp4",
+      "codec": "h264"
+    }
+  }
+}

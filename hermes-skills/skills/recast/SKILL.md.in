@@ -1,0 +1,212 @@
+---
+name: recast
+description: Recast a video - the user gives a reference video plus photos of people, and the people in the video are replaced by the people in the photos while motion, camera, framing, background and the original audio follow the video. Use when the user says things like 「把這支影片的人換成我/某某」「換角」「角色替換」「用這張照片的人重演這支影片」「把舞者換成他」. Always run this skill's recast.py; never call vidgen --swap directly for this and never build ComfyUI graphs yourself.
+metadata:
+  hermes:
+    tags: [video, recast, character-swap, reference-video, minimax-h3, comfyui]
+    category: creative
+---
+
+# recast — reference video + people photos → the same video with the people replaced
+
+**Always reply to the user in Traditional Chinese (zh-Hant).** These instructions are in English; the user speaks Chinese.
+
+One script, `recast.py`, three steps, always in this order:
+
+```
+plan     video ──> shot list + contact sheet (sheets/shots.jpg) + spec.json template
+(you)    look at the sheet, write "which shot, which person, which photo" into spec.json
+render   one vidgen job per shot ──> automatic checks ──> re-roll the seed on failure ──> join with the original audio = final.mp4
+```
+
+recast **never talks to ComfyUI**: every render runs `vidgen/gen.py`, so vidgen's memory protection,
+LLM hand-over and refusal rules all still apply.
+
+## Why one job per shot instead of one `--swap` for the whole video (measured 2026-10-28)
+
+Same 13.7 s, 4-shot video:
+
+| Approach | Result |
+|---|---|
+| one vidgen job with the generic swap sentence | the person with their back to the camera was **not replaced**, close-ups were re-framed, the face was **expressionless** throughout, and the first frames after a cut still showed the original person |
+| **one job per shot, each with its own description** (this skill) | all 4 shots plus a small dancer in the background **replaced**; expressions follow the original (smile → stunned); motion-rhythm correlation 0.91 (old approach 0.49) |
+
+The failures that remain are **seed luck** and they are measurable, so render checks every result and re-rolls the seed when a check fails:
+
+| Check | What it catches | How |
+|---|---|---|
+| `leak` | H3 pastes **the scenery of the photo** (beach, restaurant) into the shot | colours of the top band of the frame (the scenery above the heads) closer to the photo than to the source video (threshold 1.3; 24 renders judged by eye: leaks ≤ 1.06, good ≥ 1.48) |
+| `lag` | the first frames after a cut **still show the original person**, or the new person stands **in the previous shot's background** | a frame still close to the source, or one whose background is far from the source right after the cut. ≤ 3 frames are covered at assembly with the first replaced frame; > 3 frames → re-roll |
+| `unchanged` | nobody was replaced at all | the centre of the frame is almost identical to the source |
+| `reframed` | H3 **re-composed the shot**: zoomed into one face, another person vanished (seen on the 2nd pass of a two-person shot) | almost no pixel stays close to the source (`keep` < 0.12) **and** the coarse layout no longer matches (`layout` < 0.30). Re-composed renders measured 0.07 / 0.14; good renders keep ≥ 0.21 or layout ≥ 0.37 |
+| `jump` | H3 **invented a cut** that is not in the source: a smooth camera orbit became a jump cut, a push-in past the presenter ended on a talking head of the new person, or the two halves of a long shot (vidgen renders a shot longer than its chunk limit in parts) do not match | the largest frame-to-frame jump of the render minus the source's jump at the same moment (the source's own cuts cancel out). Threshold 20; 20 renders across 4 videos: good ≤ 12.2, invented cuts 35–52 |
+
+**Whether the face looks like the person cannot be checked automatically.** Look at `sheets/final.jpg` yourself or show it to the user.
+
+## Commands
+
+```
+"@@PY@@" "@@RECAST@@" plan "<video>" --name <english_project_name>
+"@@PY@@" "@@RECAST@@" render "<project dir>"
+"@@PY@@" "@@RECAST@@" status "<project dir>"
+"@@PY@@" "@@RECAST@@" assemble "<project dir>"
+```
+
+Projects go to `@@RECASTOUT@@/<name>_<MMDD_HHMM>/` by default. Inside:
+`spec.json`, `state.json` (written after every render — **re-running render after an interruption continues
+where it stopped and never re-renders a shot that already passed**), `recast.log`, `sheets/`, `final.mp4`.
+
+## Step 1: plan
+
+Returns `project`, `sheet`, and each shot's start/end seconds with `est_min_per_pass` (minutes per pass,
+EasyCache included). Shots follow the **scene cuts** of the video; a shot shorter than 39 frames (~1.6 s)
+is merged into its neighbour, because vidgen cannot render a segment that short. A single long take stays
+one shot (vidgen may still split it into several render chunks internally). **Always look at `sheets/shots.jpg` with vision**: one row per shot, the three
+frames are start / middle / end. From the picture work out, per shot: who is in it, facing the camera or
+turned away, large or tiny in frame, how the expression changes, and **whether the camera moves** (the
+start and end frames are framed differently: push-in, pull-back, orbit, pan) and whether the person
+leaves or enters the frame — that goes into `camera`.
+
+## Step 2: fill in spec.json
+
+```json
+{
+ "characters": {
+  "alex": {"image": "alex.png", "pronoun": "he",
+              "looks": "short black hair, thin black rectangular glasses, a round full face",
+              "outfit": "a plain black T-shirt"}
+ },
+ "shots": [
+  {"id": 1, "start": 0.0, "end": 3.583,
+   "scene": "leaning on a railing on a dark balcony at night, with a blurred crowd and small lights behind him",
+   "swaps": [
+   {"character": "alex", "who": "the long-haired man in the blue shirt", "view": "front",
+    "clothes": "own",
+    "expression": "at first he grins widely and laughs, glancing down; the smile then fades; from the middle of the shot to the end his eyes go wide in a stunned stare"}]},
+  {"id": 2, "start": 3.583, "end": 8.667,
+   "scene": "in a dark concert hall looking down at a crowded dance floor",
+   "camera": "the camera slowly cranes down over the crowd toward the dance floor",
+   "swaps": [
+   {"character": "alex", "who": "the man seen from behind in the foreground", "view": "back"},
+   {"character": "sam", "who": "the small dancer in the middle of the dance floor", "view": "small"}]}
+ ]
+}
+```
+
+**Copy `start`/`end` exactly as plan returned them; never edit them** (they line up with vidgen's shot
+chunks). A shot with no one to replace keeps `swaps` empty → its original frames are used, nothing is rendered.
+
+| Field | What to put |
+|---|---|
+| `characters.<name>.image` | a **head-and-shoulders photo** (face at least 1/3 of the frame, nobody else in it). If you only have a full-body photo, crop it first with vidgen's `gen.py crop`. A path relative to the project dir is fine |
+| `characters.<name>.looks` | English, **what makes this person different from anyone else**: hair style, fringe, glasses, face shape, build. This is the main lever for likeness |
+| `characters.<name>.outfit` | English, **the clothes this person wears in the photo**, named concretely (`a black T-shirt with a white print`). Used when `clothes` is `own`. Without it H3 kept the original apron in two of four shots (measured) |
+| `characters.<name>.pronoun` | `he` / `she` / `they` |
+| `shots[].scene` | English, **where this shot happens, as seen in the video** (place, light, what is behind the person), e.g. `on a concert stage under a bright spotlight, with a dark crowd behind`. Strongly recommended: a concrete place is what keeps H3 from pasting the photo's scenery in. Describe only the video's place — never mention the photo's |
+| `shots[].camera` | English, the camera as seen in the video. **Required when the camera moves** — the move and where the person goes, e.g. `the camera slowly pushes in past him toward the big screen; he steps out of the frame on the right and by the end only his arm is visible`. **Required when two or more people are in the shot** — say who stays in frame, e.g. `a static wide shot from the front that keeps all three people sitting on the bench in frame the whole time`. Leave it empty only for a static one-person shot (then the prompt says "do not zoom in"). Measured: without it a push-in and an orbit both came back as jump cuts, and a three-person bench shot was re-composed into a one-person close-up on 3 of 3 seeds; with it all three passed on the first or second seed |
+| `who` | English, how to spot the person to replace **in this shot** (clothes, position, action). Must not contain `=` or `@` |
+| `view` | `front` face visible; `back` turned away from the camera; `small` a tiny figure in a wide shot |
+| `clothes` | `own` wear the character's `outfit` (**the default — this is what "replace the whole character" means**); `keep` keep the clothes from the video; or write other clothes for this shot, e.g. `a white shirt` |
+| `expression` | English, the expression changes in this shot **in time order**. Write it for every shot where the face is visible; without it the face stays the same the whole shot (measured) |
+
+**Two people to replace in one shot → two swaps in the same shot.** recast runs two passes; the second pass
+uses the first pass's output as its reference video.
+
+**If you are not sure who maps to which photo, ask the user — do not guess.** This has gone wrong before:
+the two photos were swapped and the whole video had to be rendered again. Show the user the contact sheet
+and the photos and ask "which photo replaces person A in the video?".
+
+## Step 3: render (always in the background)
+
+Before submitting, tell the user the estimate: add up **`est_min_per_pass` × number of swaps** over every
+shot that has swaps. In the worst case each shot is re-rolled up to 3 times, so say "about N minutes, at
+worst 3N minutes".
+
+```
+terminal(command="<the render command above>", background=true, notify_on_complete=true)
+```
+
+After submitting, **tell the user rendering is in progress and they should not send new commands**, then
+stop and wait for the notification. **If you are running on a local model that fills the GPU (Strata), this
+is literal: render puts you to sleep or unloads you for the whole run and loads you back (~35 s) when it
+ends, so anything you or the user send in between cannot be answered.** Your conversation is kept. **Do not poll with status or tail the log** — every query is a full
+inference pass that pulls the LLM weights back from the SSD and competes with ComfyUI.
+
+## Step 4: deliver
+
+When render finishes it prints:
+
+- `final`: the finished video (short edge 720, 24 fps, original audio)
+- `review_sheet`: `sheets/final.jpg`, one row per shot; the left column shows the seed used and `checks ok` or `REVIEW`
+- `needs_review`: shots where no seed passed every check (the best attempt was kept) and why
+
+**Always look at `sheets/final.jpg`** (does the face look right, are the clothes right, is the background
+odd), then report the video path and any shots that need attention to the user.
+
+Report what you see, not what you hoped for. In particular, when a swap crosses ages, say the age the new
+person **looks** in the result next to the age in the photo (measured: a model reported "the age change
+worked, no wrinkles left" for a woman in her twenties who came out looking about forty).
+
+### render stopped with `"ok": false` and a `hint`
+
+That means **ComfyUI itself was unavailable** (not enough free VRAM/RAM, ComfyUI crashed, would not
+start, or a job timed out) — it is not a bad seed. recast stops at once instead of burning the remaining
+seeds, and the failed attempt is **not** counted, so re-running `render <project>` later continues with the
+same seeds and keeps every finished shot.
+
+1. Run vidgen's `gen.py status` and read what holds the GPU.
+2. Tell the user in plain words (e.g. "another program is using 11 GB of VRAM" / "ComfyUI crashed").
+   **Never kill processes yourself.**
+3. When the user says it is fixed, re-run the same `render` command.
+
+If ComfyUI crashed with `Fatal Python error: Aborted` in its log, the process can stay half-dead: it no
+longer answers on port 8188 but still holds the port and most of the VRAM, and even a force-kill does not
+free them (one thread is stuck in the GPU driver). Only a **reboot** clears that — tell the user so.
+
+### The user is unhappy with a shot
+
+| User says | You do |
+|---|---|
+| "shot N doesn't look like them" | make `characters.<name>.looks` more specific about the face → `render <project> --shots N --fresh` |
+| "the expression in shot N is wrong" | edit that swap's `expression` → `--shots N --fresh` |
+| "change / don't change the clothes in shot N" | edit `clothes` → `--shots N --fresh` |
+| "shot N wasn't replaced" (e.g. someone turned away) | check that `view` and `who` match the picture → `--shots N --fresh` |
+| "try a few more times" | `render <project> --shots N --tries 5` (seeds already tried are not re-run) |
+
+`--fresh` forgets the shot's accepted result and starts over; without `--fresh`, shots that already
+passed the checks are skipped (they are re-checked first with the current checks, so a shot accepted by an
+older version of recast is re-rendered only if it fails a check added since).
+
+## ⛔ Measured traps
+
+| Don't | Why |
+|---|---|
+| add an **upscaled face close-up** as a second reference image | all three seeds pasted the photo's outdoor scenery into the shot and zoomed into a big close-up |
+| pad the shot with a **frozen lead-in** or **start 0.5 s earlier** to hide the lag at a cut | H3 copied the reference photo's background outright. Let recast's check + re-roll + hold handle lag |
+| describe two people in one swap | H3 replaces one person per pass; the second one is often missed |
+| mention the photo's place in `who` / `extra`, even to forbid it ("not the restaurant") | naming the photo's scenery puts it into the prompt: a "not the place in Picture 1" sentence made H3 paste the restaurant behind the man, the same seed without it kept the venue |
+| leave `scene` and `outfit` empty | measured: generic wording let the photo's restaurant/seaside into 5 of 6 renders of two shots, and the apron stayed in two shots |
+| run the whole video yourself with `vidgen gen.py r2v --swap` | that is the old approach in the table above |
+| expect the same seed to reproduce an earlier result | vidgen runs EasyCache by default, so details differ even with the same seed; to keep a result, don't replace an accepted shot |
+| promise a strong likeness in a close-up when the photo is tiny (face < 150 px) | the source has too little detail; good `looks` helps only partly — tell the user honestly |
+| promise a full age change (old person → young character or the reverse) | H3 keeps much of the original person's age (wrinkles, grey hair, posture): an elderly woman swapped for a woman in her twenties came out middle-aged. Put the age in `looks` ("in her twenties, smooth skin") and warn the user it only moves part-way |
+| leave `camera` empty in a shot with two or more people | the 2nd pass (whose `expression` is about one face) re-composed the frame into a close-up of that person and dropped the others — 3 of 3 seeds on a bench shot, 1 of 2 in a shop. Naming everyone who stays in frame in `camera` fixed it on the next seed |
+| leave `camera` empty when the camera moves | the prompt then says "do not zoom in", which contradicts a push-in; H3 resolved it with a jump cut or an invented talking-head close-up |
+
+## Validated on (2026-10-29)
+
+Four different source videos, all ending with every shot correct by eye: a vertical night-club clip with a
+back view and a tiny dancer; a vertical shop scene with a fast pull-back and two people in frame (incl. an
+elderly → young swap); a 16:9 office/park montage with an orbit, a push-in where the person leaves the frame,
+and three people on a bench; a 10 s single walking take (vidgen renders it in two parts — no visible seam).
+
+## Time and memory (measured on an RTX 5080 16 GB)
+
+- 13.7 s, 4 shots, 5 swap passes: 4–12 min per pass, about 35–45 min in total when every shot passes first time.
+- A 10 s single take: ~18 min per pass (rendered in two parts). A two-person shot longer than ~6.6 s:
+  ~23 min per seed (2 passes × 2 parts).
+- The canvas follows the source aspect ratio with a 720 short edge; reference video short edge 512; 8 steps + EasyCache 0.2.
+- Each pass needs roughly 10 GB of free VRAM or more. When another program (for example another inference
+  service) holds the VRAM, vidgen refuses and recast stops with a `hint` (see Step 4) — **do not shut
+  down other programs yourself**; tell the user what is holding the GPU.
+- Needs `ffmpeg` and `ffprobe` on PATH.

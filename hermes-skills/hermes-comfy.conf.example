@@ -1,0 +1,251 @@
+# hermes-comfy.conf -- the one file you edit on a new machine.
+#
+# Copy this next to the installed engine (as `hermes-comfy.conf`) and set
+# COMFY_HOME. Everything else has a working default; the installer writes this
+# file for you and only fills in what it could not auto-detect.
+#
+# Format: KEY=VALUE, `#` comments, `~` and $VARS expanded, no quotes needed.
+# A real environment variable always overrides the value here.
+#
+# Check the result with:   python tools/doctor.py
+
+
+# ===========================================================================
+# 1. REQUIRED -- where ComfyUI is installed
+# ===========================================================================
+# Point at the directory that CONTAINS ComfyUI. Both shapes are auto-detected:
+#
+#   Windows portable   COMFY_HOME/ComfyUI/main.py, COMFY_HOME/python_embeded/
+#   Linux git clone    COMFY_HOME/main.py,         COMFY_HOME/venv/
+#
+# Windows example:  COMFY_HOME=C:/Users/you/ComfyUI_windows_portable
+# Linux example:    COMFY_HOME=/opt/ComfyUI
+#
+#COMFY_HOME=
+
+
+# ===========================================================================
+# 2. USUALLY AUTO-DETECTED -- set only if doctor.py reports them wrong
+# ===========================================================================
+# The interpreter that has torch + PyAV. It is NOT the one running the skill:
+# h3_media.py muxes MiniMax-H3's audio and must run inside ComfyUI's own env.
+#   Windows portable:  <COMFY_HOME>/python_embeded/python.exe
+#   Linux venv:        <COMFY_HOME>/venv/bin/python
+#COMFY_PYTHON=
+
+# Where the engine (paths.py, memplan.py, video_gen.py, workflows/) lives.
+# The skills find it via HERMES_COMFY_ENGINE, then engine_dir.txt, then the
+# default below, so you rarely need to set this by hand.
+#   Windows default:  %LOCALAPPDATA%/hermes/comfy-engine
+#   Linux default:    ~/.hermes/comfy-engine
+#HERMES_COMFY_ENGINE=
+
+# ComfyUI's HTTP endpoint. Change the port if 8188 is taken.
+#COMFY_URL=http://127.0.0.1:8188
+
+# "ComfyUI is not mine to start -- only to talk to."
+# Auto-detected: set when ComfyUI lives on a filesystem that belongs to another
+# OS (a Windows drive mounted into WSL). With it on, a failed connection reports
+# what to run on the host instead of trying to launch a Windows build under a
+# Linux interpreter. Set explicitly only to override the detection.
+#COMFY_REMOTE=1
+
+
+# ===========================================================================
+# 2b. WSL SPLIT INSTALL (Hermes in Ubuntu, ComfyUI on Windows)
+# ===========================================================================
+# tools/wsl_bootstrap.sh writes these for you. Shown here so the layout is
+# legible if you ever hand-edit it. See INSTALL.md section 6.5.
+#
+#   COMFY_HOME=/mnt/c/Users/you/ComfyUI_windows_portable
+#   COMFY_ROOT=/mnt/c/Users/you/ComfyUI_windows_portable/ComfyUI
+#   COMFY_REMOTE=1
+#   COMFY_URL=http://127.0.0.1:8188        # Windows' loopback, under mirrored networking
+#   COMFY_PYTHON=/home/you/.hermes/hermes-agent/venv/bin/python
+#   VIDGEN_AST_URL=http://127.0.0.1:8571     # the backend is on Windows too
+#
+# Two things that are NOT optional in that topology:
+#   * WSL mirrored networking (%USERPROFILE%\.wslconfig: [wsl2]
+#     networkingMode=mirrored, then wsl --shutdown). ComfyUI listens on 127.0.0.1
+#     only -- it has no authentication -- and in WSL's default NAT mode the
+#     distro has its own network namespace, so Windows' 127.0.0.1 is out of reach.
+#   * COMFY_PYTHON must be the DISTRO's python, never the Windows
+#     python_embeded/python.exe -- it is visible through /mnt/c but cannot be
+#     invoked with Linux paths. It only needs PyAV + Pillow, not torch:
+#         uv pip install --python <that python> av pillow pillow-heif
+#
+# The engine treats COMFY_URL as a hint: it probes the configured value first,
+# then, in NAT mode only, the current default gateway (which changes when WSL
+# restarts) -- reachable only if something there listens beyond loopback.
+
+# Extra flags for the ComfyUI process. Auto-set to --windows-standalone-build
+# on a Windows portable build; normally empty on Linux.
+#COMFY_EXTRA_ARGS=
+
+# Paid cloud "partner" nodes (Recraft, ...) are disabled by default
+# (--disable-api-nodes is always added). Set to 1 to load them.
+#COMFY_ALLOW_API_NODES=1
+
+# Writable state. Defaults sit beside the engine; move them to a fast disk if
+# the engine lives on a network share.
+#HERMES_COMFY_OUT=
+#HERMES_COMFY_JOBS=
+#HERMES_COMFY_LOGS=
+
+
+# ===========================================================================
+# 3. THE MEMORY GUARD -- retune this for your GPU, it is the one that matters
+# ===========================================================================
+# VRAM permanently held back for the co-resident local LLM, whether or not it
+# is loaded right now. Reserving unconditionally is deliberate: otherwise a
+# render sizes itself into the LLM's memory while the LLM happens to be idle,
+# and evicts it the moment someone talks to it.
+#
+#   Set it to the VRAM your local LLM actually occupies.
+#
+# This value is one-way: raising it works, lowering it below the 7.0 default is
+# IGNORED (and now says so on stderr). That is deliberate -- a refused render
+# should not be able to argue its way past the guard by shrinking it -- but it
+# means a machine with no co-resident LLM cannot simply set 0 here and get the
+# whole card. Freeing the reservation needs VIDGEN_UNSAFE_OVERRIDE=1 alongside
+# it, which is a maintainer's switch: use it for a deliberate "what can this
+# card do on its own" measurement, not as a way around a refusal.
+#
+#   No co-resident LLM at all, and you want the full card:
+#       VIDGEN_UNSAFE_OVERRIDE=1
+#       VIDGEN_LLM_VRAM_BUDGET=0
+#
+# If the backend reports the loaded model holding MORE than this, the larger
+# figure wins. It is a floor, not a cap.
+#
+# Reference box: 16 GB card, 35B LLM at 7 GB -> ~7.5 GB left for video.
+VIDGEN_LLM_VRAM_BUDGET=7.0
+
+# ---------------------------------------------------------------------------
+# The TRUSTA-AST backend
+# ---------------------------------------------------------------------------
+# Everything the planner knows about the co-resident LLM is asked here: whether
+# a model is loaded, which engine hosts it, how much of the card it holds. No
+# inference runtime is ever named or probed directly, so swapping the engine
+# AST hosts needs no change on this side.
+#
+# Unreachable backend = the planner assumes an LLM IS resident and reserves for
+# it. That is the safe direction, and it costs you a smaller video, not a
+# crashed agent.
+#VIDGEN_AST_URL=http://127.0.0.1:8571
+#VIDGEN_AST_TIMEOUT=4
+
+# ---------------------------------------------------------------------------
+# dramagen: where the script-writing LLM answers
+# ---------------------------------------------------------------------------
+# dramagen's story.py talks to an OpenAI-compatible /v1/chat/completions to
+# turn a premise into drama.json. Leave this unset and it reuses
+# VIDGEN_AST_URL above (+ "/v1"), because on a normal box that IS the local
+# LLM -- one address to configure, not two. Set it only when the writing model
+# lives somewhere else than the backend the planner asks about.
+#DRAMAGEN_LLM_URL=http://127.0.0.1:8571/v1
+
+# Which served model to ask for. Unset = whatever /v1/models lists first,
+# which is right on a single-model server and is why this is rarely needed.
+#DRAMAGEN_LLM_MODEL=
+
+# NOTE: dramagen also needs ffmpeg + ffprobe on PATH -- it concatenates the
+# per-shot clips and muxes the dialogue subtitle track. doctor.py checks this.
+
+# ---------------------------------------------------------------------------
+# How VRAM gets measured (vendor-agnostic)
+# ---------------------------------------------------------------------------
+# The planner only asks one question: how much of the card is already spoken
+# for, and how much is left. Sources are tried in order and the winner is
+# remembered:
+#
+#   1. VIDGEN_GPU_QUERY_CMD  (below)  — your own probe, always wins
+#   2. nvidia-smi                     — NVIDIA
+#   3. intel-ze                       — Intel, via the Level Zero runtime
+#   4. xpu-smi                        — Intel, via the optional CLI
+#   5. rocm-smi                       — AMD
+#   6. ComfyUI /system_stats          — whatever backend torch is on
+#   7. TRUSTA-AST /system/resources   — the backend's own probe
+#
+# Vendor tooling first, service APIs only once none of it is installed. Steps
+# 2-5 read the driver and therefore see every process on the card, which is the
+# number the planner must budget against.
+#
+# intel-ze comes before xpu-smi because the Level Zero loader ships with any
+# usable Intel GPU install while the CLI is a separate package. It runs in a
+# child process: a box can carry ze_loader.dll from the display driver with no
+# Level Zero driver behind it, and the loader then faults instead of returning
+# an error -- which must not happen inside the planner.
+#
+# Steps 6-7 are the safety net. Step 6 reports the live torch device (cuda,
+# xpu, ...) with no extra tooling; its weakness is that it can miss other
+# processes' allocations and reads free high on Windows/WDDM. Step 7 is the
+# last resort and is asked over the backend's API -- never by inspecting the
+# inference process it manages. `doctor.py` names whichever answered.
+#
+# Set this to any command printing `total,used,free` in MiB on one line:
+#VIDGEN_GPU_QUERY_CMD=/usr/local/bin/my-gpu-mib.sh
+
+# GB of VRAM kept free on top of everything else. Raising it is allowed;
+# lowering it is ignored unless VIDGEN_UNSAFE_OVERRIDE=1 (see memplan.py --
+# an agent that gets refused will otherwise try to argue with the refusal).
+#VIDGEN_VRAM_MARGIN=1.5
+
+# GB of RAM kept free. Unset = adaptive (free>=12GB -> 6, 6-12 -> 3, <6 -> 1).
+#VIDGEN_RAM_MARGIN=
+
+# GB kept free for the OS itself when counting the LLM's reclaimable pages.
+#VIDGEN_OS_FLOOR=1.5
+
+# ---- H3 wall-clock estimate: per-GPU, re-fit on a new box ------------------
+# Fitted on an RTX 5080 Laptop; an RTX 5060 Ti measured 2.6x slower. It is the
+# only number the skill uses to decide whether a render fits a foreground
+# `--wait`, so reading short makes the agent block a turn it cannot finish.
+# Re-fit = actual seconds / planned h3_time_estimate_s, from two different
+# lengths (one point cannot separate a wrong constant from a wrong curve).
+#VIDGEN_H3_TIME_C=3.101e-5
+
+# Wall-clock box for one segment. Keep it above C * 246000**1.4 -- the estimate
+# at the VRAM ceiling -- so activation, not this guess, caps a single shot.
+# A slower card needs a bigger box, not a shorter clip.
+#VIDGEN_H3_MAX_SEGMENT_S=1500
+
+# (VIDGEN_LLM_MLOCK is gone. It asked you to promise that the LLM's pages were
+# locked in RAM, then relaxed the very margin that protects the agent if the
+# promise was wrong -- and it was wrong by default on most runtimes. Locked
+# pages are now detected, not declared: proc_dram() subtracts VmLck on Linux,
+# so an mlocking runtime reports 0 reclaimable by measurement.)
+
+# auto (default) = count the LLM's clean mmap'd pages as spendable, and hand
+#                  them back for real once a render is confirmed running.
+# off            = never count them, never trim. Fully conservative.
+#VIDGEN_LLM_RECLAIM=auto
+
+# LINUX ONLY, optional. The default trim is process_madvise(MADV_PAGEOUT),
+# which needs CAP_SYS_NICE to act on another process -- including one this stack
+# is the parent of, and regardless of Yama ptrace_scope. Unprivileged is
+# therefore the normal case and nothing breaks when it is refused: Linux
+# reclaims clean file-backed pages under pressure by itself. Set this to a
+# helper command (the pid is appended) if you would rather drive it explicitly,
+# e.g. via cgroup v2 memory.reclaim.
+#VIDGEN_LLM_RECLAIM_CMD=
+
+# ---------------------------------------------------------------------------
+# Which card, and how long imggen waits
+# ---------------------------------------------------------------------------
+# AI Scaler Toolkit writes <its ComfyUI>/selected.json whenever ComfyUI is started
+# from its settings, naming the card picked there. The engine reads it to choose
+# ComfyUI's Python, the arguments that put it on that card, and the card the
+# planner measures -- so nothing here is needed on such a machine. Each of these
+# overrides that file.
+#COMFY_SELECTION=C:/path/to/selected.json
+#VIDGEN_GPU_VENDOR=intel        # nvidia | intel | amd: only that vendor's tools are asked
+#VIDGEN_GPU_INDEX=0             # nvidia-smi's numbering, for a box with several cards
+
+# imggen waits this long in the foreground (counted from its start), then prints
+# {"status": "running", "prompt_id": ...} and leaves ComfyUI to finish; collect it
+# with `gen.py status <prompt_id>`. Keep it under the agent's terminal timeout.
+#IMGGEN_WAIT_SECONDS=240
+# A running render with no progress (its server log not growing) for this long is
+# reported as stuck. One step on a slow card has been measured at two minutes.
+#IMGGEN_STALL_SECONDS=600

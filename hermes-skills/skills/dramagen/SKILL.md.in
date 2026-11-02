@@ -1,0 +1,267 @@
+---
+name: dramagen
+description: Automatically makes a short drama from a story premise — first the local LLM generates a story template (drama.json), then imggen renders the images and vidgen renders the clips, and finally they are stitched into one finished film with subtitles. Use when the user says "做一部短劇/AI 微電影/把這個故事拍出來/生一集短劇/幫我做分鏡再生成影片". You must run this skill's story.py and produce.py; never assemble ComfyUI calls yourself, and do not manually run imggen/vidgen shot by shot.
+metadata:
+  hermes:
+    tags: [short-drama, storyboard, pipeline, text-to-video, local-llm, comfyui, zh-hant]
+    category: creative
+---
+
+# dramagen — one-sentence premise → one short drama
+**Always reply to the user in Traditional Chinese (zh-Hant).** These instructions are in English; the user speaks Chinese.
+
+Connects **screenwriting** (local LLM) and **rendering** (imggen + vidgen) into one pipeline. Two scripts, fixed order:
+
+```
+story.py    premise ──local LLM──> drama.json (characters + storyboard + English image prompts)
+produce.py  drama.json ──imggen──> stills ──vidgen──> one video per shot ──ffmpeg──> final.mp4 + subtitles
+```
+
+`produce.py` itself **never touches ComfyUI**; it just runs `imggen/gen.py` and `vidgen/gen.py` in order,
+so those two skills' memory protection, model selection and refuse-to-run rules **apply here unchanged**.
+
+## 🔒 Iron rule: screenwriting first, then rendering, nothing in between
+
+**`story.py` must finish before `produce.py` can start.** This is not process fussiness; it is a physical limit of this machine:
+
+- `story.py` uses **your own resident LLM** (via `/v1/chat/completions`).
+- As soon as `produce.py` enters the clips stage, vidgen, once ComfyUI confirms rendering has started, **hands the DRAM held by
+  that LLM over to rendering** (vidgen iron rule 0). After that, every inference has to re-read the weights from the SSD.
+
+So "asking the LLM to revise the script while rendering" = both sides drag each other down. Running them separately avoids the problem entirely:
+the script stage uses the LLM, not the GPU; the rendering stage uses the GPU, not the LLM.
+
+**Therefore:**
+- Always submit `produce.py` with the `terminal` tool, using `background=true` + `notify_on_complete=true`.
+  It runs for tens of minutes; waiting in the foreground will certainly be killed by the timeout, and that turn cannot be closed, so the user cannot send even one message.
+- After submitting, **copy vidgen's announcement verbatim** to tell the user rendering is in progress and not to send more prompts meanwhile, then stop.
+- **Do not use `status` / do not tail the log to poll progress** —— every poll is a full inference that re-reads the weights.
+  Only look at `produce.log` once, when the user asks.
+
+## How to use (two lines)
+
+**Always use full absolute paths with forward slashes** (Hermes's terminal on Windows is bash, which eats backslashes):
+
+```
+# 1) Generate the story template (uses the LLM, not the GPU; one episode of 5 shots takes about 30 seconds)
+"@@PY@@" "@@STORY@@" "<story premise>" --episodes 1 --shots 5 --seconds 4 --portrait --out "@@DRAMA@@/<project name>"
+
+# 2) First check how long it will take and how many images/clips it will make (instant, no rendering)
+"@@PY@@" "@@PRODUCE@@" "@@DRAMA@@/<project name>/drama.json" --dry-run
+
+# 3) Actually render (this line always uses background=true + notify_on_complete=true)
+"@@PY@@" "@@PRODUCE@@" "@@DRAMA@@/<project name>/drama.json"
+```
+
+Step 2's `--dry-run` is free; **always run it first**, report "how many shots, how long" to the user, then submit step 3.
+
+## story.py parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--episodes N` | 1 | Number of episodes. One LLM call per episode |
+| `--shots N` | 5 | Shots per episode. **Number of shots = number of videos = the main cost** |
+| `--seconds N` | 4 | Seconds per shot |
+| `--style "..."` | cinematic realistic… | Visual style for the whole drama, **in English**. Writing `cartoon/anime/illustration` automatically switches to the fast image model |
+| `--language <code>` | zh-Hant | Language of the script and speech. See the "Language" section below |
+| `--portrait` | off | Vertical short drama (9:16) |
+| `--silent` | off | Switch everything to silent Wan i2v. **Do not add it by default**; see the section below |
+| `--all-dialogue` | off | Every shot must have dialogue (no empty shots without people), so the whole episode goes through r2v |
+| `--max-characters N` | 3 | Maximum number of characters |
+| `--think` | off | Let the model reason first. **Do not turn it on on this machine**; see the section below |
+
+## produce.py parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--dry-run` | — | Only report the plan and vidgen's instant plan; no rendering |
+| `--only refs,keyframes,clips,stitch` | all | Run only the specified stages (comma-separated) |
+| `--max-shots N` | all | Render only the first N shots. **The first time you do a new subject, test the waters with `--max-shots 1`** |
+| `--short 480\|576\|608\|720\|768` | 480 | Video short side. Higher means better quality but every shot gets slower |
+| `--seconds N` | per drama.json | Override each shot's length |
+| `--mode i2v\|r2v` | auto | Override the generation mode for all shots |
+| `--img-model qwen\|flux\|zimage\|realvis` | auto | Image model; auto picks based on the prompt language and style |
+| `--quality` | off (`--fast`) | Full step count, about 3.3x slower (only affects Wan i2v) |
+| `--steps N` | 8 (H3) | r2v sampling steps. **8 is enough**; see below |
+| `--no-speak` | off | Do not put dialogue into the r2v prompt (characters will not speak; only ambient sound remains) |
+| `--speech-lang "..."` | per drama.json | Which language the characters speak. **Unlocked, it goes wrong**; see below |
+| `--force` | off | Redo steps that are already done |
+| `--give-up-after N` | 2 | Abort that stage after N consecutive failures |
+
+## What the output looks like
+
+```
+<project>/
+├── drama.json      story template (characters, storyboard, dialogue, English image prompts)
+├── refs/           one head-and-shoulders character reference photo per character (only r2v needs it)
+├── keyframes/      one starting still per shot
+├── clips/          one mp4 per shot
+├── dialogue.srt    dialogue subtitles (timed to the actual clip lengths)
+├── final.mp4       the stitched finished film, with soft subtitles embedded
+├── state.json      the state of every step (resuming relies on it)
+└── produce.log     the full process
+```
+
+**When reporting, paste the absolute path of `final.mp4` for the user**, and explain that the subtitles are soft subtitles (they must be enabled in the player).
+
+## 🔊 Why the default is MiniMax-H3 (r2v), not Wan (i2v)
+
+**Shots with people always go through `r2v`; only shots without people (object close-ups, empty scenes) go through `i2v`.**
+`story.py` decides this automatically; you do not need a flag. The reason is measured numbers, not preference
+(2026-08-28, RTX 5080 16GB, LLM resident, 480p vertical):
+
+| | `i2v` (Wan 2.2) | **`r2v` (MiniMax-H3, default)** |
+|---|---|---|
+| One 5-second shot | **288 seconds** | **255 seconds** |
+| Sound | ❌ silent | ✅ native stereo |
+| Character consistency across shots | ❌ in testing, three shots grew three different people | ✅ both characters' faces and costumes held |
+| Each shot needs an image first | ✅ one keyframe per shot | ❌ no (only one reference photo per character) |
+| When there are no characters | ✅ works | ❌ **does not work**; H3 needs at least one reference image |
+
+H3 is **also cheaper per second of video**, skips the per-shot keyframe, and solves i2v's biggest problem ——
+each shot's starting image is generated independently, and appearance descriptions alone cannot reproduce the same face.
+
+`produce.py` automatically does the two things the vidgen docs require, so you do not have to worry about them:
+it generates character reference photos directly in **head-and-shoulders framing** (H3 scales the reference image to the output frame size, so in a full-body photo the face is only 60–80 px and becomes unrecognisable),
+and it writes the prompt with `Picture 1 / Picture 2` mapping (vidgen enforces this when there are multiple reference images).
+
+## 🗣️ Characters speak their dialogue aloud (on by default)
+
+`produce.py` writes the shot's dialogue into the r2v prompt, and **H3 then speaks it in Chinese**.
+This was verified by feeding the finished audio track into faster-whisper for recognition and comparing it with the script:
+
+| | Script | Recognised |
+|---|---|---|
+| 0.00–2.80 | 今天天氣真好，外面下雨了。 | 今天天氣真好 外面下雨了 |
+| 2.80–5.12 | 嗯…謝謝小夥計。 | 嗯 謝謝小火雞 |
+
+The first line matched word for word; in the second, recognition heard 「小夥計」 as the homophone 「小火雞」 — the model did not mispronounce it.
+**The control group** (same reference photo, same shot, dialogue removed from the prompt only) yielded no recognisable speech at all,
+only Whisper's fixed hallucinated output for non-speech.
+
+The same A/B also showed the picture did **not** get worse: the clip with dialogue had more complete scene detail,
+the character was visibly talking in the close-up, face and costume still held to the reference photo, and no on-screen text appeared.
+
+Three things handled automatically, so you do not have to worry about them:
+- The speaker is referred to as `Picture N` (the same naming as the rest of the prompt; the model is not given a new name)
+- **Action directions in parentheses are removed** (from 「（轉頭，眼神空洞）這味道…」 only the second half can be spoken;
+  a line that is entirely an action direction, like 「…(沉默)」, produces no speech at all)
+- **The speech language is locked** (see below)
+
+### 🌐 The language is chosen by the user, and it must be locked
+
+**Choose the language with `story.py --language`**; one flag decides three things so they do not drift apart:
+**which language the model writes** the script in, the `language` code recorded in `drama.json`,
+and the wording given to the video model, `speech_language` (this is what the speech lock uses).
+
+```
+story.py "<premise>" --language zh-Hant     # default: Traditional Chinese
+story.py "<premise>" --language ja          # Japanese script + Japanese speech
+story.py "<premise>" --language yue         # Cantonese
+story.py "<premise>" --language "Brazilian Portuguese"   # anything not in the table is passed through as-is
+```
+
+Code table: `zh-Hant`/`zh-Hans`/`zh`/`ja`/`ko`/`en`/`es`/`th`/`yue`;
+it also accepts spellings like `Japanese`, `English`; anything not in the table is **passed through as-is** without error.
+
+**Why it must be locked**: the prompt's skeleton is English and the dialogue is in another language;
+**left alone, H3 picks a language line by line by itself**, and one clip ends up half Chinese, half English (the user actually hit this).
+So `produce.py` states the language **twice**: first a whole-shot rule
+("all dialogue in this shot is in X; no English or any other language"), then it labels every line again
+(`Picture 1 says in X: "…"`). **Saying it once is not enough.**
+
+**Measured verification** (whisper auto-detecting the language, with no hint given):
+
+| Script setting | Dialogue | Recognition result |
+|---|---|---|
+| `--language ja` | ありがとうございました。 | `lang=ja p=0.97`「ありがとうございました」 |
+| `--language ja` | あの人、いつもと違う道を… | `lang=ja p=0.96`「あの人長、いつもと違う道を」 |
+| `--language zh-Hant` | 今天天氣真好，外面下雨了。 | `lang=zh p=1.00`「今天天氣真好 外面下雨了」 |
+
+**Precedence**: `produce.py --speech-lang` > `drama.json`'s `speech_language`
+> the `language` code > the Traditional Chinese default. So you can also "write the script in Chinese but have the characters speak Cantonese".
+
+The dialogue's speaker field **accepts the real name, en_name or id** (briefs in different languages have different habits).
+
+To turn it off and go back to ambient sound only: `produce.py --no-speak`.
+
+**Dialogue length must fit the shot length.** 5 seconds fits roughly two short lines; write too much and the model will not finish or will speak too fast.
+`story.py`'s rules already limit each shot to at most 2 lines.
+
+## ⚡ H3 uses 8 steps, not the official 20
+
+H3's own default is 20 steps. Tested with **the same seed, same shot, same reference photo** (480p vertical, 5 seconds):
+
+| steps | Time | Speech recognition | Picture |
+|---|---|---|---|
+| 20 (H3 default) | 256 s | both lines correct | baseline |
+| 12 | 177 s | both lines correct | no visible difference |
+| **8 (this skill's default)** | **129 s** | both lines correct | no visible difference |
+
+With the same seed, 20 vs 8 even kept H3's own three-cut editing structure identical; sharpness, detail and character consistency are on par.
+The reason is probably that the workflow's sampler is `res_multistep` —— high-order multistep solvers naturally converge well at low step counts.
+
+Cost model: **about 44 seconds fixed cost + 10.6 seconds per step**. The fixed part is model loading and VAE / audio decode,
+which does not shrink with steps, so the marginal benefit of cutting below 8 steps diminishes quickly.
+
+**Only when a hard shot (fast motion, complex interaction) looks blurry, compare once with `--steps 20`**; do not turn it on by default.
+
+**Another limit**: raising `--short` is especially expensive for H3 —— for the same 5 seconds, 480 takes about 2 minutes, 768 about 7 minutes.
+   Only go up if the quality is not good enough; do not turn on 768 by default.
+
+To switch everything back to silent Wan: `story.py --silent`, or `produce.py --mode i2v`.
+It is only worth doing for "pure mood pieces with no recurring characters".
+
+## ⚡ Why story.py turns off the model's "thinking" by default
+
+The local model is a reasoning model, and the gateway in front of it **discards the reasoning and returns only the content**,
+but the reasoning tokens **still count toward max_tokens**. Measured on the same request:
+
+| | Time | completion tokens | JSON received |
+|---|---|---|---|
+| Thinking on | 12.9 s | 700 (exhausted, `finish_reason=length`) | **empty string** |
+| Thinking off | 2.2 s | 67 (`stop`) | complete |
+
+The first time the full template was run, thinking being on caused all three retries to be truncated at the same spot, **failing after 3 min 37 s**;
+with it off, **it succeeded in 29 seconds**. So `story.py` sends `enable_thinking:false` by default.
+`--think` is left for those who want to try it, but you must also raise `--max-tokens`.
+
+## ⚠️ Chinese script, English prompts (this rule cannot change)
+
+In `drama.json`, **dialogue and action are Traditional Chinese** (that is the script),
+but `image_prompt` / `motion_prompt` are **always English** —— because the text encoders of RealVisXL and FLUX cannot read Chinese;
+sending Chinese in **raises no error**, it just quietly produces an image that is "clean-looking but completely unrelated in content".
+
+`story.py` already takes care of this (when the model writes in Chinese, it translates back to English itself).
+If you **hand-write drama.json yourself**, follow this rule too; if Chinese really is left in, `produce.py`'s `auto` falls back to
+`qwen` (handles Chinese but is slow) rather than silently generating the wrong image.
+
+## What to do when it fails
+
+1. **Look at the last few lines of `produce.log`**; the original error text is all there.
+2. **Do not rerun the whole thing** —— `state.json` records every step; just run the same command line again, finished steps are skipped and only unfinished ones are filled in.
+3. A `vidgen` refusal (`ok:false`) is usually insufficient headroom: following its error message, shrink `--seconds` or lower `--short`.
+4. Two consecutive failed shots abort automatically (`--give-up-after`) —— that means the settings are broken, not bad luck; fix them before running again.
+5. **A terminal timeout ≠ a rendering failure.** vidgen's worker is an independent process and will finish on its own.
+   Do not resubmit; wait for the notification or check the log later.
+
+## Division of labour: relationship with ai-short-drama-screenwriter
+
+| Need | Which to use |
+|---|---|
+| "Write a short drama / revise this dialogue / review this script" —— **text only** | `ai-short-drama-screenwriter` skill |
+| "**Film** this story / turn it into a video" | **dramagen** (this skill) |
+
+`story.py`'s prompts are condensed from that skill's screenwriting rules (excerpted in
+[`references/screenwriting.md`](references/screenwriting.md); the original skill is MIT-licensed,
+source https://github.com/POUND0423/AI-drama-pound).
+If the user wants to see the script first and revise it before filming, write it with that skill, then hand-write a template **following `drama.json`'s structure** and feed it to `produce.py`.
+
+## Rules
+
+1. **Only run `story.py` and `produce.py`.** Do not write your own scripts, do not hit ComfyUI's `/prompt` yourself,
+   do not run imggen/vidgen shot by shot yourself —— that loses resuming, subtitles and stitching, and makes it easy to miss the memory protection.
+2. **`produce.py` always runs in the background.** No exceptions.
+3. **The first time you do a new subject, start with `--max-shots 1`**, check that one shot's output is right, then let the whole episode render.
+4. A one-sentence premise from the user is enough; use defaults for missing settings, and do not get stuck asking for details.
+5. Changing the underlying models / memory parameters is done in `@@ENGINE@@/`, not here.
