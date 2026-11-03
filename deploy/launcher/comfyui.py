@@ -114,7 +114,7 @@ _VENDORS = {"10DE": "nvidia", "8086": "intel", "1002": "amd"}
 # --------------------------------------------------------------------------- layout
 
 def home() -> Path:
-    return config.data_dir() / "components" / "comfyui"
+    return config.components_root() / "components" / "comfyui"
 
 
 def source_dir() -> Path:

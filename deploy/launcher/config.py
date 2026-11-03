@@ -338,6 +338,36 @@ def data_dir() -> Path:
     return Path.home() / ".local" / "share" / APP_ID
 
 
+@lru_cache(maxsize=1)
+def components_root() -> Path:
+    """Where the big installed pieces go: the backend's environment and ComfyUI.
+
+    An installed Windows build puts them in the program directory. The installer
+    already asks which directory that is, and nothing honoured the answer for these:
+    the program is 0.3 GB and these are 7.6, so choosing another drive still filled
+    the system one. The uninstaller clears {app} wholesale ([UninstallDelete] in
+    installer.iss), which is what should happen to a virtual environment and a copy
+    of ComfyUI.
+
+    They used to sit outside the program directory so an uninstall would not take
+    them. The uninstaller removed them anyway, through DataDir(), so that bought
+    nothing -- do not move them back on that reasoning.
+
+    Everywhere else, the data directory, unchanged: an AppImage is a read-only
+    squashfs mounted afresh at a new path each run, so there is nothing to install
+    beside, and a source checkout should not grow a multi-gigabyte environment inside
+    itself.
+    """
+    if not (IS_WINDOWS and getattr(sys, "frozen", False)):
+        return data_dir()
+    # An install from before this moved keeps what it has. A virtual environment
+    # cannot be relocated -- its scripts and pyvenv.cfg carry absolute paths -- so the
+    # alternative is 3.6 GB downloaded again on an upgrade that changed nothing.
+    if (data_dir() / "service" / ".venv").exists():
+        return data_dir()
+    return app_dir()
+
+
 def config_dir() -> Path:
     if IS_WINDOWS:
         return _win_local_appdata() / APP_NAME
@@ -355,14 +385,12 @@ def log_dir() -> Path:
 def venv_dir() -> Path:
     """Where the backend's virtual environment goes.
 
-    Deliberately outside the program directory: an uninstall-reinstall cycle should not
-    have to re-download 6+ GB, and a program directory that grows by gigabytes after
-    install surprises people.
+    See components_root for which directory that is and why.
 
     uv would otherwise create .venv inside the backend project, so provision.py passes
     this through UV_PROJECT_ENVIRONMENT.
     """
-    return data_dir() / "service" / ".venv"
+    return components_root() / "service" / ".venv"
 
 
 def wheel_cuda_home() -> Path | None:
@@ -441,9 +469,15 @@ def llama_staging_dir() -> Path:
 def strata_dir() -> Path:
     """Where install_strata puts the Strata engine, its venv and its run configs.
 
-    Beside the virtual environment, outside the program directory, for the same reasons:
-    a reinstall or an AppImage payload refresh must not throw away an install whose setup
-    took minutes. Short on purpose -- Strata's tree goes about 130 characters deeper, and
+    The data directory, not components_root with the rest: Strata's own setup keeps
+    what it derives from a model -- the expert pack, the draft layer -- in Strata-data
+    beside this folder (``home().parent / "Strata-data"`` in its setup.py), and the
+    uninstaller offers to keep that, because it is gigabytes and minutes of setup to
+    make again. Moving this folder moves those gigabytes into the program directory,
+    which the uninstaller clears wholesale. Strata's setup takes a --data-dir; until
+    the backend passes one, this stays put.
+
+    Short on purpose -- Strata's tree goes about 130 characters deeper, and
     install_strata.ps1 refuses a folder longer than 110.
     """
     return data_dir() / "strata"

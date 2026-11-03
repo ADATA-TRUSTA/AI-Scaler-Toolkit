@@ -1882,7 +1882,9 @@ def diagnose() -> int:
         environment = provision.build_env()
         for key in ("UV_PROJECT_ENVIRONMENT", "HF_HOME"):
             print(f"  {key:<18} {environment.get(key)}")
-        print(f"  disk free          {provision.disk_free_gb(config.data_dir()):.1f} GB")
+        root = config.components_root()
+        print(f"  components root    {root}")
+        print(f"  disk free          {provision.disk_free_gb(root):.1f} GB")
     except Exception as exc:
         print(f"  WOULD FAIL: {exc}")
 

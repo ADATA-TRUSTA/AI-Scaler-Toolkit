@@ -210,9 +210,11 @@ begin
   end;
 
   // Provisioning output that lives outside the program directory, so uninstalling
-  // does not touch it unless we do it here: the virtual environment, the launcher's
-  // state and logs, and the staging directory the llama installer uses. The llama
-  // runtime itself now lands under the program directory and goes with it.
+  // does not touch it unless we do it here: the launcher's state and logs, and the
+  // staging directory the llama installer uses. The llama runtime, the backend's
+  // virtual environment and ComfyUI all land under the program directory now and go
+  // with it ([UninstallDelete] clears {app} wholesale). An install made before they
+  // moved still keeps them here, which is why the environment is still named below.
   // Strata's setup keeps what it derives from each model (the expert pack, the draft
   // layer) in Strata-data beside its install: gigabytes, and minutes of setup to make
   // again. Asked about like the model cache, so the rest of the data directory goes
@@ -229,10 +231,10 @@ begin
   if KeepStrataData then
   begin
     Log('keeping Strata''s data at ' + StrataData);
-    RemoveAllBut(DataDir(), 'Strata-data', 'launcher data, virtual environment and logs');
+    RemoveAllBut(DataDir(), 'Strata-data', 'launcher data, logs and any environment an older install left here');
   end
   else
-    RemoveIfExists(DataDir(), 'launcher data, virtual environment and logs');
+    RemoveIfExists(DataDir(), 'launcher data, logs and any environment an older install left here');
   RemoveIfExists(ExpandConstant('{localappdata}\Microsoft\WindowsApps\llama.exe'), 'llama binary');
   RemoveIfExists(ExpandConstant('{localappdata}\llama-app'), 'llama staging');
 

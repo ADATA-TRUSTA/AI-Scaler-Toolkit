@@ -167,7 +167,7 @@ def disk_free_gb(path: Path) -> float:
 
 def check_disk() -> None:
     """Stop before starting rather than halfway through a multi-gigabyte download."""
-    free = disk_free_gb(config.data_dir())
+    free = disk_free_gb(config.components_root())
     if free < config.MIN_FREE_DISK_GB:
         raise RuntimeError(
             f"Only {free:.1f} GB free where the environment is installed; "
@@ -233,8 +233,9 @@ def run(on_line: Callable[[str], None] | None = None,
     """
     log.info("provisioning requested")
 
-    free = disk_free_gb(config.data_dir())
-    log.info("disk free at %s: %.1f GB (need %s GB)", config.data_dir(), free, config.MIN_FREE_DISK_GB)
+    free = disk_free_gb(config.components_root())
+    log.info("disk free at %s: %.1f GB (need %s GB)",
+             config.components_root(), free, config.MIN_FREE_DISK_GB)
     check_disk()
 
     port = state.service_port()

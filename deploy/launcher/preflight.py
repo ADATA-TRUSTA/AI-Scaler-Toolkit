@@ -242,9 +242,13 @@ def check_webkitgtk() -> Check:
 def check_disk() -> Check:
     from .provision import disk_free_gb  # local import: provision imports config, not this
 
-    free = disk_free_gb(config.data_dir())
+    # Where setup actually writes its gigabytes, which on an installed Windows build is
+    # the drive chosen in the installer and not necessarily the one holding the profile.
+    root = config.components_root()
+    free = disk_free_gb(root)
     return Check("disk", "Free disk space", ok=free >= config.MIN_FREE_DISK_GB, required=True,
-                 detail=f"{free:.1f} GB available, {config.MIN_FREE_DISK_GB} GB needed for setup.",
+                 detail=f"{free:.1f} GB available on {root.anchor or root}, "
+                        f"{config.MIN_FREE_DISK_GB} GB needed for setup.",
                  remedy="free up space and start again")
 
 

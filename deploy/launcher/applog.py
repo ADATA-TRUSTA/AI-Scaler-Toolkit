@@ -82,6 +82,7 @@ def banner() -> None:
     log.info("backend dir   : %s", config.backend_dir())
     log.info("resource root : %s", config.resource_root())
     log.info("data dir      : %s", config.data_dir())
+    log.info("components    : %s", config.components_root())
     log.info("venv dir      : %s", config.venv_dir())
     log.info("state file    : %s", config.state_file())
     log.info("log file      : %s", log_path())
