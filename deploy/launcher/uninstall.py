@@ -23,8 +23,8 @@ from pathlib import Path
 
 from . import autostart, config, shortcuts, state
 
-# Strata's setup writes this beside its install (home().parent / "Strata-data" in its
-# setup.py), which is why it sits in the data directory rather than under strata/.
+# What Strata derives from a model. config.strata_data_dir keeps it out of the install,
+# whose directory goes wholesale; the name is needed here to carve it out of the sweep.
 STRATA_DATA = "Strata-data"
 
 
@@ -87,7 +87,7 @@ def run(assume_yes: bool = False) -> int:
 
     data = config.data_dir()
     settings = config.config_dir()
-    strata_data = data / STRATA_DATA
+    strata_data = config.strata_data_dir()
     models = config.hf_home()
 
     print(f"Removing {config.APP_TITLE}.")

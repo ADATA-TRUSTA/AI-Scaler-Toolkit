@@ -56,6 +56,9 @@ def desired(port: int) -> dict[str, str]:
         # Where the first Strata load installs Strata from the payload's package. Its
         # default is beside the backend project, which here is the program directory.
         "STRATA_INSTALL_DIR": str(config.strata_dir()),
+        # And where what it derives from a model goes, which is not with it: the
+        # uninstaller offers to keep that, and the install is cleared wholesale.
+        "STRATA_DATA_DIR": str(config.strata_data_dir()),
     }
     if not config.IS_WINDOWS:
         # The directory that holds the environment, not the environment: the backend

@@ -252,8 +252,20 @@ def check_disk() -> Check:
                  remedy="free up space and start again")
 
 
+def check_path_length() -> Check:
+    """Strata's folder follows the program directory, and Strata's tree is deep."""
+    root = config.components_root()
+    budget = config.STRATA_PATH_BUDGET
+    used = len(str(root / "strata"))
+    return Check("path-length", "Install path length", ok=used <= budget, required=False,
+                 detail=f"{used} of {budget} characters used by {root / 'strata'}.",
+                 remedy="reinstall into a shorter path; Strata cannot be set up from here, "
+                        "though everything else works")
+
+
 CHECKS = (
     check_disk,
+    check_path_length,
     check_webview2,
     check_webkitgtk,
     check_accelerator,

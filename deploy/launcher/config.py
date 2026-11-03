@@ -31,6 +31,13 @@ VLLM_PORT = 5000
 # llama binaries. Checked before starting rather than discovered halfway through.
 MIN_FREE_DISK_GB = 10
 
+# Strata's own tree goes about 130 characters below its folder, and Windows stops at 260
+# unless long paths are on for the whole machine, so install_strata refuses a folder
+# longer than 110. That folder follows the program directory now, which the person
+# installing chooses, so the limit is theirs to run into -- checked before anything is
+# installed rather than when a first Strata load fails.
+STRATA_PATH_BUDGET = 110
+
 
 # Windows only. Without it every helper this launcher runs -- reg query, the
 # provisioning script, the service -- flashes or holds open a console window, which
@@ -469,18 +476,26 @@ def llama_staging_dir() -> Path:
 def strata_dir() -> Path:
     """Where install_strata puts the Strata engine, its venv and its run configs.
 
-    The data directory, not components_root with the rest: Strata's own setup keeps
-    what it derives from a model -- the expert pack, the draft layer -- in Strata-data
-    beside this folder (``home().parent / "Strata-data"`` in its setup.py), and the
-    uninstaller offers to keep that, because it is gigabytes and minutes of setup to
-    make again. Moving this folder moves those gigabytes into the program directory,
-    which the uninstaller clears wholesale. Strata's setup takes a --data-dir; until
-    the backend passes one, this stays put.
+    With the other components -- it is an engine and an environment, and an uninstall
+    should take it. What it derives from a model does not go with it: see
+    strata_data_dir.
 
-    Short on purpose -- Strata's tree goes about 130 characters deeper, and
-    install_strata.ps1 refuses a folder longer than 110.
+    Short -- Strata's tree goes about 130 characters deeper, and install_strata
+    refuses a folder longer than 110, which is why STRATA_PATH_BUDGET exists.
     """
-    return data_dir() / "strata"
+    return components_root() / "strata"
+
+
+def strata_data_dir() -> Path:
+    """What Strata derives from a model: the expert pack and the draft layer.
+
+    Gigabytes, and minutes of setup to make again, so the uninstaller offers to keep
+    it -- which means it cannot live in the program directory, cleared wholesale on
+    uninstall, nor where Strata's setup would put it by default (``home().parent /
+    "Strata-data"``, beside the install). STRATA_DATA_DIR tells the backend to pass
+    Strata's setup a --data-dir naming this instead.
+    """
+    return data_dir() / "Strata-data"
 
 
 def gguf_tools_dir() -> Path:
