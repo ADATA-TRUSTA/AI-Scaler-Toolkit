@@ -1,21 +1,11 @@
 {
-  "generated_at": "2026-11-02T05:56:25.102Z",
+  "generated_at": "2026-11-03T06:42:23.806Z",
   "repository": "ADATA-TRUSTA/AI-Scaler-Toolkit",
   "traffic": {
     "views": {
-      "count": 100,
-      "uniques": 16,
+      "count": 81,
+      "uniques": 21,
       "views": [
-        {
-          "timestamp": "2026-10-18T00:00:00Z",
-          "count": 1,
-          "uniques": 1
-        },
-        {
-          "timestamp": "2026-10-19T00:00:00Z",
-          "count": 30,
-          "uniques": 4
-        },
         {
           "timestamp": "2026-10-20T00:00:00Z",
           "count": 10,
@@ -75,23 +65,23 @@
           "timestamp": "2026-10-31T00:00:00Z",
           "count": 0,
           "uniques": 0
+        },
+        {
+          "timestamp": "2026-11-01T00:00:00Z",
+          "count": 1,
+          "uniques": 1
+        },
+        {
+          "timestamp": "2026-11-02T00:00:00Z",
+          "count": 11,
+          "uniques": 7
         }
       ]
     },
     "clones": {
-      "count": 168,
-      "uniques": 81,
+      "count": 151,
+      "uniques": 77,
       "clones": [
-        {
-          "timestamp": "2026-10-18T00:00:00Z",
-          "count": 12,
-          "uniques": 8
-        },
-        {
-          "timestamp": "2026-10-19T00:00:00Z",
-          "count": 28,
-          "uniques": 11
-        },
         {
           "timestamp": "2026-10-20T00:00:00Z",
           "count": 9,
@@ -151,6 +141,16 @@
           "timestamp": "2026-10-31T00:00:00Z",
           "count": 12,
           "uniques": 8
+        },
+        {
+          "timestamp": "2026-11-01T00:00:00Z",
+          "count": 3,
+          "uniques": 3
+        },
+        {
+          "timestamp": "2026-11-02T00:00:00Z",
+          "count": 20,
+          "uniques": 11
         }
       ]
     }
