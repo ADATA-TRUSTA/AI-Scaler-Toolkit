@@ -2017,10 +2017,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--headless", action="store_true",
                         help="set up and run the service with no window (release acceptance, "
                              "machines without a desktop)")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="remove the environment, components, shortcuts and settings this "
+                             "application installed (Linux; Windows has an uninstaller)")
+    parser.add_argument("--yes", action="store_true",
+                        help="with --uninstall, ask nothing: keep the data Strata prepared and "
+                             "the model cache")
     args = parser.parse_args(argv)
 
     if args.diagnose:
         return diagnose()
+
+    # Before the banner: the log file lives in the directory this removes.
+    if args.uninstall:
+        from . import uninstall
+
+        return uninstall.run(assume_yes=args.yes)
 
     applog.banner()
 
