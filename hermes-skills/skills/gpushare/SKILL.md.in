@@ -1,0 +1,85 @@
+---
+name: gpushare
+description: Use both GPUs of a two-card machine, or render on the card the LLM runs on. Puts the LLM to sleep (its weights go to DRAM and the GPU is freed), renders imggen / vidgen on that card, then wakes it; dispatches a shot list across both cards and joins the result. Use when the user wants both cards generating at once, mentions the LLM's GPU rendering too, sleep / wake, or a dispatch plan.json. For an ordinary image or video use imggen or vidgen; they already render on ComfyUI's own card and leave an LLM on the other card alone.
+metadata:
+  hermes:
+    tags: [gpu-sharing, dual-gpu, sleep-mode, wake-up, comfyui, imggen, vidgen]
+    category: creative
+---
+
+# gpushare — render on the LLM's card, or on both cards at once
+
+**Always reply to the user in Traditional Chinese (zh-Hant).** These instructions are in English; the user speaks Chinese.
+
+On a two-card machine the LLM keeps one card and ComfyUI the other. imggen and vidgen need nothing from this skill for that: they see the LLM on the other card, do not sleep it, and hold nothing back for it. Use this skill only to **also** render on the LLM's card.
+
+## The rule that matters
+
+**Run these with the `terminal` tool, in the foreground, and with no other tool.** While the LLM sleeps you cannot think, so sleep, render and wake are one command. The script always wakes the LLM before it returns, whether the render worked or not.
+
+An image on the LLM's card (the arguments are imggen's `gen.py`, after `run imggen`):
+
+```
+"@@PY@@" "@@GPUSHARE@@" run imggen <model> "<prompt>" [--ref ...] [--image ...] --seed N --out <dir>
+```
+
+A video (the arguments are vidgen's `gen.py`; `--wait` is added for you):
+
+```
+"@@PY@@" "@@GPUSHARE@@" run vidgen r2v "<prompt>" --ref ... --short 480 --seconds 5 --steps 8 --seed N
+```
+
+Look and repair:
+
+```
+"@@PY@@" "@@GPUSHARE@@" status
+"@@PY@@" "@@GPUSHARE@@" wake
+```
+
+## Both cards at once
+
+Write the shots to `plan.json` (below), then run these two in order:
+
+```
+"@@PY@@" "@@GPUSHARE@@" dispatch <plan.json>
+"@@PY@@" "@@GPUSHARE@@" wait <plan.json>
+```
+
+`dispatch` starts the `render` shots in the background and renders the `llm` shots inside one sleep window. `wait` waits up to 500 s and joins every video into `final.mp4`. If it answers `status: running`, run the same line again until `status: ok`. Each call returns within 600 s.
+
+```json
+{"title": "...",
+ "shots": [{"id": "s1", "gpu": "render", "kind": "video",
+            "args": ["r2v", "<prompt>", "--ref", "a.png", "--short", "720", "--seconds", "5"]},
+           {"id": "s2", "gpu": "llm", "kind": "video",
+            "args": ["r2v", "<prompt>", "--ref", "a.png", "--short", "480", "--seconds", "5"]},
+           {"id": "s3", "gpu": "llm", "kind": "image", "args": ["qwen21", "<prompt>", "--ref", "a.png"]}]}
+```
+
+- `gpu`: `render` is ComfyUI's own card, `llm` is the LLM's card.
+- `kind`: `image` runs imggen and `video` runs vidgen; `args` is what that `gen.py` takes.
+- Put the long shots on `render`. The sleep window has to fit every `llm` shot in 480 s; give the `llm` card short, small shots.
+
+## What comes back
+
+| Field | Meaning |
+|---|---|
+| `status` | `ok` = rendered and the LLM answers again |
+| `llm_engine` | what is serving the LLM |
+| `result.outputs` / `result.file` | the output files |
+| `sleep_s` / `generate_s` / `wake_s` / `first_token_s` | seconds in each stage |
+| `gpu_mb_llm_awake` → `gpu_mb_llm_asleep` → `gpu_mb_llm_awake_again` | VRAM on the LLM's card: awake → asleep → awake again |
+
+Report to the user:
+
+1. a table of the shots: id, GPU, kind, file, seconds
+2. the `final` path
+3. for a sleep window, `gpu_mb_llm_awake` → `gpu_mb_llm_asleep` → `gpu_mb_llm_awake_again`
+4. the total of the seconds
+
+## If it fails
+
+- **`has no /inference/sleep`**: this AI Scaler Toolkit cannot sleep a model. Nothing happened and the LLM is awake. Use imggen / vidgen on ComfyUI's own card and tell the user why.
+- **HTTP 409**: the loaded model cannot sleep. Tell the user to load it with sleep mode on in AI Scaler Toolkit.
+- **`no selection for the LLM's card`**: this machine has not been set up for it; show the user the message.
+- **`status: error` with `llm_ok: false`**: run `"@@PY@@" "@@GPUSHARE@@" wake`.

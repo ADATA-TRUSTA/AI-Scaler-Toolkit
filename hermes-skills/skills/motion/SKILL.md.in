@@ -100,7 +100,10 @@ original-size layer, then `stg.render(layer, box)` — effects then follow any z
 - Text positions come from OCR by **content** (`find_text_rect`). Barcode positions come from
   `find_codes`, whose decoded content proves the box is right.
 - Sanity-check every box (a one-line serial number is not 600 px wide; a QR code is square). If a box is
-  implausible, measure again — do not invent a reason or a number.
+  implausible, measure again — do not invent a reason or a number. An outline drawn directly on an OCR
+  ink box cuts through the glyph ascenders — pad the target vertically (~14 px) before outlining.
+- To flag conditional cells (e.g. red-painted "Days Out" values), detect them with a per-row-band colour
+  mask (red pixel test), not by guessing; verify the matched value with OCR before drawing on it.
 - Hide with the region's real background colour (a white input, a grey window and a pale-blue header
   differ). Start **every** frame — the opening wide shot included — from the hidden base image.
 - A column panel: take each column between two separator lines, inset 3 px, and check that its left and

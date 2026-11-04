@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Install the imggen + vidgen skills and their ComfyUI engine into a Hermes.
+"""Install the skills and their ComfyUI engine into a Hermes.
 
 Cross-platform on purpose: install.sh and install.ps1 are thin wrappers around
 this file, so Windows and Linux cannot drift apart in what they actually do.
@@ -46,7 +46,7 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 STAMP = time.strftime("%Y%m%d_%H%M%S")
-SKILLS = ("imggen", "vidgen", "dramagen", "recast", "motion")
+SKILLS = ("imggen", "vidgen", "dramagen", "recast", "motion", "gpushare")
 # ComfyUI custom nodes shipped with the pack, copied into <comfy>/custom_nodes.
 # hermes_minimax_h3_refkf is what makes `r2v --ref ... --image ...` (reference
 # images plus a pinned first frame) possible at all -- see its docstring.
@@ -361,6 +361,7 @@ def _link_render(home: Path, comfy: Path | None, skill_py: str, dry: bool,
         "@@DRAMA@@": (home / "drama").as_posix(),
         "@@RECAST@@": (PACK / "skills" / "recast" / "recast.py").as_posix(),
         "@@RECASTOUT@@": (home / "recast").as_posix(),
+        "@@GPUSHARE@@": (PACK / "skills" / "gpushare" / "gpushare.py").as_posix(),
         **motion_subs(home, PACK / "skills"),
     }
     written, templates = [], {}
@@ -682,6 +683,7 @@ def main() -> int:
         subs["@@DRAMA@@"] = (home / "drama").as_posix()
         subs["@@RECAST@@"] = (skills_root / "recast" / "recast.py").as_posix()
         subs["@@RECASTOUT@@"] = (home / "recast").as_posix()
+        subs["@@GPUSHARE@@"] = (skills_root / "gpushare" / "gpushare.py").as_posix()
         subs.update(motion_subs(home, skills_root))
         # Every *.in is a template, not just SKILL.md: references/ is linked
         # from SKILL.md and the model reads it, so its commands have to be real

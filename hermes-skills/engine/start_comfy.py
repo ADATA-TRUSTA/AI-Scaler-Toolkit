@@ -140,7 +140,7 @@ def main():
         lent_llm_gb = llmsleep.llm_vram_gb() or 0.0
         print(f"the hosted LLM is lent to each render (put to sleep or unloaded), so its "
               f"{lent_llm_gb:.1f} GB is not reserved")
-    elif a.wake and a.reserve is None and not llmsleep.is_lent():
+    elif a.wake and a.reserve is None and not llmsleep.is_lent() and llmsleep.on_render_card():
         _wake_llm()          # size the reserve against the LLM's HOT footprint
     g = sysmon.gpu_vram()
     if "error" not in g and lent_llm_gb:

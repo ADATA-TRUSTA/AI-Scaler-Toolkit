@@ -1040,6 +1040,34 @@ def proc_vram_gb(pids) -> float | None:
         return None
 
 
+def proc_vram_cards(pids) -> dict | None:
+    """{nvidia-smi index: GB} these processes hold on each card; None if unknown.
+
+    Tells a two-card box apart from a one-card box: an LLM on one card is no
+    reason to sleep it, or hold anything back for it, when ComfyUI renders on the
+    other. Only nvidia-smi names the card per process, so None -- Windows/WDDM,
+    which shows N/A here, or no NVIDIA tooling -- means "cannot tell", and the
+    caller keeps assuming one shared card.
+    """
+    want = {int(p) for p in pids if p}
+    if not want or WINDOWS:
+        return None
+    try:
+        run = lambda q: subprocess.run(["nvidia-smi", q, "--format=csv,noheader,nounits"],
+                                       capture_output=True, text=True, timeout=10).stdout
+        index = {u.strip(): i.strip() for i, u in
+                 (l.split(",") for l in run("--query-gpu=index,uuid").splitlines() if "," in l)}
+        cards: dict = {}
+        for line in run("--query-compute-apps=gpu_uuid,pid,used_memory").splitlines():
+            uuid, pid, mib = [f.strip() for f in line.split(",")]
+            if int(pid) in want:
+                card = index[uuid]
+                cards[card] = round(cards.get(card, 0.0) + float(mib) / 1024.0, 2)
+        return cards
+    except Exception:
+        return None
+
+
 def snapshot() -> dict:
     return {"gpu": gpu_vram(), "ram": system_ram()}
 

@@ -146,6 +146,9 @@ def _llm_vram_reserved_gb(free_vram_gb: float, total_vram_gb: float) -> tuple[fl
     """
     if LLM_VRAM_BUDGET <= 0:
         return 0.0, "disabled (VIDGEN_LLM_VRAM_BUDGET=0)"
+    import llmsleep
+    if not llmsleep.on_render_card():
+        return 0.0, "the LLM is on another card"
     budget = LLM_VRAM_BUDGET
     # If the backend reports the hosted model holding MORE than the configured
     # budget, believe it. Only upwards: a backend that under-reports (or hosts a

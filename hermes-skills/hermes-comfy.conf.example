@@ -242,6 +242,15 @@ VIDGEN_LLM_VRAM_BUDGET=7.0
 #VIDGEN_GPU_VENDOR=intel        # nvidia | intel | amd: only that vendor's tools are asked
 #VIDGEN_GPU_INDEX=0             # nvidia-smi's numbering, for a box with several cards
 
+# Two cards. An LLM measured on another card than the selected one is not put to
+# sleep and nothing is held back for it, so nothing here is needed to render
+# beside it. The gpushare skill also renders on the LLM's card; it reads that
+# card from this file, shaped like selected.json. See INSTALL.md.
+#GPUSHARE_SELECTION=<engine dir>/gpushare/selected.json
+#GPUSHARE_COMFY_PORT=8189       # the second ComfyUI, on the LLM's card
+#GPUSHARE_TIMEOUT=480           # seconds one sleep window may take
+#GPUSHARE_PRESET=               # a Python file with a production's own shot vocabulary
+
 # imggen waits this long in the foreground (counted from its start), then prints
 # {"status": "running", "prompt_id": ...} and leaves ComfyUI to finish; collect it
 # with `gen.py status <prompt_id>`. Keep it under the agent's terminal timeout.

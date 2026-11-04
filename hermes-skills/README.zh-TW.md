@@ -2,7 +2,7 @@
 
 [English](README.md) | 繁體中文
 
-讓 [Hermes](https://github.com/NousResearch/hermes-agent) agent **在自己的機器上**生圖、生影片、做介紹動畫的五個技能——
+讓 [Hermes](https://github.com/NousResearch/hermes-agent) agent **在自己的機器上**生圖、生影片、做介紹動畫的六個技能——
 圖片和影片在地端 ComfyUI 上算，動畫用程式產生——打包成可以搬到別台機器的形式。支援 **Windows 與 Linux**。
 不含模型權重（另外下載，見 [`MODELS.zh-TW.md`](MODELS.zh-TW.md)）。
 
@@ -37,6 +37,8 @@
   （Strata，透過 TRUSTA-AST，實測在 16 GB 的卡上佔 14.3 GB）。替這類引擎保留 VRAM 會讓算圖沒有空間可用，
   所以改成每次算圖都先等 agent 回完話、讓 LLM 睡眠——RAM 不夠放睡眠備份時就改為卸載；對話由後端保留——
   接著算圖，再把它載回來（參考機器上約 35 s）。
+- **雙顯示卡**（`gpushare`、`llmsleep.py`）：實測 LLM 在 ComfyUI 以外的另一張卡上時，不讓它睡眠，也不替它保留 VRAM。
+  要連 LLM 那張卡一起用時，`gpushare` 開一段睡眠時段，和另一張卡同時算圖，最後把鏡頭接成一支影片。
 - **把實測踩過的坑寫進 SKILL.md**：`t2v` 會產出純雜訊卻回報成功、參考圖被縮到臉只剩 78 px、
   逾時後重送導致同一段算圖付了兩次成本、H3 憑空生出原片沒有的剪接點⋯⋯每一條都寫成模型讀得到的規則，
   並附上促成這條規則的量測。
@@ -111,6 +113,7 @@ comfyui-skill/
 │   ├── vidgen/{SKILL.md.in, gen.py, references/traps-and-misuse.md.in}
 │   ├── recast/{SKILL.md.in, recast.py}
 │   ├── motion/{SKILL.md.in, motion.py, lib/, tests/, requirements.txt}   （自己的 venv：<hermes home>/motion-venv）
+│   ├── gpushare/{SKILL.md.in, gpushare.py, dispatch.py}
 │   └── dramagen/{SKILL.md.in, story.py, produce.py, references/screenwriting.md}
 ├── docs/showcase/              完全在地端做出的成果，附上產生它們的 prompt
 ├── bench/linux/                可以在全新 Linux 機器上跑的測試套件
@@ -175,7 +178,7 @@ NVIDIA GPU（建議 12 GB+ VRAM）、Python 3.9+、ComfyUI（含 `ComfyUI-GGUF` 
 | **WSL2 + Ubuntu 24.04.4**（Hermes 在 distro、ComfyUI/模型/LLM 留 Windows） | ✅ 出圖 16 s、i2v 影片 132 s、Hermes agent 自然語言驅動 ×3 |
 | **原生 Linux**（Ubuntu 24.04.4、RTX 5060 Ti 16 GB） | ✅ 端到端出圖；Hermes（Qwen3.8-27B 與 Qwen3.6-35B-A3B）驅動了多圖換裝、多輪修改、背景 + 多角色合成，以及移動人物 |
 
-尚未在 Linux 上跑過：GPU 出借路徑（`llmsleep.py`）、`recast` 與 `motion`。
+尚未在 Linux 上跑過：自動 GPU 出借路徑（`llmsleep.py`）、`recast` 與 `motion`。
 
 `tests/test_*.py` 與 `skills/motion/tests/test_motion.py` 在任何平台都能跑。到新機器後，先跑 `tools/doctor.py`。
 

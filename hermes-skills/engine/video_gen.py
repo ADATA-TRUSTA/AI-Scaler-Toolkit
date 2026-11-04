@@ -635,10 +635,14 @@ def _poll(prompt_id: str, timeout_s: int = 5400) -> dict:
                         return {"error": m[1]}
             for _nid, out in rec.get("outputs", {}).items():
                 for key in ("videos", "gifs", "images"):
-                    if out.get(key):
-                        v = out[key][0]
+                    for v in out.get(key) or []:
+                        # ComfyUI 0.37 also lists the LoadVideo preview of recast's
+                        # reference clip here, as type "input" and ahead of the
+                        # SaveVideo node; taking it failed every recast assemble.
+                        if v.get("type", "output") != "output":
+                            continue
                         return {"file": v.get("filename"), "subfolder": v.get("subfolder", ""),
-                                "type": v.get("type", "output")}
+                                "type": "output"}
             if status.get("completed"):
                 return {"error": "completed but no video output found"}
         time.sleep(2)
@@ -1392,8 +1396,9 @@ def _history_output(prompt_id: str):
         return None
     for _nid, out in rec.get("outputs", {}).items():
         for key in ("videos", "gifs", "images"):
-            if out.get(key):
-                v = out[key][0]
+            for v in out.get(key) or []:
+                if v.get("type", "output") != "output":   # a loader's preview, see _poll
+                    continue
                 return {"file": v.get("filename"), "subfolder": v.get("subfolder", "")}
     return None
 

@@ -130,10 +130,28 @@ def lendable(st: dict | None = None) -> bool:
     st = st if st is not None else llmapi.status()
     if not st or not (st.get("loaded") or st.get("sleeping")):
         return False
+    if not on_render_card():
+        return False
     if st.get("sleeping"):
         return True
     gb = _llm_vram_cached()
     return gb is not None and gb > HOLD_GB
+
+
+def on_render_card() -> bool:
+    """Does the LLM share the card ComfyUI renders on?
+
+    True unless measured otherwise: only an LLM seen on another card may be
+    left alone, and sleeping it needlessly costs less than holding nothing
+    back on a card it does share.
+    """
+    root, desc, _ = _tree()
+    cards = osmem.proc_vram_cards([root] + desc) if root else None
+    if not cards:
+        return True
+    if paths.GPU_VENDOR and paths.GPU_VENDOR != "nvidia":
+        return False                    # the LLM is on NVIDIA, the render is not
+    return not paths.GPU_INDEX or paths.GPU_INDEX in cards
 
 
 def _llm_vram_cached(ttl: float = 20.0) -> float | None:

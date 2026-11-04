@@ -428,6 +428,24 @@ planner 會把這顆 LLM 的 VRAM（從每個程序的 GPU 計數器讀取；AST
 
 借出期間，**agent 什麼都沒辦法回答**：在算圖結束前它是休眠或卸載狀態。
 
+### 雙顯示卡：LLM 在一張，ComfyUI 在另一張
+
+出借和 VRAM 保留只在 LLM 與 ComfyUI 共用同一張卡時才生效，而且是實測判斷：比對 AI Scaler Toolkit 選的卡，
+和 nvidia-smi 顯示 LLM 程序所在的卡。LLM 在另一張卡時會保持清醒，也不替它保留 VRAM。無法量測時
+（Windows，或 LLM 不在 NVIDIA 卡上）一律視為共用同一張卡。沒有載入模型時仍會保留 VRAM，
+因為無法得知下一個模型會載入到哪張卡。
+
+這部分不需要設定。`gpushare` 技能則能連 LLM 那張卡一起算圖：在一段睡眠時段內於 port 8189 開第二個 ComfyUI，
+agent 會等待指令結束，指令回來之前 LLM 已經醒來。模型必須以 sleep mode 載入，並且要描述那張卡：
+
+1. 把 `<ComfyUI home>/selected.json` 複製到 `<engine dir>/gpushare/selected.json`
+   （或用 `GPUSHARE_SELECTION` 指向其他路徑）。
+2. 把 `device`、`backend`、`vendor`、`index`、`name`、`env` 改成 LLM 那張卡，`python` 改成 torch 能在那張卡上執行的環境。
+   不同廠牌的第二張卡需要自己的環境。
+3. 用 `gpushare.py status` 確認。
+
+之後 `gpushare.py dispatch <plan.json>` 就能把分鏡同時送到兩張卡；plan 格式見 `skills/gpushare/SKILL.md.in`。
+
 ---
 
 ## 6.5 WSL 拆分安裝（Hermes 在 Ubuntu、ComfyUI 留在 Windows）

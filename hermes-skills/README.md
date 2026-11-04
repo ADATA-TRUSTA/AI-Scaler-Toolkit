@@ -2,7 +2,7 @@
 
 English | [繁體中文](README.zh-TW.md)
 
-Five skills that let a [Hermes](https://github.com/NousResearch/hermes-agent) agent make images, video and
+Six skills that let a [Hermes](https://github.com/NousResearch/hermes-agent) agent make images, video and
 explainer animation **on your own machine** — images and video on a local ComfyUI, animation by code —
 packaged so they can be moved to another machine. Supports **Windows and Linux**. Model weights are not
 included (download them separately, see [`MODELS.md`](MODELS.md)).
@@ -42,6 +42,9 @@ whole pipeline *is* that LLM.
   for those leaves nothing to render with, so instead each render waits until the agent has finished its
   reply, puts the LLM to sleep — or unloads it when there is not enough RAM for the sleep backup; the
   backend keeps the conversation — renders, and loads it back (~35 s on the reference machine).
+- **Two cards** (`gpushare`, `llmsleep.py`): an LLM measured on another card than ComfyUI's is left awake
+  and nothing is held back for it. To use the LLM's card as well, `gpushare` opens one sleep window,
+  renders there alongside the other card, and joins the shots into one film.
 - **Measured pitfalls written into SKILL.md**: `t2v` producing pure noise while reporting success,
   reference images shrunk until the face is 78 px, resubmitting after a timeout and paying for the render
   twice, H3 inventing cuts the source video does not have… each is written as a rule the model can read,
@@ -119,6 +122,7 @@ comfyui-skill/
 │   ├── vidgen/{SKILL.md.in, gen.py, references/traps-and-misuse.md.in}
 │   ├── recast/{SKILL.md.in, recast.py}
 │   ├── motion/{SKILL.md.in, motion.py, lib/, tests/, requirements.txt}   (own venv: <hermes home>/motion-venv)
+│   ├── gpushare/{SKILL.md.in, gpushare.py, dispatch.py}
 │   └── dramagen/{SKILL.md.in, story.py, produce.py, references/screenwriting.md}
 ├── docs/showcase/              Results made fully locally, with the prompts that made them
 ├── bench/linux/                A test kit that runs on a fresh Linux box
@@ -187,7 +191,7 @@ sampler. See `MODELS.md`.
 | **WSL2 + Ubuntu 24.04.4** (Hermes in the distro, ComfyUI/models/LLM stay on Windows) | ✅ Image in 16 s, i2v video in 132 s, Hermes agent driven by natural language ×3 |
 | **Native Linux** (Ubuntu 24.04.4, RTX 5060 Ti 16 GB) | ✅ End-to-end images; Hermes (Qwen3.8-27B and Qwen3.6-35B-A3B) drove multi-image outfit changes, multi-turn refinement, background + multi-character compositing and moving people |
 
-Not yet run on Linux: the GPU-lending path (`llmsleep.py`), `recast` and `motion`.
+Not yet run on Linux: the automatic GPU-lending path (`llmsleep.py`), `recast` and `motion`.
 
 The `tests/test_*.py` self-tests and `skills/motion/tests/test_motion.py` run on any platform. On a new
 machine, run `tools/doctor.py` first.

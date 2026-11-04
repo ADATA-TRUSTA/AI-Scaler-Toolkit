@@ -432,6 +432,27 @@ recorded in `jobs/LLM_LENT.json`. `recast` keeps it lent for a whole run and ret
 
 While the GPU is lent, **the agent cannot answer anything**: it is asleep or unloaded until the render ends.
 
+### Two cards: the LLM on one, ComfyUI on the other
+
+Lending and the VRAM hold-back only apply when the LLM shares the card ComfyUI renders on, and that is
+measured: the card picked in AI Scaler Toolkit against the card nvidia-smi shows the LLM's processes on.
+An LLM on another card stays awake and nothing is held back for it. Where this cannot be measured
+(Windows, or an LLM not on an NVIDIA card) the pack assumes one shared card. With no model loaded the
+hold-back still applies, since it cannot be known where the next one will load.
+
+That needs no setup. The `gpushare` skill also renders on the LLM's card: a second ComfyUI on port 8189
+inside one sleep window, so the agent waits on the command and the LLM is back before it returns. It
+needs the model loaded with sleep mode on, and a description of that card:
+
+1. Copy `<ComfyUI home>/selected.json` to `<engine dir>/gpushare/selected.json` (or point
+   `GPUSHARE_SELECTION` at another path).
+2. Set `device`, `backend`, `vendor`, `index`, `name` and `env` to the LLM's card, and `python` to an
+   environment whose torch runs on it. A second card from another vendor needs its own environment.
+3. Check with `gpushare.py status`.
+
+`gpushare.py dispatch <plan.json>` then sends a shot list to both cards; the plan format is in
+`skills/gpushare/SKILL.md.in`.
+
 ---
 
 ## 6.5 WSL split install (Hermes in Ubuntu, ComfyUI stays on Windows)
