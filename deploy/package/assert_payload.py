@@ -28,11 +28,20 @@ EXPECTED = {
         # The deep-sleep Strata package install_strata.ps1 installs from; fetched into
         # backend/vendor/ by the release build, never committed (the tree goes public).
         "strata_package": "strata-sleep-*-windows-x86_64.zip",
+        # Upstream has no Intel build path for Windows, so a payload never carries one.
+        "strata_optional_packages": (),
     },
     "linux": {
         "title": "TRUSTA-AST",
         "vllm_enabled": True,
         "strata_package": "strata-sleep-*-linux-x86_64.tar.gz",
+        # The Intel Arc (SYCL) build of the same engine: a second backend, not a second
+        # engine. A machine runs one or the other, but a payload may carry both and let
+        # the install pick by the hardware it finds, so this one is optional.
+        #
+        # -sycl sits at the end of the name on purpose: it keeps this out of the CUDA
+        # glob above, so the two never match each other's packages. Do not reorder it.
+        "strata_optional_packages": ("strata-sleep-*-linux-x86_64-sycl.tar.gz",),
     },
 }
 
@@ -223,13 +232,27 @@ def main() -> int:
 
     # Exactly one: install_strata takes the newest it finds, so a second one left from
     # another build would ship unused, and none leaves engine="strata" uninstallable.
-    packages = sorted((root / "backend" / "vendor").glob(expected["strata_package"]))
+    vendor = root / "backend" / "vendor"
+    packages = sorted(vendor.glob(expected["strata_package"]))
     if len(packages) != 1:
         found = ", ".join(p.name for p in packages) or "none"
         failures.append(
             f"backend/vendor should hold one {expected['strata_package']}, found {found} "
             "(ci/scripts/fetch_strata.py in the release repository puts it there)"
         )
+
+    # The same rule, one step weaker, for a backend the payload may or may not carry:
+    # absent is a deliberate build, so only a second copy is wrong -- it would ship
+    # unused for exactly the reason above.
+    for pattern in expected["strata_optional_packages"]:
+        extra = sorted(vendor.glob(pattern))
+        if len(extra) > 1:
+            failures.append(
+                f"backend/vendor holds {len(extra)} {pattern}: "
+                f"{', '.join(p.name for p in extra)}. This package is optional, but only "
+                "one of it can be installed, so the rest would ship unused "
+                "(ci/scripts/fetch_strata.py in the release repository puts it there)"
+            )
 
     # The console is part of the product and stays in the public layout, but it has no
     # place in an installation. Nothing here runs it, and nothing builds an environment
