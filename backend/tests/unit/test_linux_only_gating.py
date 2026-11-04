@@ -22,6 +22,10 @@ import pytest
 
 from service import platform_support
 
+# Covers the gate for both Linux-only features, fine-tuning and the vLLM engine, so
+# either domain's selection (-m finetune / -m inference) must still pick it up.
+pytestmark = [pytest.mark.inference, pytest.mark.finetune]
+
 
 def _marker_names(item) -> set[str]:
     return {marker.name for marker in item.iter_markers()}

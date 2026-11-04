@@ -7,8 +7,8 @@
 #   ./setup_env.sh                          # auto-detect; install llama only if missing
 #                                           # (llama-server, llama-quantize and llama-fit-params)
 #   TRUSTA_ACCEL=xpu ./setup_env.sh         # force cuda | xpu
-#   TRUSTA_SETUP_VLLM=0 ./setup_env.sh      # skip vLLM (installed by default on CUDA hosts)
-#   TRUSTA_SETUP_VLLM=1 ./setup_env.sh      # also on XPU hosts, where it is opt-in
+#   TRUSTA_SETUP_VLLM=0 ./setup_env.sh      # skip vLLM (installed by default on CUDA and XPU hosts)
+#   TRUSTA_SETUP_VLLM=1 ./setup_env.sh      # install vLLM even where auto would not
 #   TRUSTA_INSTALL_LLAMA=0 ./setup_env.sh   # skip llama entirely
 #   TRUSTA_INSTALL_LLAMA=1 ./setup_env.sh   # force reinstall even if already present
 #   TRUSTA_LLAMA_BACKEND=vulkan ./setup_env.sh  # force the generic Vulkan build (sees every Intel/AMD/NVIDIA card)
@@ -17,10 +17,12 @@
 #   TRUSTA_APT_INSTALL=0 ./setup_env.sh         # never apt-install, even as root
 #   TRUSTA_LLAMA_ALLOW_FALLBACK=1 ./setup_env.sh  # unattended: accept a degraded llama
 #   TRUSTA_SKIP_XPU_CHECK=1 ./setup_env.sh      # skip the post-sync XPU smoke check
+#   TRUSTA_SKIP_SYNC=1 ./setup_env.sh           # leave the Python environment as it is; only
+#                                               # the toolkit wiring, the DeepSpeed patch and llama
 #   TRUSTA_XPU_CHECK_TIMEOUT=600 ./setup_env.sh # raise the XPU check kill timeout (seconds)
 #   TRUSTA_SETUP_STRATA=1 ./setup_env.sh        # also install Strata (engine="strata", NVIDIA only)
-#                                               # through install_strata.sh: TRUSTA_STRATA_REPO /
-#                                               # _REF / _DIR / _SETUP_ARGS pick the source and model
+#                                               # through install_strata.sh: TRUSTA_STRATA_PACKAGE /
+#                                               # _DIR / _SETUP_ARGS pick the package and model
 set -euo pipefail
 
 die() {
@@ -51,7 +53,18 @@ LLAMA_TOOLS=(llama-quantize llama-fit-params)
 LLAMA_TOOLS_DIR="$SERVICE_DIR/utils/llama-tools"
 LLAMA_CPP_URL="https://github.com/ggml-org/llama.cpp"
 # The one place the pinned build is named. TRUSTA_LLAMA_VERSION overrides it.
-LLAMA_VERSION_DEFAULT="b11701"
+#
+# A b-tag, and a chosen one: llama.cpp tags every CI build b<N> as a prerelease, and marks
+# a release by publishing a versioned tag (v0.8.0) whose only asset is a nightly-tag.txt
+# naming the b-tag it was cut from. The versioned tag itself carries no binaries, so it
+# cannot be pinned here -- the Windows setup downloads llama-<tag>-bin-win-*.zip, and only
+# the b-tag has those. So pin what the newest release names rather than the newest build:
+# the same code, with someone's decision that it is a release.
+#
+#   curl -sL https://github.com/ggml-org/llama.cpp/releases/download/<version>/nightly-tag.txt
+#
+# b11960 is v0.8.0 (2026-10-28).
+LLAMA_VERSION_DEFAULT="b11960"
 LLAMA_VERSION="${TRUSTA_LLAMA_VERSION:-$LLAMA_VERSION_DEFAULT}"
 # The sources are a tarball of the tag, not a clone.
 #
@@ -113,30 +126,103 @@ ensure_llama_source() {
     echo "[setup_env] llama.cpp $ver sources ready at $LLAMA_SRC_DIR"
 }
 
+# PCI vendor ids, as sysfs spells them.
+PCI_VENDOR_INTEL="0x8086"
+PCI_VENDOR_AMD="0x1002"
+# Where the kernel publishes the DRM nodes. Overridable so the vendor branch below can be
+# exercised against a synthetic tree: this machine has exactly one GPU vendor, and the case
+# that matters is the one it does not have.
+DRM_CLASS_DIR="${TRUSTA_DRM_CLASS_DIR:-/sys/class/drm}"
+# The render nodes themselves, overridable for the same reason.
+DRI_DEV_DIR="${TRUSTA_DRI_DEV_DIR:-/dev/dri}"
+
+# The PCI vendor id behind each DRM render node, one per line, lowercased.
+#
+# A node under /dev/dri says that some GPU driver bound a card; it does not say whose.
+# amdgpu opens a render node exactly as i915 and xe do, so matching on the node alone
+# called every AMD machine an Intel one: detection answered "xpu", several gigabytes of
+# Intel PyTorch were downloaded, and the run ended at the XPU smoke check with a driver
+# complaint on a machine that has no Intel GPU at all. The vendor is published beside the
+# node, so ask for it rather than inferring it from the node's existence.
+drm_vendor_ids() {
+    local node vendor
+    for node in "$DRM_CLASS_DIR"/renderD*/device/vendor; do
+        [[ -r "$node" ]] || continue
+        read -r vendor < "$node" || continue
+        printf '%s\n' "${vendor,,}"
+    done
+}
+
+# Whether any render node belongs to this PCI vendor. Written without a pipe on purpose:
+# under `set -o pipefail` a `grep -q` that exits on the first match can SIGPIPE the producer
+# and turn a match into a failed pipeline.
+has_drm_vendor() {
+    local wanted="$1" vendor
+    for vendor in $(drm_vendor_ids); do
+        if [[ "$vendor" == "$wanted" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 detect_accel() {
     if nvidia-smi &>/dev/null 2>&1; then
         echo "cuda"
-    elif command -v clinfo &>/dev/null 2>&1 && clinfo 2>/dev/null | grep -qi "Intel"; then
+        return
+    fi
+    if command -v clinfo &>/dev/null 2>&1 && clinfo 2>/dev/null | grep -qi "Intel"; then
         echo "xpu"
-    elif [[ -d /dev/dri ]] && ls /dev/dri/renderD* &>/dev/null 2>&1; then
-        # Intel Arc / iGPU usually exposes a renderD device under /dev/dri
-        echo "xpu"
-    elif [[ -c /dev/dxg ]] && [[ -e /usr/lib/x86_64-linux-gnu/libze_loader.so.1 ]]; then
+        return
+    fi
+    if [[ -d "$DRI_DEV_DIR" ]] && ls "$DRI_DEV_DIR"/renderD* &>/dev/null 2>&1; then
+        if has_drm_vendor "$PCI_VENDOR_INTEL"; then
+            # Intel Arc / iGPU: a render node whose device is Intel's
+            echo "xpu"
+            return
+        fi
+        if [[ -z "$(drm_vendor_ids)" ]]; then
+            # A render node whose vendor cannot be read -- a container handed /dev/dri
+            # without /sys, say. Unknowable here, so keep what this branch meant before the
+            # vendor check rather than refusing a machine that used to install; the XPU
+            # check after the sync is where a wrong guess surfaces, and it names the driver.
+            echo "[setup_env] WARNING: $DRI_DEV_DIR has a render node whose PCI vendor could not be read; assuming Intel" >&2
+            echo "xpu"
+            return
+        fi
+        # A render node that is not Intel's. AMD, in practice: fall through to "none",
+        # which says what is missing instead of installing the wrong torch.
+    fi
+    if [[ -c /dev/dxg ]] && [[ -e /usr/lib/x86_64-linux-gnu/libze_loader.so.1 ]]; then
         # WSL2 has no /dev/dri: the GPU is paravirtualised through /dev/dxg, and Level Zero
         # reaches it via the loader shipped with the distro. Without this branch an Intel-only
         # WSL2 box falls through and installs the wrong torch extra.
         echo "xpu"
-    else
-        # Not cuda. Falling back to it meant that a machine with no accelerator at all
-        # -- an AMD desktop, a plain virtual machine -- installed the CUDA extra and
-        # died six minutes later building causal-conv1d, with
-        #
-        #   NameError: name 'bare_metal_version' is not defined
-        #
-        # from a setup.py that had looked for a CUDA toolkit and not found one.
-        # Nothing in that names the actual problem. Saying "none" turns it into one
-        # line, before any download.
-        echo "none"
+        return
+    fi
+    # Not cuda. Falling back to it meant that a machine with no accelerator at all
+    # -- an AMD desktop, a plain virtual machine -- installed the CUDA extra and
+    # died six minutes later building causal-conv1d, with
+    #
+    #   NameError: name 'bare_metal_version' is not defined
+    #
+    # from a setup.py that had looked for a CUDA toolkit and not found one.
+    # Nothing in that names the actual problem. Saying "none" turns it into one
+    # line, before any download.
+    echo "none"
+}
+
+# What was found instead, for the refusal below. "No supported GPU" reads as "no GPU", and
+# for an AMD card that is wrong in the expensive direction: the card works, llama.cpp's
+# Vulkan build drives it, and the one missing piece is a PyTorch build. Naming it stops the
+# next hour going into drivers, and stops TRUSTA_ACCEL being used to force an install that
+# cannot work.
+unsupported_gpu_note() {
+    if has_drm_vendor "$PCI_VENDOR_AMD"; then
+        printf '%s' "
+
+  An AMD GPU is present. There is no ROCm build here -- cuda and xpu are the only torch
+  extras -- so forcing TRUSTA_ACCEL would install a torch that cannot see the card."
     fi
 }
 
@@ -168,12 +254,13 @@ resolve_setup_vllm() {
             echo "no"
             ;;
         auto|AUTO|"")
-            # CUDA only by default. The XPU build (vllm-xpu) works on the Panther Lake
-            # iGPUs it was tried on, but is opt-in: an iGPU's memory is the system's,
-            # the kernel's TTM page pool keeps up to half of RAM after a run and vLLM's
-            # startup check counts that as used, so a second load fails; and vLLM
-            # documents XPU support for Arc and data-center GPUs, not iGPUs.
-            if [[ "$ACCEL" == "cuda" ]]; then echo "yes"; else echo "no"; fi
+            # On by default for CUDA and XPU. The XPU build (vllm-xpu) served and offloaded
+            # KV to DRAM and disk on a Panther Lake iGPU. One known cost there: an iGPU's
+            # memory is the system's, and on the xe driver measured (kernel 7.0.0-38)
+            # each vLLM exit past a ~12 GiB page pool leaves ~3.3 GiB that only a reboot
+            # returns. The vllm engine sizes each load from what is left, so later loads
+            # get a smaller KV cache rather than failing (README, "Intel iGPU").
+            if [[ "$ACCEL" == "cuda" || "$ACCEL" == "xpu" ]]; then echo "yes"; else echo "no"; fi
             ;;
         *)
             die "unsupported TRUSTA_SETUP_VLLM value: $mode (use auto / 1 / 0)"
@@ -794,9 +881,10 @@ echo "[setup_env] accelerator=$ACCEL"
 case "$ACCEL" in
     cuda|xpu) ;;
     none)
-        die "no supported GPU was found on this machine.
+        die "no supported GPU was found on this machine.$(unsupported_gpu_note)
 
-  Looked for: an NVIDIA GPU (nvidia-smi), and an Intel GPU (clinfo, /dev/dri, /dev/dxg).
+  Looked for: an NVIDIA GPU (nvidia-smi), and an Intel GPU (clinfo, the PCI vendor id
+  behind /dev/dri/renderD*, /dev/dxg).
 
   This build installs PyTorch for NVIDIA or Intel; there is no CPU-only build, so
   there is nothing to install here. If you do have one of those and it was simply not
@@ -933,11 +1021,23 @@ complete_wheel_toolkit() {
     fi
 }
 
+# TRUSTA_SKIP_SYNC=1 is for an environment that is already complete, such as the container
+# image's (deploy/container), where llama is built later on the deployment host. Syncing there
+# is not a no-op: the first pass below uninstalls causal-conv1d and the second rebuilds it,
+# which needs the network and write access to the image's .venv.
+sync_env() {
+    if [[ "${TRUSTA_SKIP_SYNC:-0}" == "1" ]]; then
+        echo "[setup_env] skipping uv sync (TRUSTA_SKIP_SYNC=1); the environment is used as it is"
+        return 0
+    fi
+    uv sync "${UV_PY[@]}" "${SYNC_EXTRAS[@]}" "$@"
+}
+
 # Two passes: everything except causal-conv1d, then point CUDA_HOME at the nvcc that
 # has just been installed and build it.
 if [[ "$ACCEL" == "cuda" ]]; then
     echo "[setup_env] uv sync ${SYNC_EXTRAS[*]} (without causal-conv1d, so nvcc lands first)"
-    uv sync "${UV_PY[@]}" "${SYNC_EXTRAS[@]}" --no-install-package causal-conv1d
+    sync_env --no-install-package causal-conv1d
 
     # nvcc from the pip packages, made usable as a toolkit. Needed whenever something is
     # compiled for CUDA: causal-conv1d when there is no prebuilt wheel, and the llama.cpp
@@ -999,11 +1099,11 @@ if [[ "$ACCEL" == "cuda" ]]; then
         fi
 
         echo "[setup_env] uv sync ${SYNC_EXTRAS[*]} (building causal-conv1d)"
-        uv sync "${UV_PY[@]}" "${SYNC_EXTRAS[@]}"
+        sync_env
     fi
 else
     echo "[setup_env] uv sync ${SYNC_EXTRAS[*]}"
-    uv sync "${UV_PY[@]}" "${SYNC_EXTRAS[@]}"
+    sync_env
 fi
 
 # XPU only: prove the install can actually compute. torch.xpu.is_available() can report True
@@ -1238,8 +1338,8 @@ else
     fi
 fi
 
-# Strata last: its setup compiles an engine and installs a model, the longest step by far, and
-# nothing above depends on it.
+# Strata last: its setup installs a model, the longest step by far, and nothing above
+# depends on it.
 case "${TRUSTA_SETUP_STRATA:-0}" in
     1|true|TRUE|yes|YES|on|ON)
         # Deep sleep, which the backend always starts Strata with, is built on CUDA's virtual
@@ -1247,7 +1347,7 @@ case "${TRUSTA_SETUP_STRATA:-0}" in
         [[ "$ACCEL" == "cuda" ]] ||
             die "TRUSTA_SETUP_STRATA=1 needs an NVIDIA GPU (detected: $ACCEL); Strata's deep sleep is CUDA-only"
         "$SCRIPT_DIR/install_strata.sh" || die "Strata was not installed (see above)"
-        STRATA_STATUS="installed (${TRUSTA_STRATA_REF:-feat/deep-sleep})"
+        STRATA_STATUS="installed (strata-sleep $(cat "${TRUSTA_STRATA_DIR:-$(dirname -- "$PROJECT_ROOT")/strata}/VERSION" 2>/dev/null || echo '?'))"
         ;;
     0|false|FALSE|no|NO|off|OFF|"")
         STRATA_STATUS="skipped (TRUSTA_SETUP_STRATA=1 to install)"

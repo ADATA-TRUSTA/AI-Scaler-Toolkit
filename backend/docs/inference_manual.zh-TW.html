@@ -364,7 +364,7 @@
                         <td><span class="engine-tag tag-strata">Strata</span></td>
                         <td><code>strata</code></td>
                         <td>單張 GPU 跑大型 MoE GGUF 模型：expert 從 DRAM 串流，KV cache 可到 256K。深度睡眠約 2 秒釋放 GPU 並保留對話</td>
-                        <td>已在 Linux 驗證。需要 Strata checkout（<code>STRATA_HOME</code>）與其 setup 產生的 run config；未設定 <code>STRATA_HOME</code> 時不提供此 engine。安裝：<code>TRUSTA_SETUP_STRATA=1 scripts/linux/setup_env.sh</code>（從 TRUSTA-SW-FAE/strata 編譯深度睡眠版，並安裝 IQ3_XXS）</td>
+                        <td>Linux 與 Windows，僅限 NVIDIA。載入 Strata setup 支援的 Qwen3.8-Flash-Next GGUF（GSQ-RCO Q2_0 / IQ2_XS / IQ3_XXS / IQ3_S、Swift 1.5、Coder 的 IQ1_M、Unsloth 的 UD-IQ4_XS / UD-Q4_K_XL / UD-Q5_K_XL / UD-Q6_K_XL / Q8_0、Gyro）。安裝版第一次載入時會自動安裝 Strata；每個模型第一次載入時會先跑 Strata 的 setup，需要數分鐘。原始碼環境用 <code>setup_env.sh</code> / <code>setup_env.ps1</code> 加上 <code>TRUSTA_SETUP_STRATA=1</code> 安裝</td>
                     </tr>
                 </tbody>
             </table>

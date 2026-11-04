@@ -19,6 +19,9 @@ asked for them:
     Linux it is also only there with the CUDA build, so it is refused wherever it
     is not installed, not only off Linux.
 
+One more is refused by accelerator rather than OS: DeepSpeed on Intel XPU (see
+``deepspeed_support``). Fine-tuning itself runs there; only the DeepSpeed paths do not.
+
 Checking here means each feature is refused once, at the entry point, with a
 message that says which platform is required and which one this host is. The
 alternative is what used to happen: the request is accepted, work starts, and it
@@ -31,6 +34,7 @@ runtime is in place (see scripts/xpu_smoke.py).
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import platform
 from dataclasses import dataclass
@@ -80,12 +84,47 @@ def training_support() -> Support:
     )
 
 
+def torch_is_xpu_build() -> bool:
+    """
+    Whether this environment carries the Intel XPU build of torch (``2.14.0+xpu``).
+
+    Read from the installed version rather than ``torch.xpu.is_available()``: the
+    accelerator extra decides which build is here, and importing torch to ask costs
+    seconds on a request path that only needs a yes or no.
+    """
+    try:
+        return importlib.metadata.version("torch").endswith("+xpu")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
+
+def deepspeed_support() -> Support:
+    """
+    Whether a fine-tune that goes through DeepSpeed can run on this host.
+
+    That is any run with ``use_deepspeed`` (ZeRO offload) and any with ``num_gpus > 1``,
+    which training_process launches as ``deepspeed --num_gpus N``. Neither works on
+    Intel XPU, so both are refused before the worker starts; the single-GPU run without
+    DeepSpeed is the XPU fine-tuning path and stays open.
+    """
+    if not torch_is_xpu_build():
+        return Support(supported=True)
+    return Support(
+        supported=False,
+        reason=(
+            "DeepSpeed is not supported on Intel XPU, which covers use_deepspeed and "
+            "multi-GPU training (num_gpus > 1). Turn DeepSpeed off and train on one GPU "
+            "to fine-tune on this host."
+        ),
+    )
+
+
 def vllm_installed() -> bool:
     """
     Whether vLLM is there to start, found without importing it.
 
-    Linux is necessary and not sufficient. setup_env installs the vllm extra only with
-    the CUDA build, so an Intel (XPU) host -- or one set up with TRUSTA_SETUP_VLLM=0 --
+    Linux is necessary and not sufficient. setup_env installs vLLM only with a GPU build
+    (CUDA or XPU), so a host without one -- or one set up with TRUSTA_SETUP_VLLM=0 --
     has no vLLM, and reporting it as supported offered an engine whose every load
     failed. Checked where the engine will look: this interpreter, and the environment
     under VLLM_SERVER_PROJECT_DIR, which is the same one unless an install moved it.
@@ -104,13 +143,14 @@ def vllm_installed() -> bool:
 def engine_support(engine: InferenceEngine | str) -> Support:
     """Whether a given inference engine can run on this host."""
     if InferenceEngine(engine) is InferenceEngine.STRATA:
-        # Nothing of Strata ships here: it is offered once STRATA_HOME names a checkout
-        from .inference.engines.strata_engine import strata_setup_problem
+        # Offered once STRATA_HOME names an install, or when the package an installed build
+        # carries can be installed by the first load
+        from .inference.engines.strata_engine import strata_installable, strata_setup_problem
 
         problem = strata_setup_problem()
-        return (
-            Support(supported=True) if problem is None else Support(supported=False, reason=problem)
-        )
+        if problem is None or strata_installable():
+            return Support(supported=True)
+        return Support(supported=False, reason=problem)
     if InferenceEngine(engine) is not InferenceEngine.VLLM:
         return Support(supported=True)
     on_linux = _linux_only(
@@ -124,10 +164,10 @@ def engine_support(engine: InferenceEngine | str) -> Support:
         return Support(
             supported=False,
             reason=(
-                "The vLLM engine is not installed here. It comes with the CUDA build on "
-                "Linux; on an Intel GPU it is opt-in (set TRUSTA_SETUP_VLLM=1 and run "
-                "setup again), and TRUSTA_SETUP_VLLM=0 leaves it out everywhere. Use "
-                "the transformers or llama_server engine instead."
+                "The vLLM engine is not installed here. It comes with the CUDA and Intel "
+                "GPU builds on Linux unless setup ran with TRUSTA_SETUP_VLLM=0; run setup "
+                "again with TRUSTA_SETUP_VLLM=1 to add it. Use the transformers or "
+                "llama_server engine instead."
             ),
         )
     return on_linux

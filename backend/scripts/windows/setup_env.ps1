@@ -12,6 +12,9 @@
 #   .\setup_env.ps1 -LlamaBackend cpu     # CPU-only build (no GPU, or the GPU build will not install)
 #   .\setup_env.ps1 -AllowLlamaFallback   # unattended: accept a degraded llama instead of stopping
 #   .\setup_env.ps1 -SkipXpuCheck  # skip the post-sync XPU smoke check
+#   $env:TRUSTA_SETUP_STRATA = "1"; .\setup_env.ps1  # also install Strata (engine="strata", NVIDIA only)
+#                                  # through install_strata.ps1: TRUSTA_STRATA_PACKAGE /
+#                                  # _DIR / _SETUP_ARGS pick the package and model
 param(
     [ValidateSet("cuda", "xpu")]
     [string]$Accel = "",
@@ -210,7 +213,11 @@ $LlamaTools = [ordered]@{
 $LlamaToolsDir   = Join-Path $ServiceDir "utils\llama-tools"
 $LlamaCppUrl     = "https://github.com/ggml-org/llama.cpp"
 # The one place the pinned build is named. -LlamaVersion / TRUSTA_LLAMA_VERSION override it.
-$LlamaVersionDefault = "b11701"
+# b11960 is release v0.8.0; setup_env.sh records how a release names its build. Keep the
+# tag at the end of this line: tests/unit/test_llama_paths_agree.py finds the Windows pin
+# by matching a b-tag there, and a trailing comment would hide it from the one test that
+# keeps both platforms on the same build.
+$LlamaVersionDefault = "b11960"
 # The convert scripts come from an archive of the tag, not a checkout.
 #
 # git used to be a hard prerequisite of this script and of the desktop launcher's preflight
@@ -227,76 +234,8 @@ $ConvertPaths    = @("convert_hf_to_gguf.py", "convert_lora_to_gguf.py", "conver
 # Written beside the copied scripts, because an archive carries no revision of its own.
 $LlamaSrcStamp   = ".trusta-llama-version"
 
-# Record what setup_env actually resolved, so the service reads a decision instead of
-# repeating the search. PATH is per-process: setup runs in your shell, the service may run
-# under a service manager with a different one, and then the two disagree. The file ends up with
-# exactly one line per key: an override that resolves is kept as it is, one that
-# points at nothing is replaced by what was actually verified, and duplicates are collapsed.
-function Save-EnvSetting {
-    param([string]$Key, [string]$Resolved)
-    if (-not $Resolved) { return }
-    $envFile = Join-Path $ProjectRoot ".env"
-    if (-not (Test-Path $envFile)) {
-        # settings.py falls back to .env.example when .env is missing; creating one here would
-        # change which file the service loads, so only say what could not be recorded.
-        Write-Host "[setup_env] no .env, so $Key was not recorded (resolved: $Resolved)"
-        return
-    }
-    # Exactly one line for the key survives this. Appending whenever no *live* line
-    # matched left .env.example's commented example sitting above a second entry, so the file
-    # showed the key twice; and once two live lines exist python-dotenv silently keeps the last,
-    # which is not the one someone editing the first would expect.
-    $live     = "^\s*$Key\s*="
-    $commented = "^\s*#\s*$Key\s*="
-    $setting  = "$Key=$Resolved"
-
-    # ReadAllText/WriteAllText rather than Get-Content/Set-Content: the former honours a BOM on
-    # the way in, and UTF8Encoding($false) guarantees none on the way out. A BOM here would glue
-    # itself to the first key name and hide that variable from python-dotenv.
-    $text = [System.IO.File]::ReadAllText($envFile)
-    $eol  = if ($text -match "`r`n") { "`r`n" } else { "`n" }
-
-    $out = New-Object System.Collections.Generic.List[string]
-    $placed = $false
-    $previous = $null
-    $dropped = 0
-    foreach ($line in ($text -split "`r`n|`n")) {
-        if ($line -match $live) {
-            if ($placed) { $dropped++; continue }   # a duplicate; drop it
-            $previous = ($line -replace $live, '').Trim()
-            $out.Add($setting)
-            $placed = $true
-            continue
-        }
-        $out.Add($line)
-    }
-    if (-not $placed) {
-        # Take over the commented example in place, so the key stays where the template put it
-        # instead of the file growing a second block that says the same thing.
-        for ($i = 0; $i -lt $out.Count; $i++) {
-            if ($out[$i] -match $commented) { $out[$i] = $setting; $placed = $true; break }
-        }
-    }
-    if (-not $placed) {
-        $out.Add("")
-        $out.Add("# Recorded by setup_env: the llama path it resolved, so the service does not")
-        $out.Add("# have to re-resolve it from a possibly different PATH.")
-        $out.Add($setting)
-    }
-
-    [System.IO.File]::WriteAllText(
-        $envFile, ($out -join $eol), (New-Object System.Text.UTF8Encoding($false)))
-    if ($previous -eq $Resolved) {
-        Write-Host "[setup_env] .env already records $Key=$Resolved"
-    } elseif ($previous) {
-        Write-Host "[setup_env] .env $Key updated to $Resolved (was $previous)"
-    } else {
-        Write-Host "[setup_env] recorded $Key=$Resolved in .env"
-    }
-    if ($dropped -gt 0) {
-        Write-Host "[setup_env] removed $dropped duplicate $Key line(s) from .env"
-    }
-}
+# Save-EnvSetting: writes one setting into .env (shared with install_strata.ps1).
+. (Join-Path $PSScriptRoot "env_file.ps1")
 
 function Save-LlamaBinaryToEnv {
     param([string]$Resolved)
@@ -1023,8 +962,26 @@ if (-not $Accel) {
             Write-Host "[setup_env] Intel display adapter: $($intel.Name)"
             $Accel = "xpu"
         } else {
+            # Name what is there, when something is. "No supported GPU" reads as "no GPU",
+            # and for an AMD card that sends someone off to check a driver that is working:
+            # the card is fine, it is the PyTorch build that does not exist. Linux says the
+            # same thing from setup_env.sh's unsupported_gpu_note.
+            $amd = $null
+            try {
+                $amd = Get-CimInstance Win32_VideoController -ErrorAction Stop |
+                    Where-Object { $_.Name -match 'AMD|Radeon' } | Select-Object -First 1
+            } catch { $amd = $null }
+            $amdNote = ""
+            if ($amd) {
+                $amdNote = @"
+
+
+  An AMD display adapter is present ($($amd.Name)). This build has no ROCm extra -- cuda
+  and xpu are the only two -- so -Accel would only install a torch that cannot see it.
+"@
+            }
             Die @"
-no supported GPU was found on this machine.
+no supported GPU was found on this machine.$amdNote
 
   Looked for: an NVIDIA GPU (nvidia-smi), and an Intel display adapter.
 
@@ -1278,6 +1235,26 @@ if ($LlamaMode -eq "skip") {
     }
 }
 
+# Strata last: its setup installs a model, the longest step by far, and nothing above
+# depends on it.
+$strataSwitch = if ($env:TRUSTA_SETUP_STRATA) { $env:TRUSTA_SETUP_STRATA.Trim() } else { "" }
+switch -Regex ($strataSwitch) {
+    '^(?i)(1|true|yes|on)$' {
+        # Deep sleep, which the backend always starts Strata with, is built on CUDA's virtual
+        # memory API; there is no build of it for another accelerator.
+        if ($Accel -ne "cuda") { Die "TRUSTA_SETUP_STRATA=1 needs an NVIDIA GPU (detected: $Accel); Strata's deep sleep is CUDA-only" }
+        # In this process rather than a new powershell: a child would not inherit the execution
+        # policy the launcher started this one with.
+        try { & (Join-Path $ScriptDir "install_strata.ps1") } catch { Die "Strata was not installed: $($_.Exception.Message)" }
+        if ($LASTEXITCODE -ne 0) { Die "Strata was not installed (see above)" }
+        $strataHome = Get-EnvSetting -Key "STRATA_HOME"
+        $strataVersion = if ($strataHome) { Get-Content -LiteralPath (Join-Path $strataHome "VERSION") -ErrorAction SilentlyContinue | Select-Object -First 1 }
+        $StrataStatus = "installed (strata-sleep $(if ($strataVersion) { $strataVersion } else { '?' }))"
+    }
+    '^(?i)(0|false|no|off|)$' { $StrataStatus = "skipped (TRUSTA_SETUP_STRATA=1 to install)" }
+    default { Die "unsupported TRUSTA_SETUP_STRATA value: $strataSwitch (use 1 / 0)" }
+}
+
 Write-Host ""
 Write-Host "=========================================="
 Write-Host "  Environment setup complete"
@@ -1287,4 +1264,5 @@ Write-Host "  Service Dir : $ServiceDir"
 Write-Host "  llama       : $LlamaStatus"
 Write-Host "  llama tools : $LlamaToolsStatus"
 Write-Host "  llama check : $script:LlamaVerify"
+Write-Host "  Strata      : $StrataStatus"
 Write-Host "=========================================="

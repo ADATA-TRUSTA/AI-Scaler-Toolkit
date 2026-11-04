@@ -12,6 +12,8 @@ from starlette.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "service" / "vllm_middleware"))
 import ast_vllm_guard  # noqa: E402
 
+pytestmark = pytest.mark.inference
+
 ADMIN = sorted(ast_vllm_guard.FALLBACK_ADMIN)
 BLOCKED = sorted(ast_vllm_guard.FALLBACK_ADMIN - ast_vllm_guard.ALLOWED)
 ALLOWED = sorted(ast_vllm_guard.ALLOWED)
@@ -88,8 +90,16 @@ def test_admin_routes_are_read_from_the_installed_vllm(monkeypatch, tmp_path):
         "def f(): pass\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    monkeypatch.setattr(ast_vllm_guard, "_DEV_PACKAGE", "fakevllm.dev")
+    monkeypatch.setattr(ast_vllm_guard, "_DEV_PACKAGES", ("fakevllm.dev", "fakevllm.rl"))
     assert ast_vllm_guard.admin_paths() == {"/brand_new_admin_thing"}
+
+
+def test_the_known_list_stays_shut_whatever_is_found(monkeypatch):
+    """vLLM 0.32 moved /pause and the weight updates out of serve.dev; that must not open them."""
+    monkeypatch.setattr(ast_vllm_guard, "admin_paths", lambda: frozenset({"/sleep"}))
+    client = _vllm()
+    for path in ("/update_weights", "/pause", "/collective_rpc"):
+        assert client.post(path).status_code == 404
 
 
 def test_it_does_not_import_the_service():

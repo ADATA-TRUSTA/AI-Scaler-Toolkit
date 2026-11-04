@@ -7,6 +7,10 @@ win. That is how a model is tuned -- context, batch, offload, chat template -- a
 also how a request could move a server off loopback, give it a key of its own, open its
 CORS, make it serve or write files, or (vLLM's --middleware) import code. Those flags
 belong to this service and are refused here, before anything starts.
+
+Strata's engine takes no network flags (its server is started by this service and talks
+to the engine over a pipe), so strata_extra_args reserves only what this service runs the
+engine with and the flags that write files wherever they are pointed.
 """
 
 from __future__ import annotations
@@ -55,6 +59,21 @@ VLLM_SERVER_RESERVED_FLAGS: frozenset[str] = frozenset(
     }
 )
 
+STRATA_RESERVED_FLAGS: frozenset[str] = frozenset(
+    {
+        "--serve",
+        "--sleep-mode",
+        "--vision",
+        "--tokens",
+        "--tokens-file",
+        "--dump-logits",
+        "--dump-residual",
+        "--dump-layers",
+        "--dump-halves",
+        "--dump-routing",
+    }
+)
+
 
 def local_service_origins() -> list[str]:
     """The web origins this service is served from, for the servers' CORS lists."""
@@ -70,6 +89,28 @@ def reserved_flags_in(args: list[str] | None, reserved: frozenset[str]) -> list[
         if flag in reserved and flag not in found:
             found.append(flag)
     return found
+
+
+def is_flag(arg: str) -> bool:
+    """``--name``, ``--name=value`` or ``-x``; not a value such as ``-1`` or ``-0.5``."""
+    return arg.startswith("--") or (len(arg) > 1 and arg[0] == "-" and arg[1].isalpha())
+
+
+def flag_groups(args: list[str]) -> list[tuple[str, list[str]]]:
+    """
+    ``args`` as (flag, its tokens) pairs: a flag and the values that follow it, up to the
+    next flag. ``--name=value`` is one token. Leading values with no flag are grouped
+    under "".
+    """
+    groups: list[tuple[str, list[str]]] = []
+    for arg in args:
+        if is_flag(arg):
+            groups.append((arg.split("=", 1)[0], [arg]))
+        elif groups:
+            groups[-1][1].append(arg)
+        else:
+            groups.append(("", [arg]))
+    return groups
 
 
 def is_loopback_host(host: str | None) -> bool:

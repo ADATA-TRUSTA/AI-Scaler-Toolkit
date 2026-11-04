@@ -16,6 +16,7 @@ server with that copy, so the user's file is never changed.
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -28,16 +29,24 @@ from typing import IO, Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+from dotenv import dotenv_values
+
 from ...config_models import InferenceConfig
+from ...server_args import flag_groups
 from ...settings import (
+    PROJECT_ROOT,
+    STRATA_DATA_DIR,
     STRATA_ENGINE_BINARY,
     STRATA_HEALTH_TIMEOUT,
     STRATA_HOME,
+    STRATA_INSTALL_DIR,
     STRATA_PORT,
     STRATA_PYTHON,
     STRATA_RUNTIME_DIR,
+    STRATA_VISION_BINARY,
     configure_logging,
 )
+from ..strata_models import STRATA_GGUF_MODELS, strata_model_choice
 from .base_engine import BaseEngine
 
 logger = configure_logging(__name__)
@@ -50,14 +59,39 @@ STRATA_HOST = "127.0.0.1"
 # peaked at 0.2% and read faster (9.1-10.0 GiB/s against 6.4). Set only when the caller
 # did not choose: either variable in the environment wins.
 _LOAD_ENV_DEFAULTS = {"STRATA_UNBUFFERED_LOAD": "1", "STRATA_NO_ARENA_THP": "1"}
+# Windows counts page-locked memory against the commit limit (RAM + page file). Strata 0.2.7
+# may lock the PLE table in RAM by itself (26.8 GiB for Qwen3.8-Flash-Next), and the sleep
+# backup (about 4.6 GB, also page-locked) then no longer fits: every sleep answered 409
+# ("backup needs 4596 MiB, only 512 MiB available"). With the table left where the run config
+# puts it, sleep and wake worked. Like the two above, the environment wins.
+_WINDOWS_LOAD_ENV_DEFAULTS = {"STRATA_PLE_AUTO_RAM": "0"}
 _LOG_TAIL_LINES = 40
+
+
+def strata_settings_file() -> Path:
+    """
+    The settings file Strata's setup remembers the data folder in.
+
+    Named rather than left to default, because the default is the one a command-line
+    Strata the user installed themselves uses (%APPDATA%/Strata/settings.json). Sharing
+    it meant a managed install adopted their data folder and added itself to their list
+    of installs -- both observed on a machine that had one. Strata reads this from
+    STRATA_SETTINGS_FILE and then neither touches the other.
+    """
+    return Path(STRATA_RUNTIME_DIR).expanduser() / "strata-settings.json"
+
+
+def _with_strata_settings(env: dict[str, str]) -> dict[str, str]:
+    """``env`` pointed at this backend's own Strata settings, the caller's choice winning."""
+    env.setdefault("STRATA_SETTINGS_FILE", str(strata_settings_file()))
+    return env
 
 
 def strata_setup_problem() -> str | None:
     """Why engine=strata cannot start on this host, or None when it can."""
     if not STRATA_HOME.strip():
         return (
-            "Strata is not set up: STRATA_HOME is empty. Point it at a Strata checkout "
+            "Strata is not set up: STRATA_HOME is empty. Point it at a Strata install "
             "prepared by Strata's own setup (the directory holding serve/server.py), and "
             "STRATA_PYTHON at its interpreter."
         )
@@ -77,6 +111,27 @@ def strata_setup_problem() -> str | None:
     if not Path(STRATA_ENGINE_BINARY).expanduser().is_file():
         return f"STRATA_ENGINE_BINARY does not exist: {STRATA_ENGINE_BINARY}"
     return None
+
+
+def strata_installable() -> bool:
+    """Whether a load can install Strata itself: an NVIDIA GPU, the script and its package."""
+    return (
+        shutil.which("nvidia-smi") is not None
+        and _install_script().is_file()
+        and strata_package() is not None
+    )
+
+
+def _install_script() -> Path:
+    name = "windows/install_strata.ps1" if os.name == "nt" else "linux/install_strata.sh"
+    return PROJECT_ROOT / "scripts" / name
+
+
+def strata_package() -> Path | None:
+    """The strata-sleep package an installed build carries in vendor/, or None."""
+    platform = "windows-x86_64.zip" if os.name == "nt" else "linux-x86_64.tar.gz"
+    found = sorted((PROJECT_ROOT / "vendor").glob(f"strata-sleep-*-{platform}"))
+    return found[-1] if found else None
 
 
 def strata_python() -> str:
@@ -103,12 +158,231 @@ def _set_flag(args: list[str], flag: str, value: str) -> list[str]:
     return [*out, flag, value]
 
 
+# Flags that choose between the same thing two ways: setting one drops the other, since
+# the engine would otherwise apply both (a RAM budget and the resident low-RAM mode).
+_EXCLUSIVE_FLAGS: tuple[frozenset[str], ...] = (
+    frozenset({"--resident-budget-gib", "--resident-experts"}),
+)
+
+
+def _apply_extra_args(args: list[str], extra: list[str]) -> list[str]:
+    """
+    ``args`` with each flag of ``extra`` replacing the same flag and its values, or added.
+
+    A run config's args are a flag followed by its values, some flags repeated on purpose
+    (--native-dense-gguf once per shard): a flag given here replaces all of its
+    occurrences, so a repeated one is given here in full.
+    """
+    groups = flag_groups(extra)
+    replaced = {flag for flag, _ in groups}
+    for flag in list(replaced):
+        for pair in _EXCLUSIVE_FLAGS:
+            if flag in pair:
+                replaced |= pair
+    kept = [tokens for flag, tokens in flag_groups(args) if flag not in replaced]
+    return [token for tokens in kept + [tokens for _, tokens in groups] for token in tokens]
+
+
+def vision_binary() -> Path | None:
+    """Strata's image encoder: STRATA_VISION_BINARY, else strata-vision beside the engine."""
+    if STRATA_VISION_BINARY.strip():
+        return Path(STRATA_VISION_BINARY).expanduser()
+    if STRATA_ENGINE_BINARY.strip():
+        name = "strata-vision.exe" if os.name == "nt" else "strata-vision"
+        candidate = Path(STRATA_ENGINE_BINARY).expanduser().parent / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def find_mmproj(gguf_path: str) -> Path | None:
+    """An mmproj GGUF beside the model or one folder up (BF16, then F16, first), as llama-server finds it."""
+    model = Path(gguf_path).expanduser()
+    for folder in dict.fromkeys([model.parent, model.parent.parent]):
+        try:
+            found = [
+                f
+                for f in folder.iterdir()
+                if "mmproj" in f.name.lower() and f.name.lower().endswith(".gguf")
+            ]
+        except OSError:
+            continue
+        if found:
+            return min(
+                found,
+                key=lambda f: ("bf16" not in f.name.lower(), "f16" not in f.name.lower(), f.name),
+            )
+    return None
+
+
+def _apply_vision(run: dict[str, Any], config: InferenceConfig, args: list[str]) -> None:
+    """
+    Image input as the load asks: strata_vision false drops the run config's encoder,
+    true keeps it or adds one; omitted leaves the run config as it is.
+
+    Strata's setup is run with --vision no (on a deep-sleep package it would otherwise
+    compile an encoder, and could replace the engine), so a model it prepared has none;
+    the encoder is model-agnostic and needs only its exe, the mmproj and the model's GGUF.
+    """
+    vision = run.get("vision")
+    wanted = config.strata_vision if config.strata_vision is not None else isinstance(vision, dict)
+    if not wanted:
+        run.pop("vision", None)
+        run["args"] = [a for a in args if a != "--vision"]  # the engine would wait for images
+        return
+    vision = dict(vision) if isinstance(vision, dict) else {}
+    if config.strata_mmproj:
+        vision["mmproj"] = str(Path(config.strata_mmproj).expanduser())
+    if not config.strata_vision:  # the run config's own encoder, as it wrote it
+        run["vision"] = vision
+        return
+    if not vision.get("model"):
+        native = args[args.index("--native") + 1] if "--native" in args[:-1] else None
+        vision["model"] = native or config.model_path
+    if not vision.get("mmproj"):
+        found = find_mmproj(str(vision["model"])) if vision.get("model") else None
+        if found is None:
+            raise RuntimeError(
+                "strata_vision needs the model's image projector: no mmproj .gguf beside "
+                f"{vision.get('model')} or one folder up; set strata_mmproj"
+            )
+        vision["mmproj"] = str(found)
+    if not vision.get("exe"):
+        exe = vision_binary()
+        if exe is None:
+            raise RuntimeError(
+                "strata_vision needs Strata's image encoder (strata-vision): set "
+                "STRATA_VISION_BINARY, or put it beside STRATA_ENGINE_BINARY"
+            )
+        vision["exe"] = str(exe)
+    run["vision"] = vision
+
+
 def _same_file(a: str, b: str) -> bool:
     try:
         # resolve(): a Hugging Face snapshot path and the blob it links to are the same file
         return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
     except OSError:
         return False
+
+
+_SETUP_TAIL_LINES = 40
+
+
+def _adopt_recorded_install() -> None:
+    """
+    Take the paths install_strata just recorded in .env into this process.
+
+    settings.py read .env when the process started, before the install wrote to it.
+    """
+    recorded = dotenv_values(PROJECT_ROOT / ".env")
+    for key in ("STRATA_HOME", "STRATA_PYTHON", "STRATA_ENGINE_BINARY"):
+        value = (recorded.get(key) or "").strip()
+        if value:
+            os.environ[key] = value
+            globals()[key] = value
+
+
+def _run_setup_step(cmd: list[str], cwd: Path | None, env: dict[str, str]) -> None:
+    """Run an install or setup command, its output to the log; raise with its tail on failure."""
+    logger.info("[Strata] %s", " ".join(cmd))
+    tail: deque[str] = deque(maxlen=_SETUP_TAIL_LINES)
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    for raw in process.stdout or ():
+        line = raw.rstrip()
+        if line:
+            tail.append(line)
+            logger.info("[Strata setup] %s", line)
+    if process.wait() != 0:
+        raise RuntimeError(
+            f"Strata's setup failed (exit {process.returncode}):\n" + "\n".join(tail)
+        )
+
+
+def prepare_model(gguf_path: str) -> Path:
+    """
+    Install Strata if this host has none, run its setup for ``gguf_path``, and return the
+    run config it wrote.
+
+    The model is a GGUF the model registry already has (downloaded like any llama.cpp
+    model); setup takes it in place with --gguf-dir and only adds what Strata derives from
+    it (the expert pack, the draft layer) and the run config, sized for this machine. A
+    first load pays for this once: minutes, not the download.
+    """
+    choice = strata_model_choice(gguf_path)
+    if choice is None:
+        raise RuntimeError(
+            f"Strata cannot run {Path(gguf_path).name}: its setup takes only these GGUF files "
+            f"(the first of each): {', '.join(sorted(STRATA_GGUF_MODELS))}"
+        )
+    family, model = choice
+    gguf_dir = str(Path(gguf_path).expanduser().parent)
+    env = _with_strata_settings(os.environ.copy())
+    env["PYTHONIOENCODING"] = "utf-8"
+    # --set-default-data-dir records the folder without moving anything into it: the
+    # expert pack and the draft layer are made where they are wanted, and a data folder
+    # someone already has is left alone. Omitted when unset, so Strata's own default
+    # (Strata-data beside the install) still applies to a hand-made install.
+    data_dir_args = (
+        ["--data-dir", str(Path(STRATA_DATA_DIR).expanduser()), "--set-default-data-dir"]
+        if STRATA_DATA_DIR.strip()
+        else []
+    )
+    if strata_setup_problem() is None:
+        _run_setup_step(
+            [
+                strata_python(),
+                "setup.py",
+                "--yes",
+                "--no-start",
+                "--vision",
+                "no",
+                "--family",
+                family,
+                "--model",
+                model,
+                "--gguf-dir",
+                gguf_dir,
+                *data_dir_args,
+            ],
+            Path(STRATA_HOME).expanduser(),
+            env,
+        )
+    else:
+        if not strata_installable():
+            raise RuntimeError(strata_setup_problem() or "Strata cannot be installed here")
+        # install_strata.* unpacks the package, makes its venv, runs the same setup and
+        # records STRATA_HOME / STRATA_PYTHON / STRATA_ENGINE_BINARY in .env.
+        env["TRUSTA_STRATA_SETUP_ARGS"] = f"--family {family} --model {model}"
+        env["TRUSTA_STRATA_GGUF_DIR"] = gguf_dir  # its own variable: a path may hold spaces
+        if STRATA_DATA_DIR.strip():
+            env["TRUSTA_STRATA_DATA_DIR"] = str(Path(STRATA_DATA_DIR).expanduser())  # likewise
+        if STRATA_INSTALL_DIR.strip():
+            env["TRUSTA_STRATA_DIR"] = STRATA_INSTALL_DIR
+        script = str(_install_script())
+        cmd = (
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]
+            if os.name == "nt"
+            else ["bash", script]
+        )
+        _run_setup_step(cmd, None, env)
+        _adopt_recorded_install()
+        problem = strata_setup_problem()
+        if problem:
+            raise RuntimeError(f"Strata was installed but cannot start: {problem}")
+    found = find_run_config(gguf_path)
+    if found is None:
+        raise RuntimeError(f"Strata's setup finished but wrote no run config for {gguf_path}")
+    return found
 
 
 def find_run_config(gguf_path: str) -> Path | None:
@@ -196,16 +470,20 @@ def build_run_config(
 
     Only the keys the load request owns change; everything else (the pack, the shards,
     the expert profile, the MTP head, KV format, sampling defaults) stays as Strata's setup
-    wrote it. ``vram_reserve_mib`` is strata_vram_limit_gb already turned into a reserve.
+    wrote it, unless strata_extra_args or strata_vision sets it. ``vram_reserve_mib`` is
+    strata_vram_limit_gb already turned into a reserve.
     """
     run = dict(source)
     args = [str(a) for a in run.get("args") or []]
+    if config.strata_extra_args:
+        args = _apply_extra_args(args, config.strata_extra_args)
     if config.strata_max_context is not None:
         args = _set_flag(args, "--max-context", str(config.strata_max_context))
     if vram_reserve_mib is not None:
         args = _set_flag(args, "--vram-reserve-mib", str(vram_reserve_mib))
     args = [a for a in args if a != "--sleep-mode"]  # the run config's sleep_mode key decides
     run["args"] = args
+    _apply_vision(run, config, args)
     # Always on: it costs nothing until the first sleep, and freeing the GPU for another
     # program is what this engine is chosen for.
     run["sleep_mode"] = True
@@ -304,8 +582,9 @@ class StrataEngine(BaseEngine):
             "--slot-save-path",
             str(self.slot_dir),
         ]
-        env = os.environ.copy()
-        for key, value in _LOAD_ENV_DEFAULTS.items():
+        env = _with_strata_settings(os.environ.copy())
+        defaults = {**_LOAD_ENV_DEFAULTS, **(_WINDOWS_LOAD_ENV_DEFAULTS if os.name == "nt" else {})}
+        for key, value in defaults.items():
             env.setdefault(key, value)
         logger.info("[Strata] starting the server: %s", " ".join(cmd))
         self._log_handle = open(self.server_log_path, "a", encoding="utf-8")  # noqa: SIM115 - held for the process's life
@@ -405,18 +684,17 @@ class StrataEngine(BaseEngine):
         """Start Strata's server with the model's run config and wait until it is loaded."""
         self.config = config
         problem = strata_setup_problem()
-        if problem:
-            raise RuntimeError(problem)
         if config.strata_config_path:
+            if problem:
+                raise RuntimeError(problem)
             source_path = Path(config.strata_config_path).expanduser()
         elif config.model_path:
-            found = find_run_config(config.model_path)
+            found = None if problem else find_run_config(config.model_path)
             if found is None:
-                raise RuntimeError(
-                    f"no Strata run config in {STRATA_HOME} is for {config.model_path}: install "
-                    "the model with Strata's setup (scripts/linux/install_strata.sh), or name "
-                    "its run config in strata_config_path"
-                )
+                # The first load of this model (or of Strata at all): install and prepare it
+                # here, so a GGUF from the model downloads is all a user has to provide.
+                self.status_queue.put({"status": "loading", "stage": "strata_setup"})
+                found = prepare_model(config.model_path)
             source_path = found
         else:
             raise RuntimeError(

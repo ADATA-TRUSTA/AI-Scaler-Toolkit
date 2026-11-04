@@ -104,7 +104,7 @@ source "$HOME/.local/bin/env"
 ### Optional requirements (both platforms)
 
 - NVIDIA GPU: requires matching drivers and CUDA runtime
-- Intel XPU / iGPU (Linux **and** Windows): requires a recent enough Intel graphics driver
+- Intel XPU / iGPU (Linux **and** Windows): requires a recent enough Intel graphics driver. Fine-tuning runs on one Intel GPU without DeepSpeed; `use_deepspeed` and multi-GPU training (`num_gpus` > 1, launched through DeepSpeed) are refused with a 501 on the XPU build
 - Frontend build: requires [bun](https://bun.sh) (the frontend pins it via `packageManager`)
 - Private Hugging Face models: requires `HF_TOKEN`
 
@@ -122,14 +122,16 @@ source "$HOME/.local/bin/env"
 > `TRUSTA_SKIP_XPU_CHECK=1`, or raise the 300s kill timeout with `-XpuCheckTimeoutSec` /
 > `TRUSTA_XPU_CHECK_TIMEOUT`.
 >
-> **Minimum driver — the thing to compare differs per platform.** torch 2.13.0+xpu bundles
-> the oneAPI 2026.0.0 runtime; Windows ships one graphics driver, Linux ships a
-> compute-runtime package, and their version schemes are unrelated:
+> **Minimum driver — the thing to compare differs per platform.** torch 2.14.0+xpu bundles
+> the oneAPI 2026.1.0 runtime; Windows ships one graphics driver, Linux ships a
+> compute-runtime package, and their version schemes are unrelated. The requirement is from
+> Intel's [PyTorch 2.14 prerequisites](https://www.intel.com/content/www/us/en/developer/articles/tool/pytorch-prerequisites-for-intel-gpu/2-14.html),
+> unchanged from 2.13; the last column was measured with torch 2.13.0+xpu:
 >
-> | | What to check | Verified working |
-> |------|------|------|
-> | Windows | Intel Graphics DCH driver — `Get-CimInstance Win32_VideoController` | `32.0.101.8974` (needs ≥ `32.0.101.8801`; `32.0.101.6129` fails) |
-> | Linux | `intel-opencl-icd` — `dpkg-query -W intel-opencl-icd` | `26.27.39122.14` from `ppa:kobuk-team/intel-graphics` |
+> | | What to check | Intel's requirement | Verified working |
+> |------|------|------|------|
+> | Windows (and WSL2 hosts) | Intel Graphics DCH driver — `Get-CimInstance Win32_VideoController` | ≥ `32.0.101.8801` | `32.0.101.8974` (`32.0.101.6129` fails) |
+> | Linux | `intel-opencl-icd` — `dpkg-query -W intel-opencl-icd` | the latest client driver, no version given | `26.27.39122.14` from `ppa:kobuk-team/intel-graphics` |
 >
 > Windows drivers: [Intel® Arc™ Graphics - Windows*](https://www.intel.com/content/www/us/en/download/785597/intel-arc-graphics-windows.html).
 > On Ubuntu 24.04 the distro's own `intel-opencl-icd` (`23.43.x`) predates this runtime, so
@@ -386,16 +388,18 @@ TRUSTA_SETUP_VLLM=0 bash scripts/linux/setup_env.sh
 ```
 
 Also install the Strata engine (`engine="strata"`, NVIDIA only). Its deep sleep is not in upstream
-Strata, so the engine is compiled from `TRUSTA-SW-FAE/strata` (`feat/deep-sleep`, private: set up git
-credentials first, e.g. `gh auth login` and `gh auth setup-git`); Strata's own setup then installs the
-model, IQ3_XXS unless told otherwise (about 76 GB to download). `scripts/linux/install_strata.sh` does
-this step on its own too, to install or update Strata later.
+Strata, so it comes from a strata-sleep package (a `TRUSTA-SW-FAE/strata-sleep` release: the engine
+already compiled, plus Strata's Python side). Put the `.tar.gz` in `vendor/` (an installed build
+carries it there) or name it with `TRUSTA_STRATA_PACKAGE`; nothing is cloned or compiled. Strata's
+own setup then installs the model, IQ3_XXS unless told otherwise (about 76 GB to download;
+`--gguf-dir` uses files already on disk). `scripts/linux/install_strata.sh` does this step on its own
+too, to install or update Strata later.
 
 ```bash
 TRUSTA_SETUP_STRATA=1 bash scripts/linux/setup_env.sh
-# another branch / tag / commit, folder, or model (arguments for Strata's setup, as they are)
-TRUSTA_STRATA_REF=feat/deep-sleep TRUSTA_STRATA_DIR=/opt/strata \
-  TRUSTA_STRATA_SETUP_ARGS="--model IQ3_XXS --data-dir /mnt/models" bash scripts/linux/install_strata.sh
+# another package, folder, or model (arguments for Strata's setup, as they are)
+TRUSTA_STRATA_PACKAGE=~/Downloads/strata-sleep-0.2.7-sleep.1-linux-x86_64.tar.gz TRUSTA_STRATA_DIR=/opt/strata \
+  TRUSTA_STRATA_SETUP_ARGS="--model IQ3_XXS --gguf-dir /mnt/models/IQ3_XXS" bash scripts/linux/install_strata.sh
 ```
 
 #### Option B: Manual setup
@@ -439,6 +443,18 @@ cd C:\Users\<user>\AI-Scaler-Toolkit\backend
 >
 > vLLM does not support Windows, so no extra vLLM environment is needed.
 
+Strata (`engine="strata"`, NVIDIA only) installs the same way as on Linux, from the
+`strata-sleep-*-windows-x86_64.zip` in `vendor\` or `TRUSTA_STRATA_PACKAGE`:
+
+```powershell
+$env:TRUSTA_SETUP_STRATA = "1"; .\scripts\windows\setup_env.ps1 -Accel cuda
+# or on its own, with the model files already on disk
+$env:TRUSTA_STRATA_SETUP_ARGS = "--model IQ3_XXS --gguf-dir D:\models\IQ3_XXS"; .\scripts\windows\install_strata.ps1
+```
+
+> Strata's folder (`strata\` beside this repository, or `TRUSTA_STRATA_DIR`) must be at most
+> 110 characters long: its tree goes about 130 characters deeper.
+
 #### Activate the virtual environment (PowerShell)
 
 ```powershell
@@ -477,7 +493,7 @@ pre-commit install
 
 `setup_env` sets the llama tooling up **by default**, installing two things. Where the binary comes from differs by platform: **Windows needs no toolchain**, **Linux builds from source** and so needs `build-essential`, `cmake` and the CUDA Toolkit.
 
-- **Inference / quantization**: `llama-server`, `llama-quantize` and `llama-fit-params` in `service/utils/llama-bin`. The llama build is **decoupled** from the torch accelerator and selected by `-LlamaBackend` (Windows) / `TRUSTA_LLAMA_BACKEND` (Linux): `auto` (default) = CUDA when an NVIDIA card is present, otherwise Vulkan; `vulkan` forces the generic build that "sees every Intel/AMD/NVIDIA card"; `cpu` builds without any GPU backend. There is no probing — the asset (Windows) or the CMake flag (Linux) is chosen outright, so the backend you asked for is the backend you get. Whatever is installed is then checked by `scripts/llama_backend.py` before it is recorded in `.env`; a failure prints four options and stops, and `-AllowLlamaFallback` / `TRUSTA_LLAMA_ALLOW_FALLBACK=1` lets an unattended run accept a degraded binary instead. The version is pinned to `b10107`, overridable with `TRUSTA_LLAMA_VERSION` (Linux) or `-LlamaVersion` (Windows). Install location: `service/utils/llama-bin`; override it with `LLAMA_SERVER_BINARY` in `.env`.
+- **Inference / quantization**: `llama-server`, `llama-quantize` and `llama-fit-params` in `service/utils/llama-bin`. The llama build is **decoupled** from the torch accelerator and selected by `-LlamaBackend` (Windows) / `TRUSTA_LLAMA_BACKEND` (Linux): `auto` (default) = CUDA when an NVIDIA card is present, otherwise Vulkan; `vulkan` forces the generic build that "sees every Intel/AMD/NVIDIA card"; `cpu` builds without any GPU backend. There is no probing — the asset (Windows) or the CMake flag (Linux) is chosen outright, so the backend you asked for is the backend you get. Whatever is installed is then checked by `scripts/llama_backend.py` before it is recorded in `.env`; a failure prints four options and stops, and `-AllowLlamaFallback` / `TRUSTA_LLAMA_ALLOW_FALLBACK=1` lets an unattended run accept a degraded binary instead. The version is pinned to `b11960` (the build named by `nightly-tag.txt` in llama.cpp's v0.8.0 release; the versioned tag itself ships no binaries, so the b-tag is what can be pinned), overridable with `TRUSTA_LLAMA_VERSION` (Linux) or `-LlamaVersion` (Windows). Install location: `service/utils/llama-bin`; override it with `LLAMA_SERVER_BINARY` in `.env`.
 - **GGUF conversion**: a sparse checkout pulls only `convert_hf_to_gguf.py` / `convert_lora_to_gguf.py` / `conversion/` / `gguf-py` into `service/utils/llama.cpp` (~1.8MB of scripts, ~2.7MB on disk with the shallow git metadata; pure Python, no build step — the C++ sources are not fetched).
 
 Each part is installed **only when missing**, so re-running `setup_env` is cheap and
@@ -526,20 +542,58 @@ model that fits on the GPU loses only about 10%. Linux therefore builds llama.cp
 ### 5.2 If you want to use the vLLM engine (Linux)
 
 vLLM is an extra of this project (`--extra vllm`), installed into the same `.venv` as the
-service, currently at 0.27.1.
+service, currently at 0.32.0 (the Intel build, `--extra vllm-xpu`, too).
 
-Sharing that `.venv` means vLLM's requirements drive three of this project's pins:
-`torch` 2.13.0, `fastapi` 0.136.3, and `numpy` 2.3.5. **Upgrading vLLM is therefore a
-whole-project change** — check what the new release does to those three first, and expect
-to re-run the test suite and the XPU check.
+Sharing that `.venv` means vLLM's requirements drive several of this project's pins:
+`torch` 2.13.0 (2.14.0 for Intel, which the `vllm-xpu` 0.32.0 build asks for),
+`transformers` 5.16.1, `huggingface-hub` 1.31.0, `fastapi` 0.136.3, and `numpy` 2.2.6.
+**Upgrading vLLM is therefore a whole-project change** — check what the new
+release does to those first, and expect to re-run the test suite, the training regression
+harness (`scripts/upgrade_regression.py`), and the XPU check.
 
-`setup_env.sh` adds the extra automatically on CUDA hosts. On an Intel GPU it is opt-in
-(`TRUSTA_SETUP_VLLM=1`, which installs the `vllm-xpu` extra). To do it manually on CUDA:
+`setup_env.sh` adds the extra automatically: `vllm` on CUDA hosts, `vllm-xpu` on Intel GPU
+hosts. `TRUSTA_SETUP_VLLM=0` leaves it out. To do it manually:
 
 ```bash
 cd /home/<user>/AI-Scaler-Toolkit/backend
-uv sync --extra cuda --extra vllm
+uv sync --extra cuda --extra vllm        # NVIDIA
+uv sync --extra xpu --extra vllm-xpu     # Intel
 ```
+
+**Intel iGPU (Lunar Lake, Panther Lake and similar).** The iGPU has no memory of its own,
+so vLLM's KV cache comes out of system RAM. On such a host the backend sizes the KV cache
+itself from free RAM (including the pages the GPU driver pooled from the previous run) and
+the model's weight size, and refuses a model that does not fit, instead of letting vLLM size
+it. One driver issue to know about: measured on a Panther Lake laptop (kernel
+7.0.0-38, `xe` driver), once the driver's page pool reached about 12 GiB, every later vLLM
+unload left about 3.3 GiB that the system does not get back until a reboot. Repeated loads
+still work, each with a smaller KV cache. After many loads and unloads on an iGPU, reboot to
+get the memory back; `grep -E "GPUActive|GPUReclaim" /proc/meminfo` shows how much the GPU
+driver is holding.
+
+---
+
+### 5.3 If you want to use Chroma for RAG
+
+RAG keeps documents in SQLite and needs nothing extra. Chroma is an optional vector store for
+the same `/rag/*` routes; it is the `chroma` extra and is not installed by default. Add it to
+the extras this host already uses, then turn it on in `.env`:
+
+```bash
+uv sync --extra cuda --extra vllm --extra chroma
+```
+
+```bash
+RAG_BACKEND=chroma        # or RAG_USE_CHROMA=true
+```
+
+Without the extra, either setting logs a warning at startup and RAG stays on SQLite.
+
+chromadb 1.5.9 has open advisories with no fixed release yet. They are in Chroma's own server,
+which this project does not run; see
+[docs/dependency_advisories.md](docs/dependency_advisories.md)
+([繁體中文](docs/dependency_advisories.zh-TW.md)) for what they are and why they do not apply
+here, along with those in `accelerate` and `setuptools`.
 
 ---
 
@@ -878,7 +932,17 @@ python -m service.app
 |------|-------|---------|
 | transformers | ✅ | ✅ |
 | llama_server | ✅ (built from source) | ✅ (release binary) |
-| vllm | ✅ (CUDA; Intel opt-in) | ❌ Not supported |
+| vllm | ✅ (CUDA, Intel) | ❌ Not supported |
+
+### Fine-tuning support by accelerator
+
+Fine-tuning is Linux-only: a Windows backend refuses it with a 501. On Linux:
+
+| | NVIDIA (CUDA) | Intel XPU |
+|---|---|---|
+| Single GPU, no DeepSpeed | ✅ | ✅ |
+| `use_deepspeed` (ZeRO offload) | ✅ | ❌ Refused with a 501 |
+| Multi-GPU (`num_gpus` > 1, launched through DeepSpeed) | ✅ | ❌ Refused with a 501 |
 
 ---
 

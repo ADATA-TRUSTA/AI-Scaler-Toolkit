@@ -11,7 +11,6 @@ from threading import Lock
 from typing import Any, cast
 
 import httpx2
-import torch
 
 from .config_models import InferenceConfig, InferenceEngine
 from .inference.async_server_client import (
@@ -923,6 +922,9 @@ class ModelManager:
             "strata_max_context": cfg.strata_max_context if cfg else None,
             "strata_vram_limit_gb": cfg.strata_vram_limit_gb if cfg else None,
             "strata_auto_wake": cfg.strata_auto_wake if cfg else None,
+            "strata_extra_args": cfg.strata_extra_args if cfg else None,
+            "strata_vision": cfg.strata_vision if cfg else None,
+            "strata_mmproj": cfg.strata_mmproj if cfg else None,
             "vllm_mm_image_limit": cfg.vllm_mm_image_limit if cfg else None,
             "vllm_mm_audio_limit": cfg.vllm_mm_audio_limit if cfg else None,
             "vllm_mm_video_limit": cfg.vllm_mm_video_limit if cfg else None,
@@ -938,15 +940,20 @@ class ModelManager:
         if memory_usage:
             # The worker process already reported GPU usage (correct cross-process data)
             status["memory_usage"] = memory_usage
-        elif torch.cuda.is_available() and process_status.get("loaded"):
-            # Fallback: read it in the main process (only sees main-process usage, usually 0)
-            try:
-                status["memory_usage"] = {
-                    "allocated_gb": torch.cuda.memory_allocated() / (1024**3),
-                    "reserved_gb": torch.cuda.memory_reserved() / (1024**3),
-                }
-            except Exception:
-                pass
+        elif process_status.get("loaded"):
+            # Fallback: read it in the main process (only sees main-process usage, usually 0).
+            # torch is imported here rather than at module import, which it would slow by
+            # seconds; this branch is reached only once a model is loaded.
+            import torch
+
+            if torch.cuda.is_available():
+                try:
+                    status["memory_usage"] = {
+                        "allocated_gb": torch.cuda.memory_allocated() / (1024**3),
+                        "reserved_gb": torch.cuda.memory_reserved() / (1024**3),
+                    }
+                except Exception:
+                    pass
 
         return status
 

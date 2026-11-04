@@ -368,7 +368,7 @@
                         <td><span class="engine-tag tag-strata">Strata</span></td>
                         <td><code>strata</code></td>
                         <td>Large MoE GGUF models on one GPU: experts stream from DRAM, the KV cache can reach 256K. Deep sleep frees the GPU in about 2 s and keeps the conversation</td>
-                        <td>Tested on Linux. Needs a Strata checkout (<code>STRATA_HOME</code>) and a run config from its setup; offered only when <code>STRATA_HOME</code> is set. Install: <code>TRUSTA_SETUP_STRATA=1 scripts/linux/setup_env.sh</code> (compiles the deep-sleep build from TRUSTA-SW-FAE/strata and installs IQ3_XXS)</td>
+                        <td>Linux and Windows, NVIDIA only. Load a Qwen3.8-Flash-Next GGUF that Strata's setup supports (GSQ-RCO Q2_0 / IQ2_XS / IQ3_XXS / IQ3_S, Swift 1.5, the Coder's IQ1_M, Unsloth's UD-IQ4_XS / UD-Q4_K_XL / UD-Q5_K_XL / UD-Q6_K_XL / Q8_0, Gyro). In an installed build the first load installs Strata, and each model's first load runs Strata's setup for it, which takes several minutes. A source checkout installs it with <code>TRUSTA_SETUP_STRATA=1</code> and <code>setup_env.sh</code> / <code>setup_env.ps1</code></td>
                     </tr>
                 </tbody>
             </table>

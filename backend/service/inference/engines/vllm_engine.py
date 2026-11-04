@@ -72,6 +72,85 @@ def _running_under_wsl() -> bool:
     return "microsoft" in platform.uname().release.lower()
 
 
+_GIB = 1024**3
+# Left to the rest of the system on an Intel iGPU, as _effective_gpu_memory_utilization does.
+_IGPU_RESERVE_BYTES = 2 * _GIB
+# What the vLLM process needs beyond weights and KV cache. MiniCPM5-1B on an Arc B390
+# (Panther Lake) grew system RAM by 4.7 GiB for 2.1 GiB of weights and a 1 GiB KV cache.
+_IGPU_RUNTIME_BYTES = 2 * _GIB
+# Below this, the model does not fit in any useful sense; refuse rather than start it.
+_IGPU_MIN_KV_BYTES = 512 * 1024**2
+# vLLM still checks, before loading, that this fraction of the device is free. With the KV
+# size fixed it gates nothing else -- weights larger than it load fine -- so it is kept at
+# the floor, which the driver's pooled pages cannot push above what it reports as free.
+_IGPU_CHECK_UTILIZATION = 0.05
+
+
+def _intel_igpu_only() -> bool:
+    """
+    Whether the only Intel display device is the integrated GPU at PCI 0000:00:02.0.
+
+    Intel puts the iGPU at that address. With an Arc card also present, which one vLLM
+    runs on is not known here, so that case is left out.
+    """
+    try:
+        devices = list(Path("/sys/bus/pci/devices").iterdir())
+    except OSError:
+        return False
+    intel_gpus = []
+    for device in devices:
+        try:
+            vendor = (device / "vendor").read_text().strip()
+            pci_class = (device / "class").read_text().strip()
+        except OSError:
+            continue
+        if vendor == "0x8086" and pci_class.startswith("0x03"):
+            intel_gpus.append(device.name)
+    return intel_gpus == ["0000:00:02.0"]
+
+
+def _gpu_reclaim_bytes() -> int:
+    """
+    GPUReclaim from /proc/meminfo, or 0 where the kernel does not report it.
+
+    The Intel GPU driver pools the pages a run used instead of returning them, and neither
+    MemAvailable nor the driver's free-memory figure counts them -- 10 GiB of them after a
+    few vLLM runs on a 30 GiB Panther Lake laptop. The next load reuses them (GPUReclaim
+    dropped to 0 on every load measured), so they are free memory for the next model.
+
+    GPUActive is deliberately not counted. On that laptop (kernel 7.0.0-38, xe driver),
+    once the pool reached about 12 GiB every later vLLM exit left about 3.3 GiB counted as
+    GPUActive with no process owning it -- after a 16 GiB KV run and again after a 1 GiB
+    one. Memory pressure did not bring it back; only a reboot did. Counting it would size
+    the next KV cache from memory that is gone.
+    """
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("GPUReclaim:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _checkpoint_bytes(model_source: str) -> int | None:
+    """Size of a safetensors checkpoint, from its index or its single file; None if unknown."""
+    from ...utils.model_class_resolver import _resolve_checkpoint_file
+
+    index = _resolve_checkpoint_file(model_source, "model.safetensors.index.json")
+    if index is not None:
+        try:
+            total = json.loads(index.read_text(encoding="utf-8")).get("metadata", {})
+            total = total.get("total_size")
+        except (OSError, ValueError, AttributeError):
+            total = None
+        if isinstance(total, int) and total > 0:
+            return total
+    single = _resolve_checkpoint_file(model_source, "model.safetensors")
+    return single.stat().st_size if single is not None else None
+
+
 # Reasoning parsers for models where one has been checked against the model's own
 # thinking delimiter, used only when a load does not choose (vllm_reasoning_parser
 # unset). There is still no guessing for anything else.
@@ -587,6 +666,83 @@ class VllmEngine(BaseEngine):
         )
         return fits
 
+    def _igpu_kv_cache_bytes(self, config: InferenceConfig) -> int | None:
+        """
+        A fixed KV cache size for an Intel iGPU, or None to size it the usual way.
+
+        Lowering --gpu-memory-utilization (_effective_gpu_memory_utilization) is not
+        enough on an iGPU. vLLM sizes the KV cache from the driver's free-memory figure,
+        which leaves out the pages the driver pooled after the last run; after one large
+        load it reports most of RAM as used, and the next load gets a tiny fraction or
+        cannot fit its weights. So the KV cache is sized here instead, from what is really
+        free -- MemAvailable plus the pooled pages -- minus the weights, the DRAM KV
+        offload tier, the runtime and the reserve, and capped at the fraction the user
+        asked for. Measured on an Arc B390: three back-to-back loads with KV offload to
+        DRAM and disk each started and answered correctly.
+
+        This does not stop the driver leaking memory that _gpu_reclaim_bytes describes;
+        each load after a leak just gets a smaller KV cache (16.6, 13.6, then 9.8 GiB in
+        three loads at 0.9), until a reboot; the README tells Intel iGPU users so.
+
+        Raises RuntimeError when the weights alone leave no room: with the KV size fixed,
+        vLLM no longer checks that the model fits, and would run the system out of memory.
+        """
+        project_venv = os.path.join(self._resolve_vllm_server_dir(), ".venv")
+        if "+xpu" not in (self._installed_package_version(project_venv, "vllm") or ""):
+            return None
+        if not _intel_igpu_only():
+            return None
+        model_source = config.model_path or config.model_name
+        weights = _checkpoint_bytes(model_source)
+        if weights is None:
+            logger.warning(
+                "[Worker] Intel iGPU: no safetensors size for %s, so the KV cache is sized "
+                "from gpu_memory_utilization, which undercounts free memory after a run",
+                model_source,
+            )
+            return None
+        memory = psutil.virtual_memory()
+        pooled = _gpu_reclaim_bytes()
+        usable = memory.available + pooled - _IGPU_RESERVE_BYTES
+        budget = min(int(config.vllm_gpu_memory_utilization * memory.total), usable)
+        dram_tier = int((config.vllm_kv_offloading_size or 0) * _GIB)
+        kv = budget - weights - dram_tier - _IGPU_RUNTIME_BYTES
+        if kv < _IGPU_MIN_KV_BYTES:
+            raise RuntimeError(
+                f"Not enough memory for {model_source} on this Intel iGPU: "
+                f"{weights / _GIB:.1f} GiB of weights, "
+                f"{dram_tier / _GIB:.1f} GiB of DRAM KV offload and "
+                f"{_IGPU_RUNTIME_BYTES / _GIB:.0f} GiB of runtime need more than the "
+                f"{budget / _GIB:.1f} GiB available "
+                f"({memory.available / _GIB:.1f} GiB free, {pooled / _GIB:.1f} GiB pooled by "
+                f"the GPU driver, {_IGPU_RESERVE_BYTES / _GIB:.0f} GiB kept for the system, "
+                f"gpu_memory_utilization {config.vllm_gpu_memory_utilization:.2f})"
+            )
+        logger.info(
+            "[Worker] Intel iGPU shares system memory: KV cache %.1f GiB "
+            "(%.1f GiB free + %.1f GiB pooled by the GPU driver, %.1f GiB of weights)",
+            kv / _GIB,
+            memory.available / _GIB,
+            pooled / _GIB,
+            weights / _GIB,
+        )
+        return kv
+
+    def _memory_args(self, config: InferenceConfig) -> list[str]:
+        """--gpu-memory-utilization, plus --kv-cache-memory-bytes on an Intel iGPU."""
+        kv = self._igpu_kv_cache_bytes(config)
+        if kv is None:
+            return [
+                "--gpu-memory-utilization",
+                str(self._effective_gpu_memory_utilization(config)),
+            ]
+        return [
+            "--gpu-memory-utilization",
+            str(_IGPU_CHECK_UTILIZATION),
+            "--kv-cache-memory-bytes",
+            str(kv),
+        ]
+
     def _core_args(self, config: InferenceConfig) -> list[str]:
         """
         Core required flags: model / address / dtype / memory budget / max len /
@@ -608,8 +764,7 @@ class VllmEngine(BaseEngine):
             json.dumps(local_service_origins()),
             "--dtype",
             config.vllm_dtype,
-            "--gpu-memory-utilization",
-            str(self._effective_gpu_memory_utilization(config)),
+            *self._memory_args(config),
         ]
         if config.vllm_max_model_len is not None:
             args.extend(["--max-model-len", str(config.vllm_max_model_len)])
@@ -1033,6 +1188,12 @@ class VllmEngine(BaseEngine):
             "libnccl",
             "libnvJitLink",
             "libnvrtc",
+            # Intel XPU: oneCCL 2022.1 (vllm-xpu 0.32 / torch 2.14) loads its backend, libccl.so.1,
+            # by name from libccl.so.2, and neither carries an RPATH. torch's own RPATH finds
+            # libccl.so.2 in <venv>/lib but not the plugin, so without this dir vLLM's xccl init
+            # fails with "oneCCL could not be initialized! Could not load any plugin". The dir
+            # also holds Intel's OpenCL ICD loader, which reads the same /etc/OpenCL/vendors.
+            "libccl",
         )
 
         for root in search_roots:
@@ -1043,7 +1204,7 @@ class VllmEngine(BaseEngine):
                     continue
 
                 normalized_dir = dirpath.replace(os.sep, "/")
-                has_cuda_libs = any(
+                has_runtime_libs = any(
                     ".so" in filename and filename.startswith(wanted_prefixes)
                     for filename in filenames
                 )
@@ -1052,7 +1213,7 @@ class VllmEngine(BaseEngine):
                     "/site-packages/nvidia/" in normalized_dir and normalized_dir.endswith("/lib")
                 )
 
-                if not (has_cuda_libs or is_torch_lib or is_nvidia_lib):
+                if not (has_runtime_libs or is_torch_lib or is_nvidia_lib):
                     continue
 
                 abs_dir = os.path.abspath(dirpath)

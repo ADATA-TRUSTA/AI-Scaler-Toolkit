@@ -20,6 +20,8 @@ from types import ModuleType
 
 import pytest
 
+pytestmark = pytest.mark.inference
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PROBE_PATH = REPO_ROOT / "scripts" / "llama_backend.py"
 

@@ -236,7 +236,7 @@
             border: 1px solid var(--border-color);
             border-radius: 8px;
         }
-    
+
         .lang-switch {
             margin: 0.75rem 0 0;
             font-size: 0.9em;
@@ -922,6 +922,10 @@ for log in history["logs"]:
 
             <div class="warning">
                 <strong>Note:</strong> DeepSpeed lengthens training time significantly (CPU offload is 3-5x slower, disk offload 5-20x slower). Try QLoRA with a smaller batch size first, and enable DeepSpeed only when necessary.
+            </div>
+
+            <div class="warning">
+                <strong>Intel XPU:</strong> DeepSpeed is not supported on Intel GPUs. That covers <code>use_deepspeed</code> and multi-GPU training (<code>num_gpus</code> &gt; 1), which is launched through DeepSpeed; the backend refuses both with a 501 before training starts. Fine-tune on one Intel GPU with DeepSpeed off.
             </div>
 
             <h3>The four built-in profiles</h3>

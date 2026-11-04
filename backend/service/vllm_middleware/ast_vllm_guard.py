@@ -16,8 +16,10 @@ So with them on, this lets through the few that are needed and nothing else:
 * Every other admin endpoint answers 404, as it does with the admin endpoints off.
 
 Which paths are admin endpoints is read from the vLLM that is running (the routers under
-``vllm.entrypoints.serve.dev``), so one that a later vLLM adds is refused rather than
-missed; the list below is the fallback, vLLM 0.28's.
+``vllm.entrypoints.serve.dev`` and, from vLLM 0.32 on, ``vllm.entrypoints.rl``, which dev
+mode mounts too), so one that a later vLLM adds is refused rather than missed. The list
+below, vLLM 0.28's and 0.32's, is refused as well whatever is found: if a later vLLM
+moves its routers somewhere else again, the endpoints known today still stay shut.
 
 This file is imported by vLLM's interpreter from a directory of its own on PYTHONPATH,
 not as part of the service: it must not import the service, and nothing beside it is
@@ -53,7 +55,8 @@ ALLOWED = frozenset(
     }
 )
 
-# vLLM 0.28's admin endpoints, for when its routers cannot be read.
+# vLLM 0.28's and 0.32's admin endpoints: refused whatever is found, and all there is
+# when vLLM's routers cannot be read.
 FALLBACK_ADMIN = frozenset(
     {
         "/reset_prefix_cache",
@@ -76,26 +79,36 @@ FALLBACK_ADMIN = frozenset(
         "/sleep",
         "/wake_up",
         "/is_sleeping",
+        # new in 0.32
+        "/release_kv_cache_memory",
+        "/shutdown_weight_transfer_engine",
+        "/weight_checker",
     }
 )
 
-_DEV_PACKAGE = "vllm.entrypoints.serve.dev"
+# Where VLLM_SERVER_DEV_MODE's routers live; vLLM 0.32 moved pause/resume and the weight
+# updates out of serve.dev into rl. A package the installed vLLM lacks is skipped.
+_DEV_PACKAGES = ("vllm.entrypoints.serve.dev", "vllm.entrypoints.rl")
 _LOCAL_NAMES = frozenset({"localhost", "localhost.localdomain"})
 
 
 def admin_paths() -> frozenset[str]:
     """The admin endpoint paths of the vLLM installed here, or the fallback list."""
     try:
-        package = importlib.import_module(_DEV_PACKAGE)
         found: set[str] = set()
-        for info in pkgutil.walk_packages(package.__path__, f"{_DEV_PACKAGE}."):
-            if not info.name.endswith(".api_router"):
+        for name in _DEV_PACKAGES:
+            try:
+                package = importlib.import_module(name)
+            except ModuleNotFoundError:
                 continue
-            router = getattr(importlib.import_module(info.name), "router", None)
-            found.update(getattr(route, "path", "") for route in getattr(router, "routes", []))
+            for info in pkgutil.walk_packages(package.__path__, f"{name}."):
+                if not info.name.endswith(".api_router"):
+                    continue
+                router = getattr(importlib.import_module(info.name), "router", None)
+                found.update(getattr(route, "path", "") for route in getattr(router, "routes", []))
         found.discard("")
     except Exception:  # noqa: BLE001 - any failure here means "use the known list"
-        logger.warning("could not read vLLM's admin routes; using the vLLM 0.28 list")
+        logger.warning("could not read vLLM's admin routes; using the known list")
         return FALLBACK_ADMIN
     return frozenset(found) or FALLBACK_ADMIN
 
@@ -132,7 +145,7 @@ class AdminGuard:
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
-        self.blocked = admin_paths() - ALLOWED
+        self.blocked = (admin_paths() | FALLBACK_ADMIN) - ALLOWED
         logger.warning(
             "admin endpoints limited to %s for programs on this machine; %d others refused",
             ", ".join(sorted(ALLOWED)),

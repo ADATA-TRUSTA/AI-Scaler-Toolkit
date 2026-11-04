@@ -85,6 +85,7 @@ from .model_manager import SleepModeUnavailable, model_manager
 from .model_registry import MODEL_STATUS_DELETING, model_registry
 from .platform_support import (
     current_platform,
+    deepspeed_support,
     engine_support,
     supported_engines,
     training_support,
@@ -1248,6 +1249,15 @@ async def load_model(
                     "offload_folder",
                     "torch_dtype",
                     "model_total_memory",
+                    # one GGUF runs on llama-server or Strata, and a Strata load's
+                    # run config and flags change what runs, not just how it is called
+                    "engine",
+                    "strata_config_path",
+                    "strata_max_context",
+                    "strata_vram_limit_gb",
+                    "strata_extra_args",
+                    "strata_vision",
+                    "strata_mmproj",
                 ]
                 for f in fields:
                     if _norm(getattr(a, f, None)) != _norm(getattr(b, f, None)):
@@ -3052,6 +3062,12 @@ async def start_training(
     if not training.supported:
         logger.warning(f"Refused training request: {training.reason}")
         raise HTTPException(status_code=501, detail=training.reason)
+    # Same for DeepSpeed on Intel XPU: refused here, rather than failing minutes in.
+    if config.use_deepspeed or config.num_gpus > 1:
+        deepspeed = deepspeed_support()
+        if not deepspeed.supported:
+            logger.warning(f"Refused training request: {deepspeed.reason}")
+            raise HTTPException(status_code=501, detail=deepspeed.reason)
 
     try:
         logger.info(f"Starting training request: {config.model_name} with method {config.method}")

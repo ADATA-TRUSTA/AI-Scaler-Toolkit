@@ -15,11 +15,14 @@ Storage layout (relative to this file by default):
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import threading
 from datetime import datetime
 from typing import Any, cast
+
+logger = logging.getLogger(__name__)
 
 
 class RagManager:
@@ -126,7 +129,15 @@ class RagManager:
         try:
             import chromadb  # type: ignore
             from chromadb.utils import embedding_functions as ef  # type: ignore
-
+        except ImportError:
+            # chromadb is the opt-in `chroma` extra now, so asking for it without the extra is
+            # an expected setup slip; say so instead of quietly serving from SQLite.
+            logger.warning(
+                "RAG is set to use Chroma, but chromadb is not installed (it is the `chroma` "
+                "extra: uv sync --extra chroma ...); using SQLite search instead"
+            )
+            return
+        try:
             os.makedirs(self._chroma_dir, exist_ok=True)
             self._chroma_client = chromadb.PersistentClient(path=self._chroma_dir)
             # Try to use a sentence-transformer embedding function inside Chroma

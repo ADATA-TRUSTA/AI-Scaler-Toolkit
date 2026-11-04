@@ -16,7 +16,10 @@ from pydantic import (
 
 from .server_args import (
     LLAMA_SERVER_RESERVED_FLAGS,
+    STRATA_RESERVED_FLAGS,
     VLLM_SERVER_RESERVED_FLAGS,
+    flag_groups,
+    is_flag,
     is_loopback_host,
     reserved_flags_in,
 )
@@ -171,6 +174,13 @@ class InferenceSharedFields(BaseModel):
     strata_auto_wake: bool | None = Field(
         default=None, description="[Strata] Wake on a request while asleep instead of 503"
     )
+    strata_extra_args: list[str] | None = Field(
+        default=None, description="[Strata] Engine flags set over the run config's"
+    )
+    strata_vision: bool | None = Field(
+        default=None, description="[Strata] Image input on/off; None = the run config's"
+    )
+    strata_mmproj: str | None = Field(default=None, description="[Strata] Image projector GGUF")
     vllm_auto_wake: bool | None = Field(
         default=None, description="[vLLM] Wake on a request while asleep instead of 503"
     )
@@ -627,11 +637,12 @@ class StrataConfigFields(BaseModel):
 
     Only what a first-time user sets is a field here. The rest of Strata's start-up flags
     (KV format and residency, speculative decoding, the expert cache) live in the run config
-    its setup writes, which strata_config_path points at; edit that file to tune them.
+    its setup writes, which strata_config_path points at; strata_extra_args sets any of
+    them for one load without editing that file.
     Always on: deep sleep (POST /inference/sleep frees the GPU in about 2 s and keeps the
     conversation; STRATA_ENGINE_BINARY is the build with it), saving the
     conversation on unload and restoring it on the next load. Image input follows the run
-    config.
+    config unless strata_vision says otherwise.
     """
 
     strata_config_path: str | None = Field(
@@ -666,6 +677,31 @@ class StrataConfigFields(BaseModel):
             "[Strata] With the model asleep, a generation request wakes it first "
             "(true, default) or is refused with HTTP 503 (false) -- turn it off while "
             "another program holds the GPU the model gave up"
+        ),
+    )
+    strata_extra_args: list[str] | None = Field(
+        default=None,
+        description=(
+            "[Strata] Engine flags set over the run config's args, e.g. "
+            '["--resident-budget-gib", "13.3", "--sleep-backup", "file"]. Each flag replaces '
+            "the run config's own (with its values) or is added; --resident-budget-gib and "
+            "--resident-experts replace each other. The run config file is not changed"
+        ),
+    )
+    strata_vision: bool | None = Field(
+        default=None,
+        description=(
+            "[Strata] Image input. true: on, adding Strata's image encoder when the run "
+            "config has none (STRATA_VISION_BINARY, the model's GGUF, and strata_mmproj or "
+            "an mmproj GGUF found beside the model or one folder up); false: off, which "
+            "also frees the encoder's ~1 GB of RAM; omitted: as the run config has it"
+        ),
+    )
+    strata_mmproj: str | None = Field(
+        default=None,
+        description=(
+            "[Strata] The image projector (mmproj .gguf) for image input; when omitted, the "
+            "run config's, else one found beside the model's GGUF or one folder up"
         ),
     )
 
@@ -768,6 +804,38 @@ class InferenceConfig(
                 "where the server listens, who may use it and what it loads"
             )
         return v
+
+    @field_validator("strata_extra_args")
+    @classmethod
+    def _check_strata_extra_args(cls, v: list[str] | None) -> list[str] | None:
+        """Flags only, none this service runs the engine with or that write files."""
+        if v is None:
+            return v
+        args = [str(a).strip() for a in v if str(a).strip()]
+        if args and not is_flag(args[0]):
+            raise ValueError(
+                f"strata_extra_args must start with a flag, not {args[0]!r}: each value "
+                "follows the flag it belongs to"
+            )
+        if found := reserved_flags_in(args, STRATA_RESERVED_FLAGS):
+            raise ValueError(
+                f"strata_extra_args cannot set {', '.join(found)}: this service runs the "
+                "engine as a server with deep sleep on, and does not let a load write files "
+                "the engine is pointed at (image input is strata_vision)"
+            )
+        return args
+
+    @model_validator(mode="after")
+    def _strata_fields_or_extra_args(self) -> "InferenceConfig":
+        """One place per setting: a field and the same flag in extra_args would disagree."""
+        flags = {flag for flag, _ in flag_groups(self.strata_extra_args or [])}
+        for field, flag in (
+            ("strata_max_context", "--max-context"),
+            ("strata_vram_limit_gb", "--vram-reserve-mib"),
+        ):
+            if flag in flags and getattr(self, field) is not None:
+                raise ValueError(f"set {field} or {flag} in strata_extra_args, not both")
+        return self
 
     @model_validator(mode="after")
     def _sync_llama_server_extra_args(self) -> "InferenceConfig":

@@ -17,6 +17,8 @@ from fastapi import HTTPException
 
 import service.app as app_module
 
+pytestmark = pytest.mark.inference
+
 
 def test_the_protected_path_guard_does_not_stall_the_service(monkeypatch):
     """The guard is made slow on purpose; other coroutines must still get to run."""

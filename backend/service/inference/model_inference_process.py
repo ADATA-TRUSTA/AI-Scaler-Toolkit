@@ -3,7 +3,9 @@ Model Inference Process - Separate process for model loading and inference to av
 Uses multiprocessing to isolate model operations and ensure proper VRAM cleanup on process termination.
 """
 
+import gc
 import os
+import sys
 import threading
 import time
 import traceback
@@ -15,21 +17,59 @@ from queue import Empty
 from queue import Queue as ThreadQueue
 from typing import Any, cast
 
-import torch
-
 from ..config_models import InferenceConfig, InferenceEngine
 
 # Import settings BEFORE torch/transformers (sets HF_HOME environment variable)
 from ..settings import DEFAULT_GENERATION_TIMEOUT, configure_logging
 from .engines.llama_server_engine import LlamaServerEngine
 from .engines.strata_engine import StrataEngine
-
-# Import engines
-from .engines.transformers_engine import TransformersEngine
 from .engines.vllm_engine import VllmEngine
-from .model_utils import _cleanup_memory
+
+# TransformersEngine and torch are imported where they are used, not here. This module is
+# imported by the API process at startup and by every worker, and only a transformers
+# worker needs them: torch + transformers + peft cost a few seconds of each start.
 
 logger = configure_logging(__name__)
+
+
+def _cleanup_memory() -> None:
+    """
+    Free memory after an unload or a failed load.
+
+    Torch keeps device caches only in a process that imported it, which in a worker means
+    the transformers engine ran there. Any other worker has nothing for torch to clear, and
+    importing torch to clear it would also create a CUDA context.
+    """
+    if "torch" in sys.modules:
+        from .model_utils import _cleanup_memory as cleanup_torch_memory
+
+        cleanup_torch_memory()
+    else:
+        gc.collect()
+
+
+def _clear_main_process_cuda_cache() -> None:
+    """
+    Clear the CUDA cache of the process this runs in (the API process), if it has one.
+
+    The API process never allocates on the GPU itself, so normally CUDA was never
+    initialized here and there is nothing to clear. Checking is_available() instead let
+    synchronize() initialize CUDA, which left a 128 MiB context on the card for the rest
+    of the service's life (measured on torch 2.13 + RTX 5060 Ti) and cost a vLLM restart
+    its gpu_memory_utilization margin. empty_cache() and memory_allocated() never
+    initialize CUDA; synchronize() does. Importing torch just to check is skipped too.
+    """
+    torch = sys.modules.get("torch")
+    try:
+        if torch is not None and torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            allocated_after = torch.cuda.memory_allocated() / 1024**3  # GB
+            logger.info(
+                f"GPU memory after unload (main process view): {allocated_after:.2f} GB allocated"
+            )
+    except Exception as e:
+        logger.debug(f"Could not clean GPU cache: {e}")
 
 
 def _model_worker_process(
@@ -108,6 +148,8 @@ def _model_worker_process(
                             )
                         else:
                             logger.info("[Worker] Selecting TransformersEngine")
+                            from .engines.transformers_engine import TransformersEngine
+
                             engine = TransformersEngine(
                                 status_queue,
                                 data_queue,
@@ -656,18 +698,7 @@ class ModelInferenceProcess:
         self.update_status()
         self.stop_process("Generation interrupted because model was unloaded")
 
-        # Clear the main process's GPU cache again and refresh memory_usage for later queries
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-                allocated_after = torch.cuda.memory_allocated() / 1024**3  # GB
-                logger.info(
-                    "GPU memory after unload (main process view): "
-                    f"{allocated_after:.2f} GB allocated"
-                )
-        except Exception as e:
-            logger.debug(f"Could not clean GPU cache: {e}")
+        _clear_main_process_cuda_cache()
 
         # Update state
         self.current_status = "idle"

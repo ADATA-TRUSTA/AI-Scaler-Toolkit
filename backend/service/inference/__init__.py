@@ -1,9 +1,8 @@
 """
 Inference module - Contains inference-related components.
+
+Import from the submodules (`service.inference.memory_estimator` and so on). This file
+deliberately imports nothing: every `service.inference.*` import runs it, and the
+re-exports it used to carry dragged torch, transformers and peft into the API process
+at startup although only the transformers worker uses them.
 """
-
-from .gguf_estimator import gguf_memory_estimator
-from .memory_estimator import memory_estimator
-from .model_inference_process import ModelInferenceProcess
-
-__all__ = ["ModelInferenceProcess", "gguf_memory_estimator", "memory_estimator"]

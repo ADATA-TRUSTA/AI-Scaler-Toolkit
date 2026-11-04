@@ -236,7 +236,7 @@
             border: 1px solid var(--border-color);
             border-radius: 8px;
         }
-    
+
         .lang-switch {
             margin: 0.75rem 0 0;
             font-size: 0.9em;
@@ -913,6 +913,10 @@ for log in history["logs"]:
 
             <div class="warning">
                 <strong>注意：</strong> DeepSpeed 會顯著延長訓練時間（CPU offload 慢 3-5 倍，Disk offload 慢 5-20 倍），建議優先嘗試 QLoRA + 較小 batch size，只在必要時才啟用 DeepSpeed。
+            </div>
+
+            <div class="warning">
+                <strong>Intel XPU：</strong> Intel GPU 不支援 DeepSpeed，包含 <code>use_deepspeed</code> 與多 GPU 訓練（<code>num_gpus</code> &gt; 1，透過 DeepSpeed 啟動）；後端會在訓練開始前直接回傳 501 拒絕。在 Intel GPU 上請關閉 DeepSpeed，以單張 GPU 進行 fine-tune。
             </div>
 
             <h3>四種內建 Profile</h3>

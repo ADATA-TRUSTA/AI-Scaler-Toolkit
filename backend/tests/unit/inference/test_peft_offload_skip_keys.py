@@ -25,6 +25,8 @@ from service.inference.load_model.peft_loader import (  # noqa: E402
     _restore_device_placement_skip_keys,
 )
 
+pytestmark = pytest.mark.inference
+
 SKIP_KEYS = ["past_key_values", "shared_kv_states"]
 
 

@@ -16,6 +16,8 @@ from threading import Lock
 
 import httpx2
 
+from .inference.strata_models import strata_model_choice
+
 logger = logging.getLogger(__name__)
 
 
@@ -286,6 +288,13 @@ class ModelRegistry:
         else:
             model_path = None
 
+        extra: dict = {}
+        if model_type == "llama_gguf_models":
+            # Whether Strata can run this GGUF, so a client offers it for engine="strata"
+            # without keeping its own copy of Strata's list.
+            extra["strata_supported"] = (
+                bool(model_path) and strata_model_choice(model_path) is not None
+            )
         return {
             "model_name": base_model_name,
             "model_path": model_path,
@@ -300,6 +309,7 @@ class ModelRegistry:
             # or, worse, told it was deleted while the removal is still running.
             "status": item.get("status") or MODEL_STATUS_READY,
             "delete_error": item.get("delete_error"),
+            **extra,
         }
 
     def list_models(self) -> dict:

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import service.app as app_module
 from service import config_examples, settings
 from service.config_models import InferenceConfig, InferenceEngine, QuantizationType
+from service.platform_support import Support
 
 # As this machine: see test_remote_access.py.
 client = TestClient(app_module.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1")
@@ -535,6 +536,28 @@ def test_load_model_returns_already_loaded_for_same_config(monkeypatch):
     data = response.json()
     assert data["status"] == "already_loaded"
     assert data["config"]["model_name"] == "test-model"
+
+
+def test_load_model_refuses_the_same_gguf_with_other_strata_settings(monkeypatch):
+    payload = {
+        "model_name": "flash-next",
+        "model_path": "/m/flash-next.gguf",
+        "engine": "strata",
+        "strata_extra_args": ["--resident-budget-gib", "12"],
+    }
+    # both engines offered, whatever this machine has installed: the test is the comparison
+    monkeypatch.setattr(app_module, "engine_support", lambda engine: Support(supported=True))
+    monkeypatch.setattr(app_module.model_manager, "is_loaded", lambda: True)
+    monkeypatch.setattr(
+        app_module.model_manager, "config", InferenceConfig(**payload), raising=False
+    )
+
+    same = client.post("/inference/load_model", json=payload)
+    assert same.json()["status"] == "already_loaded"
+    other_args = {**payload, "strata_extra_args": ["--resident-budget-gib", "13.3"]}
+    assert client.post("/inference/load_model", json=other_args).status_code == 409
+    other_engine = {**payload, "engine": "llama_server", "strata_extra_args": None}
+    assert client.post("/inference/load_model", json=other_engine).status_code == 409
 
 
 def test_inference_status_serializes_current_manager_state(monkeypatch):

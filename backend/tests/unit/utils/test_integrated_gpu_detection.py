@@ -17,6 +17,8 @@ import pytest
 
 from service.utils.system_monitor import SystemMonitor
 
+pytestmark = pytest.mark.inference
+
 
 def _card(root: Path, n: int, vendor: str, vram_node: str | None = None,
           vram_bytes: int = 0) -> None:

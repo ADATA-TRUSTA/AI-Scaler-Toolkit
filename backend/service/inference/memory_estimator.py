@@ -13,23 +13,37 @@ from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
-# Optional torch import for environment detection
-try:
-    import torch  # type: ignore
-except Exception:  # pragma: no cover - estimator should still work without torch
-    torch = None
+# Optional dependencies, imported on first use by _load_optional_deps() rather than here:
+# the API process imports this module at startup, and torch + transformers + accelerate
+# cost about a second and a half of it before the service can answer. Each name is None
+# once loading found the package missing; tests may also replace them before first use.
+_NOT_LOADED: Any = object()
+torch: Any = _NOT_LOADED  # environment detection
+AutoConfig: Any = _NOT_LOADED  # config loading
+init_empty_weights: Any = _NOT_LOADED  # meta-device instantiation (parameter counting)
 
-# Optional transformers for config loading
-try:
-    from transformers import AutoConfig  # type: ignore
-except Exception:
-    AutoConfig = None
 
-# Optional accelerate for meta-device instantiation (the parameter-counting path)
-try:
-    from accelerate import init_empty_weights  # type: ignore
-except Exception:
-    init_empty_weights = None
+def _load_optional_deps() -> None:
+    """Import torch, transformers' AutoConfig and accelerate if not done yet."""
+    global torch, AutoConfig, init_empty_weights
+    if torch is _NOT_LOADED:
+        try:
+            import torch as _torch  # type: ignore
+        except Exception:  # pragma: no cover - estimator should still work without torch
+            _torch = None
+        torch = _torch
+    if AutoConfig is _NOT_LOADED:
+        try:
+            from transformers import AutoConfig as _AutoConfig  # type: ignore
+        except Exception:
+            _AutoConfig = None
+        AutoConfig = _AutoConfig
+    if init_empty_weights is _NOT_LOADED:
+        try:
+            from accelerate import init_empty_weights as _init_empty_weights  # type: ignore
+        except Exception:
+            _init_empty_weights = None
+        init_empty_weights = _init_empty_weights
 
 
 def _hf_token() -> str | None:
@@ -195,6 +209,7 @@ class MemoryEstimator:
         if model_name in self._config_cache:
             return self._config_cache[model_name]
 
+        _load_optional_deps()
         if AutoConfig is None:
             logger.warning("transformers is not installed; cannot load model config automatically")
             return None
@@ -338,6 +353,7 @@ class MemoryEstimator:
         allocating tensor storage; it does not sandbox the import. Pass True only for a
         checkpoint already on local disk.
         """
+        _load_optional_deps()
         if init_empty_weights is None:
             logger.warning("accelerate is not installed; cannot count parameters exactly")
             return None
@@ -792,6 +808,7 @@ class MemoryEstimator:
     @staticmethod
     def _detect_accelerator() -> str:
         """Which kind of accelerator torch can see: "cuda", "xpu" or "cpu"."""
+        _load_optional_deps()
         if torch is None:
             return "cpu"
         try:

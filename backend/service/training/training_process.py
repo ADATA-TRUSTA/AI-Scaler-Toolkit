@@ -37,9 +37,10 @@ import psutil
 from ..config_models import TrainingConfig, TrainingStatus
 
 if TYPE_CHECKING:
+    import torch
     from datasets import Dataset
     from redis import Redis
-    from transformers import PreTrainedTokenizerBase, TrainingArguments
+    from transformers import PreTrainedTokenizerBase, Trainer, TrainingArguments
 
 # Import settings BEFORE torch/transformers (sets HF_HOME environment variable)
 from ..settings import (
@@ -64,21 +65,13 @@ except ImportError:
     redis = None
 
 
-# New core modules
-import torch
-from transformers import Trainer
-
-from .core import (
-    JobLogWriter,
-    MemoryAggregator,
-    Phase,
-    build_resource_snapshot,
-    build_training_components,
-    log_mem,
-    read_events,
-    save_training_results,
-    start_memory_sampler,
-)
+# torch, transformers and the model-building core modules (pipeline, model_saver) are
+# imported inside the worker functions, not here. TrainingProcessManager runs in the API
+# process, which imports this module at startup and never trains in-process; importing
+# them here cost seconds of every service start.
+from .core.job_logger import JobLogWriter, build_resource_snapshot, read_events
+from .core.mem_probe import MemoryAggregator, log_mem, start_memory_sampler
+from .core.training_events import Phase
 
 logger = configure_logging(__name__)
 
@@ -481,6 +474,8 @@ def _cleanup_training_resources(
         deepspeed_initialized: Whether DeepSpeed was initialized
     """
     import gc
+
+    import torch
 
     logger.info("[TrainingWorker] Starting resource cleanup...")
 
@@ -1001,6 +996,11 @@ def _training_worker_process(
     # default handler, that never ran: cancelling a multi-GPU job left N ranks
     # alive and reparented, each still holding its GPU's VRAM.
     import signal
+
+    import torch
+
+    from .core.model_saver import save_training_results
+    from .core.pipeline import build_training_components
 
     def _sigterm_unwinds(signum: int, _frame: object) -> None:
         logger.info(f"[TrainingWorker] Received signal {signum}; unwinding cleanup handlers")

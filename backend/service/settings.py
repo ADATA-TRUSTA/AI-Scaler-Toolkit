@@ -67,7 +67,7 @@ def _parse_bool_env(raw_value: str | None, default: bool = False) -> bool:
 
 
 def _prepend_cuda_library_paths() -> None:
-    """Best-effort: expose CUDA shared libraries bundled in the venv to subprocesses."""
+    """Best-effort: expose CUDA (and Intel oneCCL) libraries bundled in the venv to subprocesses."""
     site_packages = VENV_DIR / ("Lib" if os.name == "nt" else "lib")
     candidates = []
 
@@ -79,6 +79,14 @@ def _prepend_cuda_library_paths() -> None:
             "site-packages/torch/lib",
         ):
             candidates.extend(str(match) for match in site_packages.glob(pattern) if match.is_dir())
+
+    # Intel XPU: oneCCL 2022.1 (torch 2.14+xpu) loads its backend, libccl.so.1, by name from
+    # libccl.so.2, and neither carries an RPATH; torch's RPATH finds libccl.so.2 in <venv>/lib
+    # but not the plugin. Training initialises oneCCL even on one GPU, and so does vLLM, so
+    # without this dir both fail with "oneCCL could not be initialized! Could not load any plugin".
+    oneccl_dir = VENV_DIR / "lib"
+    if os.name != "nt" and (oneccl_dir / "libccl.so.1").exists():
+        candidates.append(str(oneccl_dir))
 
     env_var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
     existing = [item for item in os.getenv(env_var, "").split(os.pathsep) if item]
@@ -517,16 +525,20 @@ VLLM_SERVER_PROJECT_DIR: str = _get_env_path(
 # ==================== Strata engine ====================
 # Strata (github.com/Niko1221/Strata) serves a MoE model with its experts in DRAM and the
 # hot ones cached on the GPU, behind its own OpenAI-compatible server (serve/server.py).
-# Nothing of it ships here: engine="strata" starts that server from a Strata checkout its
+# Nothing of it ships here: engine="strata" starts that server from a Strata install its
 # own setup prepared, so these point at one. Empty STRATA_HOME = the engine is not offered.
 
-# Env var: STRATA_HOME -- the Strata checkout (the directory holding serve/server.py)
+# Env var: STRATA_HOME -- the Strata install (the directory holding serve/server.py)
 STRATA_HOME: str = os.getenv("STRATA_HOME", "")
 # Env var: STRATA_PYTHON -- the interpreter for serve/server.py (Strata's own venv)
 STRATA_PYTHON: str = os.getenv("STRATA_PYTHON", "")
 # Env var: STRATA_ENGINE_BINARY -- the Strata engine built with deep sleep (--sleep-mode);
 # required. It replaces the executable the run config names, which has no deep sleep.
 STRATA_ENGINE_BINARY: str = os.getenv("STRATA_ENGINE_BINARY", "")
+# Env var: STRATA_VISION_BINARY -- Strata's image encoder (strata-vision), for a load that asks
+# for image input (strata_vision) when the run config has none. Empty = strata-vision beside
+# STRATA_ENGINE_BINARY. Any build reads any model: it is told the mmproj and GGUF at start.
+STRATA_VISION_BINARY: str = os.getenv("STRATA_VISION_BINARY", "")
 # Env var: STRATA_PORT -- loopback port of the managed Strata server
 _DEFAULT_STRATA_PORT: int = 5002
 STRATA_PORT: int = int(os.getenv("STRATA_PORT", str(_DEFAULT_STRATA_PORT)))
@@ -541,6 +553,15 @@ STRATA_HEALTH_TIMEOUT: float = float(
 # the slot files a conversation is saved to across an unload
 _DEFAULT_STRATA_RUNTIME_DIR: str = "./.cache/strata"
 STRATA_RUNTIME_DIR: str = _get_env_path("STRATA_RUNTIME_DIR", _DEFAULT_STRATA_RUNTIME_DIR)
+# Env var: STRATA_DATA_DIR -- where Strata keeps what it derives from a model (the expert
+# pack, the draft layer). Its setup defaults this to Strata-data beside the install, which
+# ties gigabytes that are expensive to rebuild to a folder an uninstall may clear; the
+# desktop launcher points it somewhere that outlives the install. Empty = Strata's default.
+STRATA_DATA_DIR: str = os.getenv("STRATA_DATA_DIR", "")
+# Env var: STRATA_INSTALL_DIR -- where a first Strata load installs Strata from the package in
+# vendor/ when STRATA_HOME is empty. Empty = install_strata's default, strata/ beside this
+# project. The desktop launcher sets it to its data directory, out of the program directory.
+STRATA_INSTALL_DIR: str = os.getenv("STRATA_INSTALL_DIR", "")
 
 # ==================== Redis Configuration ====================
 # 💡 Edit here to change the Redis connection settings, or override with env vars

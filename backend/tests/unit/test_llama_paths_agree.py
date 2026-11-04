@@ -15,7 +15,11 @@ out of the shell scripts and assert they still agree with the Python side.
 import re
 from pathlib import Path
 
+import pytest
+
 from service.settings import LLAMA_BIN_DIR
+
+pytestmark = pytest.mark.inference
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PS1 = REPO_ROOT / "scripts" / "windows" / "setup_env.ps1"

@@ -668,7 +668,17 @@ def test_a_message_merely_containing_the_word_info_is_kept():
 # ==================== gpu memory utilization on XPU ====================
 
 
-def _memory(engine, monkeypatch, *, vllm_version, available_gib, total_gib=30.0):
+def _memory(
+    engine,
+    monkeypatch,
+    *,
+    vllm_version,
+    available_gib,
+    total_gib=30.0,
+    igpu=False,
+    pooled_gib=0.0,
+    weights_gib=None,
+):
     monkeypatch.setattr(engine, "_resolve_vllm_server_dir", lambda: "/nonexistent")
     monkeypatch.setattr(engine, "_installed_package_version", lambda _venv, _name: vllm_version)
     gib = 1024**3
@@ -677,6 +687,15 @@ def _memory(engine, monkeypatch, *, vllm_version, available_gib, total_gib=30.0)
         "virtual_memory",
         lambda: SimpleNamespace(available=available_gib * gib, total=total_gib * gib),
     )
+    # The host running the tests must not decide which path is taken.
+    monkeypatch.setattr(vllm_engine, "_intel_igpu_only", lambda: igpu)
+    monkeypatch.setattr(vllm_engine, "_gpu_reclaim_bytes", lambda: int(pooled_gib * gib))
+    weights = None if weights_gib is None else int(weights_gib * gib)
+    monkeypatch.setattr(vllm_engine, "_checkpoint_bytes", lambda _source: weights)
+
+
+def _flag(args, name):
+    return args[args.index(name) + 1] if name in args else None
 
 
 def test_cuda_build_passes_the_requested_fraction_through(monkeypatch):
@@ -690,7 +709,7 @@ def test_cuda_build_passes_the_requested_fraction_through(monkeypatch):
 def test_xpu_build_lowers_a_fraction_that_does_not_fit(monkeypatch):
     """The interface's 0.9 on a 30 GiB laptop with 16 GiB free: (16 - 2) / 30."""
     engine = _engine()
-    _memory(engine, monkeypatch, vllm_version="0.28.0+xpu", available_gib=16)
+    _memory(engine, monkeypatch, vllm_version="0.32.0+xpu", available_gib=16)
     config = InferenceConfig(engine="vllm", model_name="demo", vllm_gpu_memory_utilization=0.9)
     assert engine._effective_gpu_memory_utilization(config) == 0.47
     args = engine._core_args(config)
@@ -699,7 +718,7 @@ def test_xpu_build_lowers_a_fraction_that_does_not_fit(monkeypatch):
 
 def test_xpu_build_keeps_a_fraction_that_fits(monkeypatch):
     engine = _engine()
-    _memory(engine, monkeypatch, vllm_version="0.28.0+xpu", available_gib=28)
+    _memory(engine, monkeypatch, vllm_version="0.32.0+xpu", available_gib=28)
     config = InferenceConfig(engine="vllm", model_name="demo", vllm_gpu_memory_utilization=0.3)
     assert engine._effective_gpu_memory_utilization(config) == 0.3
 
@@ -707,9 +726,121 @@ def test_xpu_build_keeps_a_fraction_that_fits(monkeypatch):
 def test_xpu_build_never_goes_below_the_floor(monkeypatch):
     """With almost nothing free, vLLM gets the minimum and says why it cannot start."""
     engine = _engine()
-    _memory(engine, monkeypatch, vllm_version="0.28.0+xpu", available_gib=1)
+    _memory(engine, monkeypatch, vllm_version="0.32.0+xpu", available_gib=1)
     config = InferenceConfig(engine="vllm", model_name="demo", vllm_gpu_memory_utilization=0.9)
     assert engine._effective_gpu_memory_utilization(config) == 0.05
+
+
+def test_igpu_counts_the_driver_pool_as_free(monkeypatch):
+    """
+    After a run the driver keeps its pages pooled; the next load reuses them.
+
+    30 GiB laptop, 0.9 requested, 6 GiB free plus 20 GiB pooled, 2 GiB of weights:
+    usable = 6 + 20 - 2 = 24, capped at 0.9 * 30 = 27 -> 24; KV = 24 - 2 - 2 (runtime) = 20.
+    """
+    engine = _engine()
+    _memory(
+        engine,
+        monkeypatch,
+        vllm_version="0.32.0+xpu",
+        available_gib=6,
+        igpu=True,
+        pooled_gib=20,
+        weights_gib=2,
+    )
+    config = InferenceConfig(engine="vllm", model_name="demo", vllm_gpu_memory_utilization=0.9)
+    args = engine._core_args(config)
+    assert _flag(args, "--kv-cache-memory-bytes") == str(20 * 1024**3)
+    # Only vLLM's pre-load check reads this now; the driver's figure leaves out the pool.
+    assert _flag(args, "--gpu-memory-utilization") == "0.05"
+
+
+def test_igpu_kv_cache_stays_within_the_requested_fraction(monkeypatch):
+    """0.5 of 30 GiB is 15 GiB however much is free: KV = 15 - 2 (weights) - 2 (runtime)."""
+    engine = _engine()
+    _memory(
+        engine, monkeypatch, vllm_version="0.32.0+xpu", available_gib=28, igpu=True, weights_gib=2
+    )
+    config = InferenceConfig(engine="vllm", model_name="demo", vllm_gpu_memory_utilization=0.5)
+    assert engine._igpu_kv_cache_bytes(config) == 11 * 1024**3
+
+
+def test_igpu_kv_cache_leaves_room_for_the_dram_offload_tier(monkeypatch):
+    """The DRAM KV tier is system RAM too: 4 GiB of it comes out of the KV cache."""
+    engine = _engine()
+    _memory(
+        engine, monkeypatch, vllm_version="0.32.0+xpu", available_gib=28, igpu=True, weights_gib=2
+    )
+    config = InferenceConfig(
+        engine="vllm",
+        model_name="demo",
+        vllm_gpu_memory_utilization=0.5,
+        vllm_kv_offloading_size=4,
+    )
+    assert engine._igpu_kv_cache_bytes(config) == 7 * 1024**3
+
+
+def test_igpu_refuses_a_model_that_does_not_fit(monkeypatch):
+    """With the KV size fixed vLLM no longer checks the weights fit, so refuse here."""
+    engine = _engine()
+    _memory(
+        engine, monkeypatch, vllm_version="0.32.0+xpu", available_gib=16, igpu=True, weights_gib=20
+    )
+    config = InferenceConfig(engine="vllm", model_name="demo", vllm_gpu_memory_utilization=0.9)
+    with pytest.raises(RuntimeError, match="Not enough memory for demo on this Intel iGPU"):
+        engine._core_args(config)
+
+
+def test_igpu_without_a_checkpoint_size_keeps_the_fraction_path(monkeypatch):
+    engine = _engine()
+    _memory(engine, monkeypatch, vllm_version="0.32.0+xpu", available_gib=16, igpu=True)
+    config = InferenceConfig(engine="vllm", model_name="demo", vllm_gpu_memory_utilization=0.9)
+    args = engine._core_args(config)
+    assert "--kv-cache-memory-bytes" not in args
+    assert _flag(args, "--gpu-memory-utilization") == "0.47"
+
+
+@pytest.mark.parametrize(
+    ("vllm_version", "igpu"),
+    [("0.32.0", True), ("0.32.0+xpu", False)],
+    ids=["cuda-build", "xpu-not-igpu-only"],
+)
+def test_igpu_kv_sizing_only_on_an_xpu_build_with_only_the_igpu(monkeypatch, vllm_version, igpu):
+    engine = _engine()
+    _memory(
+        engine,
+        monkeypatch,
+        vllm_version=vllm_version,
+        available_gib=16,
+        igpu=igpu,
+        weights_gib=2,
+    )
+    config = InferenceConfig(engine="vllm", model_name="demo", vllm_gpu_memory_utilization=0.9)
+    assert "--kv-cache-memory-bytes" not in engine._core_args(config)
+
+
+def test_checkpoint_bytes_reads_the_index_total(tmp_path):
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": 123456}, "weight_map": {}})
+    )
+    assert vllm_engine._checkpoint_bytes(str(tmp_path)) == 123456
+
+
+def test_checkpoint_bytes_falls_back_to_the_single_file(tmp_path):
+    (tmp_path / "model.safetensors").write_bytes(b"\0" * 2048)
+    assert vllm_engine._checkpoint_bytes(str(tmp_path)) == 2048
+    assert vllm_engine._checkpoint_bytes(str(tmp_path / "missing")) is None
+
+
+def test_gpu_reclaim_bytes_reads_meminfo(monkeypatch, tmp_path):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:  32376252 kB\nGPUActive:  548856 kB\nGPUReclaim: 10247504 kB\n")
+    real_open = open
+    monkeypatch.setattr(
+        "builtins.open",
+        lambda path, *a, **k: real_open(meminfo if path == "/proc/meminfo" else path, *a, **k),
+    )
+    assert vllm_engine._gpu_reclaim_bytes() == 10247504 * 1024
 
 
 def test_sleep_mode_turns_the_admin_endpoints_on_behind_the_guard(monkeypatch):
@@ -782,3 +913,19 @@ def test_cleanup_returns_its_result_for_the_worker_to_send():
     engine.data_queue = SimpleNamespace(put=sent.append)
     assert engine.cleanup_generation_memory() == "vLLM cleanup skipped: server not loaded"
     assert sent == []
+
+
+def test_xpu_venv_lib_with_oneccl_joins_ld_library_path(tmp_path):
+    """oneCCL 2022.1 dlopens its backend (libccl.so.1) by name, with no RPATH to find it."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    for name in ("libccl.so.2", "libccl.so.1", "libfabric.so.1"):
+        (lib / name).write_bytes(b"")
+    assert str(lib) in _engine()._discover_runtime_library_dirs(str(tmp_path))
+
+
+def test_venv_lib_without_runtime_libs_stays_off_ld_library_path(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "libpython3.12.so.1.0").write_bytes(b"")
+    assert _engine()._discover_runtime_library_dirs(str(tmp_path)) == []

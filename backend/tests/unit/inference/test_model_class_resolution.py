@@ -47,7 +47,11 @@ def _snapshot(repo: str) -> str:
     The wrapper stays because ``local_snapshot`` deliberately returns None
     instead of skipping: it is a query, and the caller decides what that means.
     """
-    path = mf.local_snapshot(repo)
+    # The VLM fixture downloads without onnx/ and friends; since huggingface-hub
+    # 1.31 a local_files_only lookup without the same patterns calls that snapshot
+    # incomplete and returns nothing.
+    ignore = mf.VLM_IGNORE_PATTERNS if repo == mf.VLM_MODEL_DEFAULT else None
+    path = mf.local_snapshot(repo, ignore_patterns=ignore)
     if path is None:
         pytest.skip(f"{repo} not in any local hub cache")
     return path

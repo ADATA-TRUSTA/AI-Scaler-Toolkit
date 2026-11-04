@@ -123,7 +123,17 @@ class LlamaServerEngine(BaseEngine):
         self._stdout_pump_thread: threading.Thread | None = None
         self._stderr_pump_thread: threading.Thread | None = None
         self._stderr_buffer_lock = threading.Lock()
-        self._stderr_recent_lines = deque(maxlen=120)
+        # Wide enough to hold one whole start, not just its tail. The buffer is cleared
+        # at launch and _collect_layer_allocation_from_logs reads it once the server
+        # answers, so everything printed in between has to survive. Measured at -lv 4 on
+        # two models (25 and 37 layers): about 205 lines per start either way -- the
+        # verbose output enumerates backends, not tensors -- with the load_tensors summary
+        # some 64 lines before the server listens. 120 did hold both, with roughly 56 lines
+        # to spare, which slot restore eats into and a multimodal load, with its second
+        # model to report, could plausibly exhaust. Not measured there, so this is margin
+        # rather than a fix: cheap, against a panel that is right only on the models it was
+        # tried on. The other readers want a recent tail and do not mind a longer one.
+        self._stderr_recent_lines = deque(maxlen=400)
         self._timing_lock = threading.Lock()
         self._active_timing_slot: int | None = None
         self._slot_timings: dict[int, dict[str, Any]] = {}
@@ -984,6 +994,17 @@ class LlamaServerEngine(BaseEngine):
             str(self.config.n_batch),
             "--alias",
             "trusta-ast-default",
+            # llama.cpp prints load_tensors' offload summary and per-device buffer sizes
+            # at verbosity 4; its default is 3. _derive_layer_allocation below reads
+            # exactly those lines to build the layer split this service reports, so at the
+            # default it matched nothing and every load fell back to "remote:
+            # llama-server", with no layer count and no memory figures -- a display that
+            # had quietly stopped working rather than one that was never written.
+            # Measured on both pins: b11701 and b11960 each accept the flag and each
+            # withhold the lines without it. llama_server_extra_args come last, so a
+            # request that wants a quieter server can still lower this.
+            "-lv",
+            "4",
         ]
 
         # Kept to this service. Bound to loopback, llama-server is still reachable from

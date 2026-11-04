@@ -1,7 +1,7 @@
 """Layer 1 — torch XPU: the Intel GPU backend that everything else sits on.
 
 Verifies that PyTorch's native XPU backend is live and can actually compute,
-using ONLY the pip `torch==2.13.0+xpu` bundled SYCL runtime — no oneAPI
+using ONLY the pip `torch==2.14.0+xpu` bundled SYCL runtime — no oneAPI
 `setvars` sourced (matching scripts/*/setup_env, which no longer pulls oneAPI).
 If torch can talk to the Intel GPU here, the transformers and llama layers have
 a foundation to stand on.

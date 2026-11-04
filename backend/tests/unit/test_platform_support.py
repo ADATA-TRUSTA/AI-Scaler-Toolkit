@@ -17,6 +17,10 @@ import service.app as app_module
 from service import platform_support
 from service.config_models import InferenceEngine
 
+# Covers the gate for both Linux-only features, fine-tuning and the vLLM engine, so
+# either domain's selection (-m finetune / -m inference) must still pick it up.
+pytestmark = [pytest.mark.inference, pytest.mark.finetune]
+
 # As this machine: see test_remote_access.py.
 client = TestClient(app_module.app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1")
 
@@ -256,3 +260,81 @@ def test_health_reports_everything_supported_on_linux(monkeypatch):
     assert body["platform"] == "Linux"
     assert body["training_supported"] is True
     assert "vllm" in body["supported_engines"]
+
+
+# --------------------------------------------------------------------------
+# DeepSpeed on Intel XPU: fine-tuning runs there, the DeepSpeed paths do not
+# --------------------------------------------------------------------------
+
+
+def _torch_build(monkeypatch, version: str) -> None:
+    """Report a given installed torch version, as torch_is_xpu_build reads it."""
+    real = platform_support.importlib.metadata.version
+    monkeypatch.setattr(
+        platform_support.importlib.metadata,
+        "version",
+        lambda name: version if name == "torch" else real(name),
+    )
+
+
+@pytest.mark.parametrize(
+    ("version", "supported"),
+    [("2.14.0+xpu", False), ("2.13.0+cu130", True), ("2.13.0", True)],
+)
+def test_deepspeed_is_refused_only_on_the_xpu_build(monkeypatch, version, supported):
+    _torch_build(monkeypatch, version)
+
+    support = platform_support.deepspeed_support()
+    assert support.supported is supported
+    if not supported:
+        assert "Intel XPU" in (support.reason or "")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"use_deepspeed": True, "deepspeed_profile": "zero3_offload_cpu_cpu"},
+        {"num_gpus": 2},
+    ],
+)
+def test_training_start_refuses_deepspeed_on_xpu_before_spawning(monkeypatch, overrides):
+    """Both DeepSpeed paths come back as a 501 naming XPU, with no worker started."""
+    _pretend(monkeypatch, "Linux")
+    _torch_build(monkeypatch, "2.14.0+xpu")
+
+    def fail(*args, **kwargs):
+        raise AssertionError("training_manager.start_training must not be reached")
+
+    monkeypatch.setattr(app_module.training_manager, "start_training", fail)
+
+    response = client.post("/training/start", json=_training_payload(**overrides))
+
+    assert response.status_code == 501
+    assert "DeepSpeed is not supported on Intel XPU" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("version", "overrides"),
+    [
+        # The XPU fine-tuning path: one GPU, no DeepSpeed.
+        ("2.14.0+xpu", {}),
+        # DeepSpeed on CUDA is untouched.
+        ("2.13.0+cu130", {"use_deepspeed": True, "deepspeed_profile": "zero3_offload_cpu_cpu"}),
+        ("2.13.0+cu130", {"num_gpus": 2}),
+    ],
+)
+def test_training_start_proceeds_without_deepspeed_on_xpu_and_with_it_on_cuda(
+    monkeypatch, version, overrides
+):
+    _pretend(monkeypatch, "Linux")
+    _torch_build(monkeypatch, version)
+    monkeypatch.setattr(app_module.model_manager, "is_loaded", lambda: False, raising=False)
+    monkeypatch.setattr(
+        app_module.training_manager,
+        "start_training",
+        lambda config: {"status": "starting", "session_id": "job-1"},
+    )
+
+    response = client.post("/training/start", json=_training_payload(**overrides))
+
+    assert response.status_code == 200
