@@ -28,8 +28,12 @@ EXPECTED = {
         # The deep-sleep Strata package install_strata.ps1 installs from; fetched into
         # backend/vendor/ by the release build, never committed (the tree goes public).
         "strata_package": "strata-sleep-*-windows-x86_64.zip",
-        # Upstream has no Intel build path for Windows, so a payload never carries one.
-        "strata_optional_packages": (),
+        # The Intel Arc (SYCL) build for Windows. Upstream has none - "Nobody has tried a
+        # native build", docs/INTEL_ARC.md - but strata-sleep builds one (its patches 0007,
+        # 0009 and 0010), so a payload may carry it. Optional for the same reason as the
+        # Linux one below, and -sycl is last in the name so the CUDA glob above cannot
+        # match it.
+        "strata_optional_packages": ("strata-sleep-*-windows-x86_64-sycl.zip",),
     },
     "linux": {
         "title": "TRUSTA-AST",
