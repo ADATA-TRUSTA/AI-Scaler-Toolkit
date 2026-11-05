@@ -1,6 +1,6 @@
 [project]
 name = "ai-scaler-console"
-version = "0.1.0"
+version = "0.1.1"
 description = "Headless Python client for the AI Scaler (Trusta AST) backend: model load/unload, OpenAI-compatible chat, and fine-tune training"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -10,7 +10,7 @@ dependencies = [
   "openai>=3.0.0",
   "pydantic>=2.13.4",
   "python-dotenv>=1.2.2",
-  "httpx2>=2.10.0", # sole HTTP client (sync + async); replaced httpx, which replaced requests
+  "httpx2>=2.14.0", # sole HTTP client (sync + async); replaced httpx, which replaced requests
   "textual>=8.2.8", # terminal UI for the parallel chat example; replaced pyqt6
 ]
 

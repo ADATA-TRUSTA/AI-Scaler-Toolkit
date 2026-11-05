@@ -35,7 +35,7 @@ def create_inference_config(
     The JSON files under `configs/inference/` are aligned with the
     Trusta-AST-Frontend's load-model payload, so we just normalize
     `base_model` -> `model_name` and forward all remaining engine-specific
-    fields (transformers / llama_server / vllm) directly to the Pydantic model
+    fields (transformers / llama_server / vllm / strata) directly to the Pydantic model
     for validation.
 
     Args:
@@ -45,8 +45,12 @@ def create_inference_config(
         Created inference configuration object.
     """
     config = dict(raw_config)
-    if "base_model" in config and "model_name" not in config:
-        config["model_name"] = config.pop("base_model")
+    # base_model is this file format's name for model_name, not a field: drop it even
+    # when model_name is also given (model_name wins), or InferenceConfig, which
+    # forbids unknown keys, rejects it.
+    base_model = config.pop("base_model", None)
+    if base_model is not None and "model_name" not in config:
+        config["model_name"] = base_model
     return InferenceConfig(**config)
 
 

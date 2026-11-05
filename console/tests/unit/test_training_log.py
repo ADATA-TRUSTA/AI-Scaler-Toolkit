@@ -113,6 +113,22 @@ def test_stream_resumes_from_the_last_seq_after_a_drop() -> None:
     assert attempts == [None, "2"]
 
 
+def test_stream_sends_the_key_on_every_connection() -> None:
+    """The SSE request builds its own headers, so it must add the key itself."""
+    seen: list[str | None] = []
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx2.Response(200, text=sse_frame(1, "stage", phase="completed"))
+
+    client = AIClient(base_url=BASE_URL, api_key="my-key")
+    client.session = httpx2.Client(transport=httpx2.MockTransport(capture))
+    with client:
+        list(client.stream_training_log("job1"))
+
+    assert seen == ["Bearer my-key"]
+
+
 def _break_after(body: str) -> Iterator[bytes]:
     """A byte stream that yields the body, then fails as a dropped connection."""
 

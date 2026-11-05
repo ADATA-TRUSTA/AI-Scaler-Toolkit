@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from ai_scaler_console.helpers.config_loader import load_and_create_config
+
 CONFIG_FILES = sorted(Path("configs").rglob("*.json"))
 
 # Anything that looks like it escaped from someone's machine or our network.
@@ -105,3 +107,17 @@ def test_model_paths_are_placeholders_not_real_machines() -> None:
             assert "/path/to/" in model_path, (
                 f"{path} has an absolute model_path that is not a placeholder: {model_path}"
             )
+
+
+INFERENCE_CONFIGS = sorted(Path("configs/inference").glob("*.json"))
+
+
+@pytest.mark.parametrize("path", INFERENCE_CONFIGS, ids=lambda p: p.name)
+def test_every_inference_config_loads(path: Path) -> None:
+    """
+    InferenceConfig forbids unknown keys, so a stray one here fails the load.
+
+    vllm.json carried "vllm_cpu_only", a field from an unmerged backend branch, which
+    was dropped in silence until the model stopped ignoring extra keys.
+    """
+    load_and_create_config(str(path))

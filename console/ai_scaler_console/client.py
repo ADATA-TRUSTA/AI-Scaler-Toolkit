@@ -32,7 +32,7 @@ from ai_scaler_console.config_models import (
     TrainingStatus,
 )
 from ai_scaler_console.exceptions import AIClientError
-from ai_scaler_console.settings import BACKEND_URL, VERIFY_SSL
+from ai_scaler_console.settings import BACKEND_URL, VERIFY_SSL, auth_headers
 
 # Define generic type variable bound to BaseModel
 T = TypeVar("T", bound=BaseModel)
@@ -51,6 +51,10 @@ class AIClient:
     API (`<backend_url>/v1/chat/completions`). Use the OpenAI Python SDK directly
     once a model has been loaded.
 
+    For a backend on another machine, pass its key as ``api_key`` (or set ``API_KEY``).
+    That backend answers these endpoints only when it was set to allow more than its
+    inference API; by default another machine gets ``/v1/`` alone and a 403 here.
+
     Holds an ``httpx2.Client``, so it is usable as a context manager:
 
         with AIClient() as client:
@@ -62,10 +66,14 @@ class AIClient:
         base_url: str = BACKEND_URL,
         timeout: int = 10,
         log_requests: bool = False,
+        api_key: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.log_requests = log_requests
+        # Per request rather than on the session, so it holds for whatever session
+        # the client ends up with. Empty unless a real key is configured.
+        self._auth_headers = auth_headers(api_key)
 
         # httpx2 takes timeout and TLS verification on the client, not per-request.
         self.session = httpx2.Client(
@@ -121,6 +129,9 @@ class AIClient:
         url = f"{self.base_url}{endpoint}"
         if self.log_requests:
             print(f"[{method}] {url}")  # Log request path
+
+        if self._auth_headers:
+            kwargs["headers"] = {**self._auth_headers, **(kwargs.get("headers") or {})}
 
         try:
             res = self.session.request(method=method, url=url, **kwargs)
@@ -315,7 +326,7 @@ class AIClient:
         if self.log_requests:
             print(f"[GET] {url} (SSE, since={since})")
 
-        headers = {"Accept": "text/event-stream"}
+        headers = {"Accept": "text/event-stream", **self._auth_headers}
         if since:
             headers["Last-Event-ID"] = str(since)
 

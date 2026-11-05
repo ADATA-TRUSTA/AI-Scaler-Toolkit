@@ -5,7 +5,7 @@ Configuration models for inference and training.
 from enum import StrEnum
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class InferenceEngine(StrEnum):
@@ -14,6 +14,7 @@ class InferenceEngine(StrEnum):
     TRANSFORMERS = "transformers"
     LLAMA_SERVER = "llama_server"
     VLLM = "vllm"
+    STRATA = "strata"
 
 
 class QuantizationType(StrEnum):
@@ -102,6 +103,12 @@ class InferenceConfig(BaseModel):
     }
     """
 
+    # Reject unknown keys, as the backend's InferenceConfig does. pydantic's default
+    # drops them in silence, and here that hid exactly the fields this copy lacked: a
+    # config naming vllm_cpu_offload_params loaded without error and without it. A
+    # ValidationError naming the key is the difference between a typo and a mystery.
+    model_config = ConfigDict(extra="forbid")
+
     model_name: str = Field(..., description="Model name or path")
     model_path: str | None = Field(
         default=None,
@@ -109,7 +116,7 @@ class InferenceConfig(BaseModel):
     )
     engine: InferenceEngine = Field(
         default=InferenceEngine.TRANSFORMERS,
-        description="Inference engine: transformers (default), llama_server, vllm",
+        description="Inference engine: transformers (default), llama_server, vllm, strata",
     )
     quantization: QuantizationType = Field(
         default=QuantizationType.NONE,
@@ -244,12 +251,39 @@ class InferenceConfig(BaseModel):
         ge=0.0,
         description="[vLLM] --cpu-offload-gb",
     )
+    vllm_cpu_offload_params: list[str] | None = Field(
+        default=None,
+        description=(
+            "[vLLM] --cpu-offload-params: restrict vllm_cpu_offload_gb to parameters whose "
+            "dotted name contains one of these segments. ['experts'] offloads only the MoE "
+            "expert weights and keeps attention on the GPU. Matching is by whole name "
+            "segment: 'experts' matches mlp.experts.w13_qweight, 'expert' does not. "
+            "Requires vllm_cpu_offload_gb > 0"
+        ),
+    )
     vllm_kv_offloading_size: float | None = Field(
         default=None,
         ge=0.0,
         description=(
             "[vLLM] --kv-offloading-size in GB; "
             "when using tensor parallelism this value is the total across all TP ranks, not per-GPU"
+        ),
+    )
+    vllm_kv_offloading_disk_path: str | None = Field(
+        default=None,
+        description=(
+            "[vLLM] Directory on the backend host for a disk (NVMe) KV offload tier behind "
+            "the DRAM tier. Loads pass through the DRAM tier, so vllm_kv_offloading_size "
+            "must hold the longest prefix to be reused. Requires vllm_kv_offloading_size > 0"
+        ),
+    )
+    vllm_kv_offloading_disk_max_gb: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "[vLLM] Size cap (GiB) for vllm_kv_offloading_disk_path. vLLM never evicts from "
+            "the disk tier itself, so without a cap it only grows. Requires "
+            "vllm_kv_offloading_disk_path"
         ),
     )
     vllm_tensor_parallel_size: int = Field(
@@ -266,6 +300,22 @@ class InferenceConfig(BaseModel):
         default=None,
         ge=1,
         description="[vLLM] --max-num-batched-tokens",
+    )
+    vllm_enable_sleep_mode: bool = Field(
+        default=False,
+        description=(
+            "[vLLM] Start with --enable-sleep-mode, so the backend can free the GPU without "
+            "unloading the model (weights move to pinned CPU memory, the KV cache is "
+            "dropped). Costs host RAM equal to the weights on the GPU while asleep"
+        ),
+    )
+    # A plain bool, as the backend's is: a null would be a 422.
+    vllm_auto_wake: bool = Field(
+        default=True,
+        description=(
+            "[vLLM] With the model asleep, a generation request wakes it first (true, "
+            "default) or is refused with HTTP 503 (false)"
+        ),
     )
     # vLLM multimodal (Vision / Audio / Video) specific configuration
     # Applicable to VLM models such as Gemma 4, Gemma 3n, Qwen-VL, and LLaVA
@@ -321,6 +371,58 @@ class InferenceConfig(BaseModel):
         ),
     )
 
+    vllm_reasoning_parser: str | None = Field(
+        default=None,
+        description=(
+            "[vLLM] Reasoning parser for thinking models. Unset uses the backend's checked "
+            "default for the few models that have one; 'off' emits no --reasoning-parser; "
+            "any other value (deepseek_r1/qwen3/openai_gptoss/glm45...) is passed to vLLM "
+            "as-is. There is no 'auto': a reasoning parser cannot be reliably detected"
+        ),
+    )
+    # The backend refuses the flags that decide where the server listens and who may use
+    # it (--host, --port, --api-key, --allowed-origins...) with a 422 naming them; the
+    # list is not copied here, so it cannot drift.
+    vllm_server_extra_args: list[str] | None = Field(
+        default=None,
+        description=(
+            "[vLLM] Extra `vllm serve` launch arguments, appended last so a repeated flag "
+            'wins, e.g. ["--max-num-seqs", "4"]'
+        ),
+    )
+
+    # Strata: the four fields the backend's StrataConfigFields exposes. The rest of
+    # Strata's start-up flags live in the run config its setup writes, not here.
+    # strata_auto_wake is a plain bool because the backend's is: a null would be a 422.
+    strata_config_path: str | None = Field(
+        default=None,
+        description=(
+            "[Strata] The model's Strata run config (strata-<model>.json). When omitted, "
+            "the backend uses the one in STRATA_HOME whose first GGUF shard is model_path"
+        ),
+    )
+    strata_max_context: int | None = Field(
+        default=None,
+        ge=1024,
+        description="[Strata] Context length in tokens; when omitted, the run config's value",
+    )
+    strata_vram_limit_gb: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "[Strata] Most VRAM the model may take while awake, in GB. When omitted, the "
+            "run config's reserve. Prefer leaving it unset and putting the model to sleep "
+            "when another program needs the GPU"
+        ),
+    )
+    strata_auto_wake: bool = Field(
+        default=True,
+        description=(
+            "[Strata] With the model asleep, a generation request wakes it first (true, "
+            "default) or is refused with HTTP 503 (false)"
+        ),
+    )
+
     @field_validator("vllm_chat_template", mode="before")
     @classmethod
     def _normalize_vllm_chat_template(cls, v: object) -> object:
@@ -330,6 +432,41 @@ class InferenceConfig(BaseModel):
         if isinstance(v, str):
             stripped = v.strip()
             return stripped or None
+        return v
+
+    @field_validator("vllm_cpu_offload_params", mode="before")
+    @classmethod
+    def _normalize_vllm_cpu_offload_params(cls, v: object) -> object:
+        """
+        Accept a list or a comma/space separated string; drop blanks and repeats.
+
+        Mirrors the backend. An empty list or string means "no restriction", which
+        vLLM spells as leaving the flag out, so it becomes None.
+        """
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = v.replace(",", " ").split()
+        if not isinstance(v, (list, tuple)):
+            return v  # not a list: let the list[str] type check reject it
+        out: list[str] = []
+        for item in v:
+            name = str(item).strip()
+            if name and name not in out:
+                out.append(name)
+        return out or None
+
+    @field_validator("vllm_kv_offloading_disk_path", mode="before")
+    @classmethod
+    def _normalize_vllm_kv_offloading_disk_path(cls, v: object) -> object:
+        """
+        Blank means no disk tier; anything else is stripped and sent as written.
+
+        Unlike the backend, this does not make the path absolute: it names a directory
+        on the backend host, which need not be the computer running this client.
+        """
+        if isinstance(v, str):
+            return v.strip() or None
         return v
 
     @field_validator("vllm_hf_overrides", mode="before")
@@ -377,7 +514,7 @@ class ModelStatus(BaseModel):
     model_path: str | None = Field(default=None, description="Model path")
     engine: InferenceEngine = Field(
         default=InferenceEngine.TRANSFORMERS,
-        description="Inference engine: transformers (default), llama_server, vllm",
+        description="Inference engine: transformers (default), llama_server, vllm, strata",
     )
     quantization: str | None = Field(default=None, description="Quantization type")
     model_total_memory: str | None = Field(

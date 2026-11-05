@@ -13,6 +13,5 @@
   "vllm_tensor_parallel_size": 1,
   "vllm_max_num_seqs": null,
   "vllm_max_num_batched_tokens": null,
-  "vllm_mm_image_limit": 2,
-  "vllm_cpu_only": false
+  "vllm_mm_image_limit": 2
 }

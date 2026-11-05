@@ -104,3 +104,26 @@ def _restore_settings() -> Iterator[None]:
     """Leave the module as the rest of the suite expects to find it."""
     yield
     importlib.reload(settings_module)
+
+
+@pytest.mark.parametrize("unset", [None, "", "   "])
+def test_no_auth_header_without_a_real_key(
+    clean_env: pytest.MonkeyPatch, unset: str | None
+) -> None:
+    """
+    The placeholder is not a key: sent to another machine's backend it is a wrong one,
+    which counts toward that address's lockout. So no header at all.
+    """
+    env = {} if unset is None else {"API_KEY": unset}
+    s = reload_settings(clean_env, **env)
+
+    assert s.auth_headers() == {}
+    assert s.auth_headers("EMPTY") == {}
+
+
+def test_auth_header_carries_the_configured_key(clean_env: pytest.MonkeyPatch) -> None:
+    s = reload_settings(clean_env, API_KEY="my-key")
+
+    assert s.auth_headers() == {"Authorization": "Bearer my-key"}
+    # An explicit key wins over the environment's.
+    assert s.auth_headers(" other ") == {"Authorization": "Bearer other"}

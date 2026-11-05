@@ -46,19 +46,22 @@ cp .env.example .env
 BACKEND_URL=http://127.0.0.1:8000
 ```
 
+`8000` 是從原始碼啟動的後端。用安裝好的 AI Scaler Toolkit 應用程式時，服務在 `8571`（或它 Settings → Ports
+設定的 port），請改成 `BACKEND_URL=http://127.0.0.1:8571`。
+
 其餘選填變數都記錄在 `.env.example`：
 
 | 變數          | 預設值                  | 何時需要                                                                   |
 | ------------- | ----------------------- | -------------------------------------------------------------------------- |
 | `BACKEND_URL` | `http://127.0.0.1:8000` | 一律需要 — 後端的 base URL，不含 `/v1` 後綴。                              |
-| `API_KEY`     | `EMPTY`                 | 目前不需要。後端不驗證請求，只是 OpenAI SDK 不接受空字串的 key。           |
+| `API_KEY`     | `EMPTY`                 | 只有連到另一台電腦的後端時需要：填那台 AI Scaler Toolkit 設定裡的 key。本機的後端不需要。 |
 | `VERIFY_SSL`  | `true`                  | 只有當後端使用自簽憑證提供 https 時才設為 `false`。                        |
 
 ## 1. 建議的無 UI 工作流程
 
 ### 1.1 載入模型
 
-從 `configs/inference/` 中挑一份設定檔（transformers／llama_server／vLLM 都支援，欄位與前端 payload 相同）。
+從 `configs/inference/` 中挑一份設定檔（transformers／llama_server／vLLM，欄位與前端 payload 相同）。後端主機有安裝 Strata 時，`"engine": "strata"` 也可以用。
 
 > **執行前：** 編輯選用的設定檔，把 `model_path` 設成實際的模型位置。`llama_server` 與 `vllm` 的設定必須填後端主機上的絕對路徑；`transformers` 的設定可直接填 HuggingFace model ID。
 
@@ -157,7 +160,7 @@ uv run examples/chat/parallel.py --columns 4
 備註：
 
 - `model` 固定為 `trusta-ast/trusta-ast-default` — 這是後端 OpenAI 相容層的綁定名稱，與底層實際載入哪個模型無關。
-- `api_key` 是 SDK 要求的欄位，但後端不驗證請求，任何字串都可以。若省略，就會使用 `.env` 中 `API_KEY` 的預設值（`EMPTY`）。
+- `api_key` 是 SDK 要求的欄位。本機的後端不檢查它，任何字串都可以；另一台電腦的後端需要它的 key。若省略，就會使用 `.env` 中的 `API_KEY`。
 
 ### 1.3 對話（圖片／多模態）
 
@@ -286,6 +289,7 @@ held-out 評估的 metric 只存在於串流上——它們以 `split: "eval"` �
 
 > 絕對路徑指的是 **後端主機** 上的路徑，不是執行這些腳本的機器。
 > 多模態輸入必須設 `vllm_mm_image_limit`；不使用時請移除或設為 `null`。
+> MoE 模型大於 GPU 時，把 `vllm_cpu_offload_gb` 與 `"vllm_cpu_offload_params": ["experts"]` 一起設：只有 expert 權重放到 CPU 記憶體，attention 留在 GPU。
 
 ### 3.2 微調 settings（`configs/finetune/run.json`）
 

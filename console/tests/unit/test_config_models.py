@@ -31,6 +31,7 @@ from ai_scaler_console.config_models import (
         (InferenceEngine.TRANSFORMERS, "transformers"),
         (InferenceEngine.LLAMA_SERVER, "llama_server"),
         (InferenceEngine.VLLM, "vllm"),
+        (InferenceEngine.STRATA, "strata"),
         (QuantizationType.INT4, "int4"),
         (TrainingMethod.LORA, "lora"),
     ],
@@ -87,13 +88,6 @@ def test_vllm_hf_overrides_rejects_everything_else(value: object) -> None:
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_blank_vllm_hf_overrides_normalises_to_none(blank: str) -> None:
     assert InferenceConfig(model_name="m", vllm_hf_overrides=blank).vllm_hf_overrides is None
-
-
-def test_unknown_fields_are_ignored_not_rejected() -> None:
-    """config_loader forwards whole dicts, so extras must not blow up."""
-    config = InferenceConfig.model_validate({"model_name": "m", "some_future_field": "x"})
-
-    assert not hasattr(config, "some_future_field")
 
 
 def test_training_config_requires_its_four_core_fields() -> None:
@@ -260,3 +254,92 @@ def test_status_reports_the_parser_only_once_a_server_has_one() -> None:
         ).vllm_tool_call_parser
         == "hermes"
     )
+
+
+def test_strata_loads_with_the_fields_the_backend_takes() -> None:
+    """
+    The engine and its four fields mirror the backend's StrataConfigFields.
+
+    Without the enum member a strata config failed validation here, before a request
+    was ever sent. strata_auto_wake goes out as a real bool: the backend's field is not
+    optional, so a null would be refused with a 422.
+    """
+    config = InferenceConfig.model_validate(
+        {
+            "model_name": "m",
+            "engine": "strata",
+            "strata_config_path": "/models/strata-m.json",
+            "strata_max_context": 32768,
+            "strata_vram_limit_gb": 12.5,
+        }
+    )
+    payload = json.loads(json.dumps(config.model_dump()))
+
+    assert payload["engine"] == "strata"
+    assert payload["strata_config_path"] == "/models/strata-m.json"
+    assert payload["strata_max_context"] == 32768
+    assert payload["strata_vram_limit_gb"] == 12.5
+    assert payload["strata_auto_wake"] is True
+
+
+@pytest.mark.parametrize(
+    "field",
+    [{"strata_max_context": 1023}, {"strata_vram_limit_gb": 0}],
+)
+def test_strata_bounds_match_the_backend(field: dict[str, float]) -> None:
+    with pytest.raises(ValueError):
+        InferenceConfig.model_validate({"model_name": "m", "engine": "strata", **field})
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("experts", ["experts"]),
+        ("experts, shared_expert", ["experts", "shared_expert"]),
+        (["experts", " experts ", ""], ["experts"]),
+        ("", None),
+        ([], None),
+    ],
+)
+def test_cpu_offload_params_normalise_like_the_backend(
+    raw: str | list[str], expected: list[str] | None
+) -> None:
+    """A form field gives a string; an empty one means "no restriction", i.e. None."""
+    config = InferenceConfig(model_name="m", vllm_cpu_offload_params=raw)  # type: ignore[arg-type]
+
+    assert config.vllm_cpu_offload_params == expected
+
+
+def test_kv_disk_path_is_stripped_but_not_made_absolute() -> None:
+    """
+    The backend resolves it on its own host; doing it here would turn a relative path
+    into one under this computer's working directory.
+    """
+    assert (
+        InferenceConfig(
+            model_name="m", vllm_kv_offloading_disk_path="   "
+        ).vllm_kv_offloading_disk_path
+        is None
+    )
+    config = InferenceConfig(model_name="m", vllm_kv_offloading_disk_path="  kv_cache  ")
+
+    assert config.vllm_kv_offloading_disk_path == "kv_cache"
+
+
+def test_sleep_fields_go_out_as_real_bools() -> None:
+    """The backend's fields are plain bools: a null would be a 422 on every load."""
+    payload = json.loads(json.dumps(InferenceConfig(model_name="m").model_dump()))
+
+    assert payload["vllm_enable_sleep_mode"] is False
+    assert payload["vllm_auto_wake"] is True
+
+
+def test_kv_disk_cap_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        InferenceConfig(model_name="m", vllm_kv_offloading_disk_max_gb=0)
+
+
+def test_unknown_keys_are_rejected() -> None:
+    """A misspelt or unsupported field must fail loudly, not load without it."""
+    with pytest.raises(ValueError, match="vllm_cpu_offload_param"):
+        InferenceConfig.model_validate({"model_name": "m", "vllm_cpu_offload_param": ["experts"]})

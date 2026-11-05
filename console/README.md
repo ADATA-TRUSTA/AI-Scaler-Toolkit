@@ -46,19 +46,22 @@ cp .env.example .env
 BACKEND_URL=http://127.0.0.1:8000
 ```
 
+`8000` is the backend started from source. With the installed AI Scaler Toolkit application the service is on
+`8571` (or the port set in its Settings → Ports), so use `BACKEND_URL=http://127.0.0.1:8571`.
+
 The optional variables are documented in `.env.example`:
 
 | Variable      | Default                 | When you need it                                                                                      |
 | ------------- | ----------------------- | ----------------------------------------------------------------------------------------------------- |
 | `BACKEND_URL` | `http://127.0.0.1:8000` | Always — base URL of the backend, without the `/v1` suffix.                                            |
-| `API_KEY`     | `EMPTY`                 | Never, currently. The backend does not authenticate requests; the OpenAI SDK just refuses an empty key. |
+| `API_KEY`     | `EMPTY`                 | Only for a backend on another computer: the key set in its AI Scaler Toolkit settings. A backend on this computer needs none. |
 | `VERIFY_SSL`  | `true`                  | Set to `false` only when the backend serves https with a self-signed certificate.                       |
 
 ## 1. Recommended No-UI Workflow
 
 ### 1.1 Load a model
 
-Pick any config under `configs/inference/` (transformers / llama_server / vLLM are all supported, fields match the frontend payload).
+Pick any config under `configs/inference/` (transformers / llama_server / vLLM, fields match the frontend payload). `"engine": "strata"` is accepted too, for a backend host with Strata installed.
 
 > **Before running:** edit the chosen config file and set `model_path` to your actual model location. For `llama_server` and `vllm` configs this must be an absolute path on the backend host. For `transformers` configs a HuggingFace model ID works as-is.
 
@@ -157,7 +160,7 @@ Set `stream` in the settings file to control response mode:
 Notes:
 
 - `model` is fixed to `trusta-ast/trusta-ast-default` — this is the OpenAI-compatible binding name on the backend, regardless of which underlying model is loaded.
-- `api_key` is required by the SDK but the backend does not authenticate requests, so any string works. Leave it out and `.env`'s `API_KEY` default (`EMPTY`) is used.
+- `api_key` is required by the SDK. A backend on this computer does not check it, so any string works; one on another computer needs its key. Leave it out and `.env`'s `API_KEY` is used.
 
 ### 1.3 Chat (image / multimodal)
 
@@ -290,6 +293,7 @@ These mirror the frontend's load-model payload; the `engine` field selects the s
 
 > Absolute paths are on the **backend host**, not the machine running these scripts.
 > `vllm_mm_image_limit` must be set for multimodal input; remove it or set it to `null` otherwise.
+> For a MoE model larger than the GPU, set `vllm_cpu_offload_gb` together with `"vllm_cpu_offload_params": ["experts"]`: only the expert weights go to CPU memory and attention stays on the GPU.
 
 ### 3.2 Fine-tune settings (`configs/finetune/run.json`)
 

@@ -154,3 +154,37 @@ def test_request_path_is_composed_from_base_url_and_endpoint() -> None:
 
     assert seen["url"] == "http://mock-backend/inference/status"
     assert seen["method"] == "GET"
+
+
+def _keyed_client(handler: Handler, api_key: str | None) -> AIClient:
+    client = AIClient(base_url="http://mock-backend", api_key=api_key)
+    client.session.close()
+    client.session = httpx2.Client(transport=httpx2.MockTransport(handler))
+    return client
+
+
+def test_a_configured_key_is_sent_as_a_bearer_token() -> None:
+    """A backend on another machine refuses every management call without it."""
+    seen: list[str | None] = []
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx2.Response(200, json=LOADED_STATUS)
+
+    client = _keyed_client(capture, "my-key")
+    client.get_status()
+    client.unload_model()
+
+    assert seen == ["Bearer my-key", "Bearer my-key"]
+
+
+def test_no_authorization_header_without_a_key() -> None:
+    seen: list[str | None] = []
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx2.Response(200, json=LOADED_STATUS)
+
+    _keyed_client(capture, "EMPTY").get_status()
+
+    assert seen == [None]
