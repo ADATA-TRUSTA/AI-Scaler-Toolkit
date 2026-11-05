@@ -433,7 +433,7 @@
                     <h3>1. Load Model</h3>
                     <code>POST /inference/load_model</code>
                     <p><strong>Behavior:</strong> Asynchronous background loading.</p>
-                    <p>The API returns a <code>loading</code> status immediately; poll via <code>/inference/status</code>. If a model with the same configuration is already loaded, it returns <code>already_loaded</code>; if a different model is already loaded, it returns HTTP 409.</p>
+                    <p>The API returns a <code>loading</code> status immediately; poll via <code>/inference/status</code>. If a model with the same configuration is already loaded, it returns <code>already_loaded</code>; if a different model is already loaded, it returns HTTP 409. The same model with any setting changed also returns 409, and the message names the settings that differ: unload first, then load with the new settings.</p>
                     <p><strong>Key parameters:</strong> <code>model_name</code>, <code>engine</code>, <code>quantization</code>, <code>device_map</code>, <code>max_memory</code>.</p>
                 </div>
 
@@ -664,7 +664,7 @@ payload = {
             <h3>Step 1: Model Loading Flow (Load Flow)</h3>
             <ol>
                 <li>The client sends <code>POST /inference/load_model</code> (with <code>engine</code>, <code>model_name</code>, <code>quantization</code>, etc.).</li>
-                <li><code>app.py</code> checks whether a model with the same configuration is already running (if so, <code>already_loaded</code>), or whether a different model is running (in which case HTTP 409 requires unloading first).</li>
+                <li><code>app.py</code> checks whether a model with the same configuration is already running (if so, <code>already_loaded</code>), or whether a different model, or the same model with other settings, is running (in which case HTTP 409 requires unloading first).</li>
                 <li><code>app.py</code> calls <code>model_manager.start_loading(config)</code>.</li>
                 <li><code>ModelManager</code> pushes the <code>load</code> command onto the <strong>Request Queue</strong> (IPC).</li>
                 <li>The <strong>Worker Process</strong> selects the corresponding engine based on <code>engine</code>:
@@ -805,7 +805,7 @@ payload = {
                 <div class="card">
                     <h3>Query Available Models</h3>
                     <code>GET /config/models</code>
-                    <p>Returns the list of all registered base models, fine-tuned models, and GGUF models.</p>
+                    <p>Returns the list of all registered base models, fine-tuned models, and GGUF models. Each entry's <code>model_type</code> (<code>base</code>, <code>finetuned</code> or <code>llama_gguf</code>) says which list it is in; do not infer it from <code>model_path</code>, which base models have too.</p>
                 </div>
                 <div class="card">
                     <h3>Download Model</h3>

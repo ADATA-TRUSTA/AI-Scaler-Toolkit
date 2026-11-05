@@ -48,6 +48,40 @@ def _cleanup_memory() -> None:
         gc.collect()
 
 
+def _load_failure_statuses(error: Exception, error_traceback: str) -> list[dict[str, Any]]:
+    """
+    The status messages a failed load reports, in order.
+
+    An OOM or CUDA error sends a second one, after which the worker exits to give the
+    VRAM back. The manager keeps only the last error it receives, so the second message
+    carries the traceback too: without it, /inference/error_details had none for exactly
+    the failures where it matters.
+    """
+    error_str = str(error)
+    error_type = type(error).__name__
+    statuses: list[dict[str, Any]] = [
+        {
+            "status": "error",
+            "error": error_str,
+            "error_type": error_type,
+            "error_traceback": error_traceback,
+        }
+    ]
+    lower = error_str.lower()
+    if "out of memory" in lower or "oom" in lower or "cuda" in lower:
+        statuses.append(
+            {
+                "status": "error",
+                "error": f"OOM Error: {error_str}",
+                "error_type": error_type,
+                "error_traceback": error_traceback,
+                "is_oom": True,
+                "message": "Process will exit to release GPU memory",
+            }
+        )
+    return statuses
+
+
 def _clear_main_process_cuda_cache() -> None:
     """
     Clear the CUDA cache of the process this runs in (the API process), if it has one.
@@ -175,35 +209,13 @@ def _model_worker_process(
 
                         _cleanup_memory()
 
-                        error_str = str(e)
-                        error_type = type(e).__name__
+                        statuses = _load_failure_statuses(e, error_traceback)
+                        for status in statuses:
+                            status_queue.put(status)
 
-                        status_queue.put(
-                            {
-                                "status": "error",
-                                "error": error_str,
-                                "error_type": error_type,
-                                "error_traceback": error_traceback,
-                            }
-                        )
-
-                        error_str_lower = error_str.lower()
-                        if (
-                            "out of memory" in error_str_lower
-                            or "oom" in error_str_lower
-                            or "cuda" in error_str_lower
-                        ):
+                        if len(statuses) > 1:
                             logger.exception(
                                 "[Worker] OOM/CUDA error detected, forcing process exit to release VRAM..."
-                            )
-                            status_queue.put(
-                                {
-                                    "status": "error",
-                                    "error": f"OOM Error: {error_str}",
-                                    "error_type": error_type,
-                                    "is_oom": True,
-                                    "message": "Process will exit to release GPU memory",
-                                }
                             )
                             _cleanup_memory()
                             os._exit(1)

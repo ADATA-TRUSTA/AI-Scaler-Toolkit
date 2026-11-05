@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Install the Strata engine (engine="strata") from a strata-sleep package and record it in .env.
 #
-# The backend always starts Strata with --sleep-mode, which only the deep-sleep build has;
-# Strata's own setup would otherwise download its ready-made engine, which does not. The
-# deep-sleep build comes as a package (TRUSTA-SW-FAE/strata-sleep releases: the engine already
-# compiled, plus Strata's Python side), so nothing is cloned or compiled here and no git
-# credentials are needed. This unpacks the package, checks it against its own manifest, makes
-# its venv, runs Strata's setup (which installs the model and writes its run config) and
-# refuses an engine that has no deep sleep. setup_env.sh runs it with TRUSTA_SETUP_STRATA=1;
-# run it alone to install or update Strata later.
+# The backend starts the engine this installs, not the one Strata's own setup would download:
+# that one has no deep sleep. The build comes as a package (TRUSTA-SW-FAE/strata-sleep releases:
+# the engine already compiled, its picture reader, plus Strata's Python side), so nothing is
+# cloned or compiled here and no git credentials are needed. This unpacks the package, checks it
+# against its own manifest, makes its venv, runs Strata's setup (which installs the model and
+# writes its run config) and checks the engine is the package's own. setup_env.sh runs it with
+# TRUSTA_SETUP_STRATA=1; run it alone to install or update Strata later.
+#
+# Whether the engine sleeps is the package's to say (SLEEP.json "sleep_mode"), not an assumption
+# here: the CUDA packages do, and an Intel Arc (SYCL) one does not, because deep sleep is CUDA
+# driver virtual memory and Level Zero has no equivalent.
 #
 # Usage:
 #   scripts/linux/install_strata.sh
@@ -91,21 +94,51 @@ if [[ ! -x "$python" ]]; then
     uv venv -q --seed -p 3.12 "$STRATA_DIR/.venv" || die "could not make Strata's venv"
 fi
 
+# What the package says about itself: the backend it was built for, and whether it sleeps.
+read -r pkg_backend pkg_sleeps <<< "$("$python" -c 'import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+print(d.get("backend") or "cuda", "yes" if d.get("sleep_mode", True) else "no")' "$STRATA_DIR/SLEEP.json" 2>/dev/null ||
+    echo "cuda yes")"
+
+# Strata's setup reads the PC itself and stops with "no NVIDIA GPU found" unless it is told which
+# backend to use, so a package that is not the CUDA one says so on setup's command line. The Intel
+# path is sycl/setup_intel.py, which that package carries and which patch 0006 taught to use the
+# engine already in engine/ rather than building one.
+backend_args=()
+case "$pkg_backend" in
+    cuda) ;;
+    sycl)
+        [[ -f "$STRATA_DIR/sycl/setup_intel.py" ]] ||
+            die "$STRATA_PACKAGE says backend 'sycl' but carries no sycl/setup_intel.py, which Strata's setup hands over to. Nothing was recorded in .env."
+        backend_args=(--backend sycl)
+        ;;
+    *)
+        die "$STRATA_PACKAGE is a '$pkg_backend' package, which this script does not know how to install. Nothing was recorded in .env."
+        ;;
+esac
+
 # The package's engine/ is the ready-made engine setup takes as installed. --no-start: the
-# backend starts it, not setup. --vision no: the package has no image encoder.
+# backend starts it, not setup. --vision no: the package carries the picture reader ready-made
+# and the backend points a load at it (STRATA_VISION_BINARY, else beside the engine); with
+# vision on, setup would compile one of its own and could replace the engine.
 read -r -a setup_args <<< "$STRATA_SETUP_ARGS"
 [[ -z "${TRUSTA_STRATA_GGUF_DIR:-}" ]] || setup_args+=(--gguf-dir "$TRUSTA_STRATA_GGUF_DIR")
 [[ -z "${TRUSTA_STRATA_DATA_DIR:-}" ]] || setup_args+=(--data-dir "$TRUSTA_STRATA_DATA_DIR" --set-default-data-dir)
-echo "$LOG_TAG running Strata's setup: --yes --no-start --vision no ${setup_args[*]}"
-(cd "$STRATA_DIR" && "$python" setup.py --yes --no-start --vision no "${setup_args[@]}") ||
+echo "$LOG_TAG running Strata's setup: --yes --no-start --vision no ${backend_args[*]} ${setup_args[*]}"
+(cd "$STRATA_DIR" && "$python" setup.py --yes --no-start --vision no "${backend_args[@]}" "${setup_args[@]}") ||
     die "Strata's setup failed (see above). Nothing was recorded in .env."
 
 engine="$STRATA_DIR/engine/strata"
 [[ -x "$engine" ]] || die "Strata's setup finished but left no engine at $engine"
-# The flag's name is in the binary of every build that parses it, and in no other: the
-# ready-made upstream engine has none, and the backend would fail to start it.
-grep -a -q -- "--sleep-mode" "$engine" ||
-    die "$engine has no deep sleep (--sleep-mode): it is not a strata-sleep engine. Nothing was recorded in .env."
+# A package that promises deep sleep must have it: the flag's name is in the binary of every
+# build that parses it and in no other, so this catches setup having put its own ready-made
+# engine here instead. A package that says it does not sleep is not asked to.
+if [[ "$pkg_sleeps" == "yes" ]]; then
+    grep -a -q -- "--sleep-mode" "$engine" ||
+        die "$engine has no deep sleep (--sleep-mode) although the package says it does: it is not a strata-sleep engine. Nothing was recorded in .env."
+else
+    echo "$LOG_TAG note: this engine has no deep sleep; the backend will not ask it to sleep"
+fi
 
 record_env_setting STRATA_HOME "$STRATA_DIR"
 record_env_setting STRATA_PYTHON "$python"

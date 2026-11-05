@@ -68,7 +68,7 @@ from .config_models import (
     TrainingLogEventsResponse,
     TrainingStatus,
 )
-from .download_manager import DownloadTask, download_manager
+from .download_manager import DownloadTask, download_manager, hub_reports_missing
 from .inference.engines.llama_server_engine import resolve_local_model_path
 from .inference.engines.vllm_engine import effective_reasoning_parser, sweep_stale_vllm_processes
 from .inference.gguf_estimator import (
@@ -742,6 +742,28 @@ app = FastAPI(
 # (e.g. <base>/frontend, <base>/Trusta-AST-Frontend, or repo-root/frontend one
 # level up); the first existing one wins.
 _frontend_base = Path(__file__).resolve().parent.parent
+
+
+def _unserved_frontend_root_files(dist: Path, served: list[str]) -> list[str]:
+    """
+    Files at the root of the frontend build that nothing serves at "/".
+
+    The page fetches some files from the site root (config.json above all), but the
+    build is mounted under /frontend/, so each one needs its own route from the list
+    below. That list is kept by hand against another repository: a root file the
+    frontend adds later 404s at "/" without a word unless someone notices here.
+    index.html is the page itself, served under /frontend/.
+    """
+    return sorted(
+        f.name
+        for f in dist.iterdir()
+        if f.is_file()
+        and f.name not in served
+        and f.name != "index.html"
+        and not f.name.startswith(".")
+    )
+
+
 _frontend_candidates = [
     _frontend_base / "frontend" / "dist",
     _frontend_base / "Trusta-AST-Frontend" / "dist",
@@ -795,6 +817,11 @@ if FRONTEND_DIST.exists():
         else:
             logger.debug(f"Top-level asset not found (skip): {file_path}")
     app.include_router(_frontend_router)
+    if _unserved := _unserved_frontend_root_files(FRONTEND_DIST, _TOP_LEVEL_FILES):
+        logger.warning(
+            f'⚠️ Frontend dist has root-level file(s) not served at "/": {", ".join(_unserved)}. '
+            'Add them to _TOP_LEVEL_FILES in service/app.py if the page fetches them from "/".'
+        )
 else:
     logger.warning(f"⚠️ Frontend dist directory not found, skipping mount: {FRONTEND_DIST}")
 
@@ -1193,6 +1220,35 @@ def retrieve_model(model: str) -> dict[str, Any] | JSONResponse:
 # ==================== Inference Endpoints ====================
 
 
+# Left out of the "same configuration" check on a repeated load. model_name and model_path
+# are the model's identity, compared on their own. The port is moved off a busy one when the
+# server starts (settle_managed_port), so the loaded config may no longer hold the one asked
+# for. The overrides field is derived from llama_server_extra_args, which is compared.
+_LOAD_IDENTITY_FIELDS = frozenset({"model_name", "model_path"})
+_LOAD_FIELDS_NOT_COMPARED = _LOAD_IDENTITY_FIELDS | {
+    "llama_server_port",
+    "llama_server_extra_arg_overrides",
+}
+
+
+def _same_model(a: InferenceConfig, b: InferenceConfig) -> bool:
+    """Whether two loads name the same model: model_path when set, else model_name."""
+    return (a.model_path or a.model_name) == (b.model_path or b.model_name)
+
+
+def _differing_load_fields(current: InferenceConfig, requested: InferenceConfig) -> list[str]:
+    """
+    Fields whose requested value differs from the loaded model's, in declaration order.
+
+    Every field counts. A hand-kept list of the ones that need a reload left out all of
+    vLLM's and llama-server's, so a load that changed vllm_cpu_offload_params got
+    already_loaded and kept running on the old settings.
+    """
+    loaded = current.model_dump(mode="json", exclude=set(_LOAD_FIELDS_NOT_COMPARED))
+    wanted = requested.model_dump(mode="json", exclude=set(_LOAD_FIELDS_NOT_COMPARED))
+    return [name for name, value in wanted.items() if loaded.get(name) != value]
+
+
 @app.post("/inference/load_model")
 async def load_model(
     config: Annotated[
@@ -1221,56 +1277,24 @@ async def load_model(
         if model_manager.is_loaded():
             current = model_manager.config
 
-            # Decide whether it matches the current config (same model + same key settings)
-            def _norm(v: Any) -> str:  # noqa: ANN401 - normalizes arbitrary config field values
-                # Normalize dicts and other types into a stable, comparable string
-                try:
-                    if isinstance(v, dict):
-                        return json.dumps(v, sort_keys=True)
-                    return json.dumps(v, sort_keys=True)
-                except Exception:
-                    return str(v)
-
-            def _same_inference_config(
-                a: InferenceConfig | None, b: InferenceConfig | None
-            ) -> bool:
-                if a is None or b is None:
-                    return False
-                # Model identity: prefer model_path, then model_name
-                a_id = a.model_path or a.model_name
-                b_id = b.model_path or b.model_name
-                if a_id != b_id:
-                    return False
-                # Compare the key fields
-                fields = [
-                    "quantization",
-                    "device_map",
-                    "max_memory",
-                    "offload_folder",
-                    "torch_dtype",
-                    "model_total_memory",
-                    # one GGUF runs on llama-server or Strata, and a Strata load's
-                    # run config and flags change what runs, not just how it is called
-                    "engine",
-                    "strata_config_path",
-                    "strata_max_context",
-                    "strata_vram_limit_gb",
-                    "strata_extra_args",
-                    "strata_vision",
-                    "strata_mmproj",
-                ]
-                for f in fields:
-                    if _norm(getattr(a, f, None)) != _norm(getattr(b, f, None)):
-                        return False
-                return True
-
-            if _same_inference_config(current, config):
-                return {
-                    "status": "already_loaded",
-                    "message": f"Model {config.model_name} is already loaded with the same configuration.",
-                    "config": config.model_dump(),
-                }
-            # Different model or different config -> 409, unload first
+            if current is not None and _same_model(current, config):
+                differing = _differing_load_fields(current, config)
+                if not differing:
+                    return {
+                        "status": "already_loaded",
+                        "message": f"Model {config.model_name} is already loaded with the same configuration.",
+                        "config": config.model_dump(),
+                    }
+                # Name what differs: a client that changed a setting otherwise sees the
+                # same 409 as one that asked for another model.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "A model is already loaded. Please unload the model before loading a "
+                        f"new model. Settings that differ from the loaded model: {', '.join(differing)}."
+                    ),
+                )
+            # Different model -> 409, unload first
             raise HTTPException(
                 status_code=409,
                 detail="A model is already loaded. Please unload the model before loading a new model.",
@@ -3072,19 +3096,31 @@ async def start_training(
     try:
         logger.info(f"Starting training request: {config.model_name} with method {config.method}")
 
-        # Check if model is loaded for inference
+        # Not refused: two cards, or a small model beside a small run, is a fair use, and
+        # whether this one runs out of memory depends on what the request does not say.
+        # But on one 16 GB card it usually does, so the caller is told, not only the log.
+        warnings: list[str] = []
         if model_manager.is_loaded():
+            warnings.append(
+                "An inference model is loaded; it shares the GPU with this training run. "
+                "Unload it first if training runs out of memory."
+            )
             logger.warning("Inference model is loaded. Consider unloading it before training.")
 
         # Start training
         result = training_manager.start_training(config)
 
-        return {
+        response: dict[str, Any] = {
             "status": "success",
             "message": "Training started",
             "config": config.model_dump(),
             "result": result,
         }
+        # Absent rather than empty, so a client can tell "nothing to say" from a key it
+        # has to know about.
+        if warnings:
+            response["warnings"] = warnings
+        return response
 
     except Exception as e:
         logger.exception(f"Failed to start training: {str(e)}")
@@ -3319,7 +3355,9 @@ async def get_offload_types() -> dict[str, Any]:
     """Get the supported offload types."""
     return {
         "offload_types": [
-            {"value": "none", "label": "No Offload", "description": "Keep all in GPU"},
+            # A device name, not "none": transformers rejects device_map="none", and
+            # leaving device_map out loads onto the CPU, not the GPU.
+            {"value": "cuda:0", "label": "No Offload", "description": "Keep all in GPU"},
             {
                 "value": "cpu",
                 "label": "CPU Offload",
@@ -3399,7 +3437,7 @@ async def download_and_register_model(
     label: Annotated[
         str | None,
         Body(
-            description="Custom label; defaults to the last segment of the model ID. For a GGUF file, put the full file name here (e.g. 'model.gguf')"
+            description="Custom label; defaults to the last segment of the model ID, or to the file name when filename is set (e.g. 'model.gguf')"
         ),
     ] = None,
     cache_dir: Annotated[
@@ -3423,9 +3461,13 @@ async def download_and_register_model(
         # Prefer the explicitly supplied filename
         target_filename = filename
 
-        # Generate a label when none was supplied
+        # Generate a label when none was supplied. A GGUF goes by its file name: the
+        # model id names the repository, which often holds every quantisation.
         if not label:
-            label = model_id.split("/")[-1].lower().replace("-", "_").replace(".", "_")
+            if target_filename:
+                label = Path(target_filename).name
+            else:
+                label = model_id.split("/")[-1].lower().replace("-", "_").replace(".", "_")
         else:
             # Convenience: if the label looks like a GGUF file name and no filename was given, treat it as the filename
             if not target_filename and (label.endswith(".gguf") or ".gguf" in label):
@@ -3445,6 +3487,11 @@ async def download_and_register_model(
                     status_code=409,
                     detail=f"Model with label '{label}' already exists in registry. Use force_download=true to re-download.",
                 )
+
+        # A typo used to come back as a started task, failing a moment later in the
+        # background where a caller that does not poll never sees it.
+        if missing := await asyncio.to_thread(hub_reports_missing, model_id):
+            raise HTTPException(status_code=400, detail=missing)
 
         # Start the download task
         task_id = download_manager.start_download(

@@ -42,6 +42,46 @@ def _inference_payload(**overrides):
     return payload
 
 
+def test_every_offload_type_is_a_valid_device_map():
+    """
+    A client that loads with a value this endpoint offers must not get it refused.
+
+    The first option used to be "none", which transformers rejects as a device_map;
+    nothing called the endpoint, so the bug sat there unnoticed.
+    """
+    offered = client.get("/config/offload_types").json()["offload_types"]
+
+    for option in offered:
+        assert InferenceConfig(**_inference_payload(device_map=option["value"])).device_map == (
+            option["value"]
+        )
+    assert offered[0]["value"] == "cuda:0"
+
+
+@pytest.mark.parametrize("value", ["cuda:0", "cuda", "xpu:0", "cpu", "mps", "auto", " auto "])
+def test_device_map_accepts_devices_and_strategies(value):
+    assert InferenceConfig(**_inference_payload(device_map=value)).device_map == value.strip()
+
+
+@pytest.mark.parametrize("value", ["none", "None", "null", "", "  ", "gpu", "cuda:x"])
+def test_load_model_refuses_a_device_map_transformers_would_not_take(monkeypatch, value):
+    started = []
+    monkeypatch.setattr(app_module.model_manager, "is_loaded", lambda: False)
+    monkeypatch.setattr(app_module.model_manager, "start_loading", started.append)
+
+    response = client.post("/inference/load_model", json=_inference_payload(device_map=value))
+
+    assert response.status_code == 422
+    assert "cuda:0" in json.dumps(response.json()["detail"])
+    assert started == []
+
+
+def test_device_map_still_takes_a_dict_or_none():
+    placement = {"": 0}
+    assert InferenceConfig(**_inference_payload(device_map=placement)).device_map == placement
+    assert InferenceConfig(**_inference_payload(device_map=None)).device_map is None
+
+
 def test_health_endpoint_reports_runtime_state(monkeypatch):
     config = InferenceConfig(
         model_name="loaded-model",
@@ -536,6 +576,77 @@ def test_load_model_returns_already_loaded_for_same_config(monkeypatch):
     data = response.json()
     assert data["status"] == "already_loaded"
     assert data["config"]["model_name"] == "test-model"
+
+
+def _loaded(monkeypatch, **payload):
+    monkeypatch.setattr(app_module, "engine_support", lambda engine: Support(supported=True))
+    monkeypatch.setattr(app_module.model_manager, "is_loaded", lambda: True)
+    monkeypatch.setattr(
+        app_module.model_manager,
+        "config",
+        InferenceConfig(**_inference_payload(**payload)),
+        raising=False,
+    )
+
+
+def test_load_model_refuses_a_setting_outside_the_old_compared_list(monkeypatch):
+    """
+    vllm_cpu_offload_params was not among the fields compared, so changing it got
+    already_loaded and the server kept running on the old settings.
+    """
+    base = {"engine": "vllm", "device_map": "auto", "vllm_cpu_offload_gb": 8}
+    _loaded(monkeypatch, **base, vllm_cpu_offload_params=["experts"])
+
+    same = client.post(
+        "/inference/load_model",
+        json=_inference_payload(**base, vllm_cpu_offload_params=["experts"]),
+    )
+    changed = client.post(
+        "/inference/load_model",
+        json=_inference_payload(**base, vllm_cpu_offload_params=["experts", "shared_expert"]),
+    )
+
+    assert same.json()["status"] == "already_loaded"
+    assert changed.status_code == 409
+    assert changed.json()["detail"].startswith("A model is already loaded.")
+    assert "vllm_cpu_offload_params" in changed.json()["detail"]
+
+
+def test_load_model_names_every_setting_that_differs(monkeypatch):
+    _loaded(monkeypatch, engine="llama_server", n_ctx=4096)
+
+    response = client.post(
+        "/inference/load_model",
+        json=_inference_payload(engine="llama_server", n_ctx=8192, n_cpu_moe=10),
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "n_ctx" in detail
+    assert "n_cpu_moe" in detail
+    assert "model_name" not in detail
+
+
+def test_load_model_ignores_a_port_the_server_was_moved_off(monkeypatch):
+    """settle_managed_port rewrites the loaded config's port when the asked one is busy."""
+    _loaded(monkeypatch, engine="llama_server", llama_server_port=5002)
+
+    response = client.post("/inference/load_model", json=_inference_payload(engine="llama_server"))
+
+    assert response.json()["status"] == "already_loaded"
+
+
+def test_load_model_for_another_model_keeps_the_plain_409(monkeypatch):
+    _loaded(monkeypatch)
+
+    response = client.post(
+        "/inference/load_model", json=_inference_payload(model_name="another-model")
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "A model is already loaded. Please unload the model before loading a new model."
+    )
 
 
 def test_load_model_refuses_the_same_gguf_with_other_strata_settings(monkeypatch):

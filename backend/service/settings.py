@@ -59,11 +59,31 @@ def _get_env_path(
     return _resolve_project_path(raw_value.strip(), base_dir=base_dir)
 
 
-def _parse_bool_env(raw_value: str | None, default: bool = False) -> bool:
-    """Convert an environment variable string to a boolean."""
+_TRUE_VALUES = ("true", "1", "yes", "on")
+# Blank is false, as it has always been here: `NAME=` in a .env turns a setting off.
+_FALSE_VALUES = ("false", "0", "no", "off", "")
+
+
+def _parse_bool_env(raw_value: str | None, default: bool = False, name: str = "") -> bool:
+    """
+    Convert an environment variable string to a boolean, the same way for every setting.
+
+    A value that is neither true nor false keeps the default and says so. It used to
+    count as false without a word, so LOG_TO_FILE=on turned file logging off while
+    VLLM_STARTUP_SWEEP=on turned the sweep on.
+    """
     if raw_value is None:
         return default
-    return raw_value.strip().lower() in ("true", "1", "yes", "on")
+    value = raw_value.strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    logging.getLogger(__name__).warning(
+        f"{name or 'A boolean setting'}={raw_value!r} is not one of "
+        f"{', '.join(v for v in _TRUE_VALUES + _FALSE_VALUES if v)}; using {default}"
+    )
+    return default
 
 
 def _prepend_cuda_library_paths() -> None:
@@ -119,9 +139,9 @@ LOG_LEVEL_INT = getattr(logging, LOG_LEVEL, logging.INFO)
 # 💡 Edit here to enable/disable debug output, or override with the RESPONSE_QUEUE_DEBUG env var
 _DEFAULT_RESPONSE_QUEUE_DEBUG: bool = False
 
-RESPONSE_QUEUE_DEBUG: bool = os.getenv(
-    "RESPONSE_QUEUE_DEBUG", str(_DEFAULT_RESPONSE_QUEUE_DEBUG)
-).lower() in ("true", "1", "yes")
+RESPONSE_QUEUE_DEBUG: bool = _parse_bool_env(
+    os.getenv("RESPONSE_QUEUE_DEBUG"), _DEFAULT_RESPONSE_QUEUE_DEBUG, "RESPONSE_QUEUE_DEBUG"
+)
 
 # ==================== Logging Format Configuration ====================
 
@@ -141,11 +161,7 @@ LOG_DATE_FORMAT = os.getenv("LOG_DATE_FORMAT", _DEFAULT_LOG_DATE_FORMAT)
 
 # Enable file logging
 _DEFAULT_LOG_TO_FILE: bool = True
-LOG_TO_FILE: bool = os.getenv("LOG_TO_FILE", str(_DEFAULT_LOG_TO_FILE)).lower() in (
-    "true",
-    "1",
-    "yes",
-)
+LOG_TO_FILE: bool = _parse_bool_env(os.getenv("LOG_TO_FILE"), _DEFAULT_LOG_TO_FILE, "LOG_TO_FILE")
 
 # Log directory and filename
 _DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
@@ -160,10 +176,8 @@ LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", str(_DEFAULT_LOG_BACKUP_COU
 
 # Whether to enable daily rotation (off by default on Windows to avoid multi-process rename conflicts, WinError 32)
 _DEFAULT_LOG_USE_ROTATION: bool = os.name != "nt"
-LOG_USE_ROTATION: bool = os.getenv("LOG_USE_ROTATION", str(_DEFAULT_LOG_USE_ROTATION)).lower() in (
-    "true",
-    "1",
-    "yes",
+LOG_USE_ROTATION: bool = _parse_bool_env(
+    os.getenv("LOG_USE_ROTATION"), _DEFAULT_LOG_USE_ROTATION, "LOG_USE_ROTATION"
 )
 
 # ==================== Service Configuration ====================
@@ -195,10 +209,8 @@ if SERVICE_REMOTE_ACCESS not in _REMOTE_ACCESS_VALUES:
     SERVICE_REMOTE_ACCESS = "inference"
 
 _DEFAULT_UVICORN_RELOAD: bool = False
-UVICORN_RELOAD: bool = os.getenv("UVICORN_RELOAD", str(_DEFAULT_UVICORN_RELOAD)).lower() in (
-    "true",
-    "1",
-    "yes",
+UVICORN_RELOAD: bool = _parse_bool_env(
+    os.getenv("UVICORN_RELOAD"), _DEFAULT_UVICORN_RELOAD, "UVICORN_RELOAD"
 )
 
 _DEFAULT_UVICORN_RELOAD_EXCLUDES: tuple[str, ...] = ("logs/*", "logs/**")
@@ -213,9 +225,9 @@ UVICORN_RELOAD_EXCLUDES: list[str] = [
 # Uvicorn access log (prints: "GET /path 200 OK" etc.)
 # Note: this is uvicorn's access log, not the app logger.
 _DEFAULT_UVICORN_ACCESS_LOG: bool = True
-UVICORN_ACCESS_LOG: bool = os.getenv(
-    "UVICORN_ACCESS_LOG", str(_DEFAULT_UVICORN_ACCESS_LOG)
-).lower() in ("true", "1", "yes")
+UVICORN_ACCESS_LOG: bool = _parse_bool_env(
+    os.getenv("UVICORN_ACCESS_LOG"), _DEFAULT_UVICORN_ACCESS_LOG, "UVICORN_ACCESS_LOG"
+)
 
 _DEFAULT_UVICORN_ACCESS_LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 UVICORN_ACCESS_LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = os.getenv(
@@ -223,9 +235,9 @@ UVICORN_ACCESS_LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL
 ).upper()  # type: ignore[assignment]
 
 _DEFAULT_UVICORN_USE_COLORS: bool = True
-UVICORN_USE_COLORS: bool = os.getenv(
-    "UVICORN_USE_COLORS", str(_DEFAULT_UVICORN_USE_COLORS)
-).lower() in ("true", "1", "yes")
+UVICORN_USE_COLORS: bool = _parse_bool_env(
+    os.getenv("UVICORN_USE_COLORS"), _DEFAULT_UVICORN_USE_COLORS, "UVICORN_USE_COLORS"
+)
 
 _DEFAULT_WATCHFILES_LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "WARNING"
 WATCHFILES_LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = os.getenv(
@@ -417,7 +429,7 @@ DEFAULT_SYSTEM_PROMPT: str = os.getenv("DEFAULT_SYSTEM_PROMPT", _DEFAULT_SYSTEM_
 # Env var: VLLM_STARTUP_SWEEP
 _DEFAULT_VLLM_STARTUP_SWEEP: bool = True
 VLLM_STARTUP_SWEEP: bool = _parse_bool_env(
-    os.getenv("VLLM_STARTUP_SWEEP"), _DEFAULT_VLLM_STARTUP_SWEEP
+    os.getenv("VLLM_STARTUP_SWEEP"), _DEFAULT_VLLM_STARTUP_SWEEP, "VLLM_STARTUP_SWEEP"
 )
 
 # Ports to check during the startup sweep (comma-separated string)
@@ -480,7 +492,9 @@ VLLM_PORT: int = int(os.getenv("VLLM_PORT", str(_DEFAULT_VLLM_PORT)))
 # Env var: VLLM_ENABLE_LOG_REQUESTS
 _DEFAULT_VLLM_ENABLE_LOG_REQUESTS: bool = False
 VLLM_ENABLE_LOG_REQUESTS: bool = _parse_bool_env(
-    os.getenv("VLLM_ENABLE_LOG_REQUESTS"), _DEFAULT_VLLM_ENABLE_LOG_REQUESTS
+    os.getenv("VLLM_ENABLE_LOG_REQUESTS"),
+    _DEFAULT_VLLM_ENABLE_LOG_REQUESTS,
+    "VLLM_ENABLE_LOG_REQUESTS",
 )
 
 # Host the vLLM server binds to (vllm serve --host)
@@ -500,7 +514,9 @@ VLLM_SERVER_HOST: str = os.getenv("VLLM_SERVER_HOST", _DEFAULT_VLLM_SERVER_HOST)
 # programs on this machine, never a browser, and the rest answer 404.
 # Honoured only while VLLM_SERVER_HOST is loopback.
 # Env var: VLLM_SERVER_DEV_MODE
-VLLM_SERVER_DEV_MODE: bool = _parse_bool_env(os.getenv("VLLM_SERVER_DEV_MODE"), False)
+VLLM_SERVER_DEV_MODE: bool = _parse_bool_env(
+    os.getenv("VLLM_SERVER_DEV_MODE"), False, "VLLM_SERVER_DEV_MODE"
+)
 
 # The served model name vLLM reports; derived from the model source when unset
 # Env var: VLLM_SERVED_MODEL_NAME
@@ -532,12 +548,15 @@ VLLM_SERVER_PROJECT_DIR: str = _get_env_path(
 STRATA_HOME: str = os.getenv("STRATA_HOME", "")
 # Env var: STRATA_PYTHON -- the interpreter for serve/server.py (Strata's own venv)
 STRATA_PYTHON: str = os.getenv("STRATA_PYTHON", "")
-# Env var: STRATA_ENGINE_BINARY -- the Strata engine built with deep sleep (--sleep-mode);
-# required. It replaces the executable the run config names, which has no deep sleep.
+# Env var: STRATA_ENGINE_BINARY -- the engine of the installed strata-sleep package; required.
+# It replaces the executable the run config names, which Strata's own setup installed. Whether
+# it has deep sleep is read from the BUILD.json beside it (the CUDA builds do, an Intel Arc one
+# does not), not assumed.
 STRATA_ENGINE_BINARY: str = os.getenv("STRATA_ENGINE_BINARY", "")
 # Env var: STRATA_VISION_BINARY -- Strata's image encoder (strata-vision), for a load that asks
-# for image input (strata_vision) when the run config has none. Empty = strata-vision beside
-# STRATA_ENGINE_BINARY. Any build reads any model: it is told the mmproj and GGUF at start.
+# for image input (strata_vision) when the run config has none. Empty = the reader beside
+# STRATA_ENGINE_BINARY (an Intel folder's strata-vision-sycl before its CPU strata-vision).
+# Any build reads any model: it is told the mmproj and GGUF at start.
 STRATA_VISION_BINARY: str = os.getenv("STRATA_VISION_BINARY", "")
 # Env var: STRATA_PORT -- loopback port of the managed Strata server
 _DEFAULT_STRATA_PORT: int = 5002
@@ -635,9 +654,9 @@ os.environ["TIKTOKEN_RS_CACHE_DIR"] = TIKTOKEN_CACHE_DIR
 # to it works whatever the import order turns out to be.
 _DEFAULT_HF_XET_ENABLED: bool = False
 HF_XET_ENABLED: bool = (
-    not _parse_bool_env(os.environ["HF_HUB_DISABLE_XET"])
+    not _parse_bool_env(os.environ["HF_HUB_DISABLE_XET"], name="HF_HUB_DISABLE_XET")
     if os.environ.get("HF_HUB_DISABLE_XET") is not None
-    else _parse_bool_env(os.getenv("HF_XET_ENABLED"), _DEFAULT_HF_XET_ENABLED)
+    else _parse_bool_env(os.getenv("HF_XET_ENABLED"), _DEFAULT_HF_XET_ENABLED, "HF_XET_ENABLED")
 )
 # ==================== Helper Functions ====================
 

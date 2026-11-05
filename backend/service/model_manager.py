@@ -301,7 +301,17 @@ class ModelManager:
         if not self.is_loaded() or self.config is None:
             raise SleepModeUnavailable("No model is loaded.")
         if self.config.engine == InferenceEngine.STRATA:
-            return self.config  # always started with --sleep-mode
+            # Deep sleep is CUDA driver virtual memory, so the Intel (SYCL) engine has none
+            # and was started without the flag. Said here rather than left to the engine's
+            # own refusal, which arrives only after the request reaches it.
+            from .inference.engines.strata_engine import engine_sleeps
+
+            if not engine_sleeps():
+                raise SleepModeUnavailable(
+                    "This Strata engine has no deep sleep (its BUILD.json says so): it is not "
+                    "a build that can free the GPU and keep the conversation."
+                )
+            return self.config
         if self.config.engine != InferenceEngine.VLLM:
             raise SleepModeUnavailable(
                 "Sleep mode needs the vllm or strata engine; the loaded engine is "

@@ -35,16 +35,26 @@ json.dump({"exe": "engine/strata.exe", "args": ["--native", "D:/models/q-00001-o
 """
 
 
-def _package(root: Path, sleep: bool = True) -> Path:
+def _package(
+    root: Path,
+    sleep: bool = True,
+    sleep_json: dict | None = None,
+    extra_files: dict[str, str] | None = None,
+) -> Path:
     """A strata-sleep package folder under root, with its manifest."""
     pkg = root / PACKAGE
     (pkg / "engine").mkdir(parents=True)
     (pkg / "VERSION").write_text("0.2.7-sleep.1\n")
-    (pkg / "SLEEP.json").write_text('{"version": "0.2.7-sleep.1"}\n')
+    # without the backend and sleep_mode fields it is a package from before them
+    (pkg / "SLEEP.json").write_text(json.dumps({"version": "0.2.7-sleep.1", **(sleep_json or {})}))
     (pkg / "setup.py").write_text(FAKE_SETUP)
     (pkg / "engine" / "strata.exe").write_bytes(
         b"MZ strata engine --sleep-mode\n" if sleep else b"MZ strata engine\n"
     )
+    for rel, text in (extra_files or {}).items():
+        target = pkg / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
     lines = [
         f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(pkg).as_posix()}\n"
         for p in sorted(pkg.rglob("*"))
@@ -176,6 +186,55 @@ def test_an_engine_without_deep_sleep_is_refused_and_not_recorded(tree, tmp_path
     )
     assert result.returncode != 0
     assert "no deep sleep" in result.stdout
+    assert "STRATA_ENGINE_BINARY" not in _env(project)
+
+
+def test_a_package_that_says_it_does_not_sleep_is_installed_anyway(tree, tmp_path):
+    """An engine without deep sleep is only wrong when the package claims to have it."""
+    project, bin_dir = tree
+    pkg = _package(tmp_path / "nosleep-honest", sleep=False, sleep_json={"sleep_mode": False})
+    result = _run(project, bin_dir, TRUSTA_STRATA_PACKAGE=str(pkg))
+    assert result.returncode == 0, result.stdout
+    assert "no deep sleep" in result.stdout  # said once, as a note
+    assert "STRATA_ENGINE_BINARY" in _env(project)
+
+
+def test_an_intel_package_is_handed_to_setup_as_the_sycl_backend(tree, tmp_path):
+    """Setup reads the PC itself and would stop with "no NVIDIA GPU found" without being told."""
+    project, bin_dir = tree
+    pkg = _package(
+        tmp_path / "intel",
+        sleep=False,
+        sleep_json={"backend": "sycl", "sleep_mode": False},
+        extra_files={"sycl/setup_intel.py": "# the Intel steps\n"},
+    )
+    result = _run(project, bin_dir, TRUSTA_STRATA_PACKAGE=str(_zip(pkg, tmp_path)))
+    assert result.returncode == 0, result.stdout
+    strata = Path(_env(project)["STRATA_HOME"])
+    assert "--backend sycl" in (strata / "setup-args.txt").read_text()
+
+
+def test_an_intel_package_without_the_intel_steps_is_refused(tree, tmp_path):
+    """setup.py hands --backend sycl to sycl\\setup_intel.py and stops when it is not there."""
+    project, bin_dir = tree
+    pkg = _package(
+        tmp_path / "intel-bare", sleep=False, sleep_json={"backend": "sycl", "sleep_mode": False}
+    )
+    result = _run(project, bin_dir, TRUSTA_STRATA_PACKAGE=str(_zip(pkg, tmp_path)))
+    assert result.returncode != 0
+    assert "setup_intel.py" in result.stdout
+    assert "STRATA_ENGINE_BINARY" not in _env(project)
+
+
+def test_a_backend_the_script_does_not_know_is_refused(tree, tmp_path):
+    """A package built for something else says so, rather than being installed as CUDA."""
+    project, bin_dir = tree
+    pkg = _package(
+        tmp_path / "rocm", sleep=False, sleep_json={"backend": "hip", "sleep_mode": False}
+    )
+    result = _run(project, bin_dir, TRUSTA_STRATA_PACKAGE=str(_zip(pkg, tmp_path)))
+    assert result.returncode != 0
+    assert "'hip'" in result.stdout
     assert "STRATA_ENGINE_BINARY" not in _env(project)
 
 

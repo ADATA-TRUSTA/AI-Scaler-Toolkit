@@ -429,6 +429,7 @@
                     <p><strong>Behavior:</strong> synchronous validation, asynchronous training.</p>
                     <p>Send a complete <code>TrainingConfig</code>. Once validation passes, the endpoint returns a <code>session_id</code> immediately; the actual training runs in the background worker process.</p>
                     <p><strong>Note:</strong> a non-empty <code>output_dir</code> is rejected, but <em>asynchronously</em>. <code>POST /training/start</code> returns 200 with a <code>session_id</code> regardless; the worker performs the check and the failure surfaces via <code>/training/status</code> and the job log.</p>
+                    <p><strong>Warnings:</strong> if an inference model is loaded, training still starts, and the response carries a <code>warnings</code> list saying the two share the GPU. On a single 16 GB card that usually runs out of memory; unload the inference model first. The key is absent when there is nothing to warn about.</p>
                 </div>
 
                 <div class="card">
@@ -1032,9 +1033,10 @@ CUDA_VISIBLE_DEVICES=0        # Force the use of GPU 0 (avoids multi-GPU PEFT is
 {
   "finetuned_models": [
     {
+      "model_name": "Qwen/Qwen3-4B",
+      "model_path": "./output/my_model_v1",
+      "model_type": "finetuned",
       "label": "my_model_v1",
-      "output_dir": "./output/my_model_v1",
-      "base_model": "Qwen/Qwen3-4B",
       "method": "lora",
       ...
     }
@@ -1103,6 +1105,7 @@ CUDA_VISIBLE_DEVICES=0        # Force the use of GPU 0 (avoids multi-GPU PEFT is
                     <li>Verify that the llama.cpp dependencies are installed.</li>
                     <li>Verify that the disk holding <code>output_dir</code> has enough free space (3-4x the original model size).</li>
                     <li>The HF-format model is still in <code>output_dir</code> and can be loaded with the Transformers engine.</li>
+                    <li>Do not retrain: once the cause is fixed, convert the saved output with <code>POST /config/models/convert</code>. The job ends in <code>error</code> (no GGUF was produced), and its error message names the saved <code>output_dir</code>, on single- and multi-GPU runs alike.</li>
                 </ul>
             </div>
 

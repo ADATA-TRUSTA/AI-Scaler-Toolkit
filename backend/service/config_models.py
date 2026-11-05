@@ -1,6 +1,7 @@
 """Configuration models for inference and training."""
 
 import os
+import re
 from enum import StrEnum
 from typing import Any, Literal, Optional
 from urllib.parse import urlsplit
@@ -70,6 +71,12 @@ class MultimodalScope(StrEnum):
 
     TEXT_ONLY = "text_only"
     TEXT_AND_BRIDGE = "text_and_bridge"
+
+
+# What transformers accepts as a string device_map: a placement strategy, or a
+# device name torch.device() parses. Kept to the backends this service runs on.
+DEVICE_MAP_STRATEGIES = ("auto", "balanced", "balanced_low_0", "sequential")
+_DEVICE_NAME = re.compile(r"(cpu|cuda|xpu|mps)(:\d+)?")
 
 
 class InferenceSharedFields(BaseModel):
@@ -639,10 +646,11 @@ class StrataConfigFields(BaseModel):
     (KV format and residency, speculative decoding, the expert cache) live in the run config
     its setup writes, which strata_config_path points at; strata_extra_args sets any of
     them for one load without editing that file.
-    Always on: deep sleep (POST /inference/sleep frees the GPU in about 2 s and keeps the
-    conversation; STRATA_ENGINE_BINARY is the build with it), saving the
-    conversation on unload and restoring it on the next load. Image input follows the run
-    config unless strata_vision says otherwise.
+    Always on where the engine has it: deep sleep (POST /inference/sleep frees the GPU in
+    about 2 s and keeps the conversation; the BUILD.json beside STRATA_ENGINE_BINARY says
+    whether this build has it, and an Intel Arc one does not), saving the conversation on
+    unload and restoring it on the next load. Image input follows the run config unless
+    strata_vision says otherwise.
     """
 
     strata_config_path: str | None = Field(
@@ -750,6 +758,27 @@ class InferenceConfig(
     torch_dtype: str = Field(default="auto", description="Torch dtype")
     trust_remote_code: bool = Field(default=True, description="Trust remote code")
     use_cache: bool = Field(default=True, description="Use KV cache")
+
+    @field_validator("device_map")
+    @classmethod
+    def _check_device_map(cls, v: str | dict | None) -> str | dict | None:
+        """
+        Refuse a string transformers would not take, before it reaches the worker.
+
+        Any non-empty string used to pass straight to from_pretrained, so "none" (once
+        offered by /config/offload_types) failed the load with transformers' own
+        ValueError, minutes later and in the worker. Mapping it to None is no fix:
+        no device_map loads onto the CPU.
+        """
+        if not isinstance(v, str):
+            return v
+        name = v.strip()
+        if name in DEVICE_MAP_STRATEGIES or _DEVICE_NAME.fullmatch(name):
+            return name
+        raise ValueError(
+            f"device_map {v!r} is not a device or a placement strategy: use a device such "
+            f"as 'cuda:0', 'xpu:0' or 'cpu', or one of {', '.join(DEVICE_MAP_STRATEGIES)}"
+        )
 
     @field_validator("llama_server_host")
     @classmethod

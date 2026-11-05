@@ -77,6 +77,38 @@ class DownloadTask(BaseModel):
     total_bytes: int | None = None
 
 
+# Finished tasks kept for GET /config/models/downloads. Tasks live in this process only and
+# nothing else removes them, so without a cap every download since start-up stays listed.
+_FINISHED_TASKS_KEPT = 50
+_FINISHED_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def hub_reports_missing(model_id: str) -> str | None:
+    """
+    Why the Hub says `model_id` cannot be downloaded, or None when it can or cannot tell.
+
+    Only a definite answer counts: a malformed id, or a repository the Hub reports as
+    not there (which is also what it answers for a private one without a token). A
+    gated repository exists. Anything else -- offline, a proxy, a timeout -- is None,
+    so the download is queued as before and the task reports what went wrong.
+    """
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import HFValidationError
+
+    try:
+        if HfApi().repo_exists(model_id, token=load_hf_token()):
+            return None
+    except HFValidationError as exc:
+        return f"'{model_id}' is not a valid Hugging Face model id: {exc}"
+    except Exception as exc:  # noqa: BLE001 - no answer is not a "no"
+        logger.info(f"[DownloadManager] Could not check {model_id} on the Hub: {exc}")
+        return None
+    return (
+        f"Model '{model_id}' was not found on Hugging Face. Check the id; a private "
+        "model also needs a Hugging Face token with access to it."
+    )
+
+
 class DownloadManager:
     """
     Manages background model download tasks.
@@ -282,6 +314,7 @@ class DownloadManager:
             progress="Initialized",
         )
         with self._lock:
+            self._prune_finished_tasks()
             self.tasks[task_id] = task
             self._cancels[task_id] = threading.Event()
 
@@ -294,6 +327,20 @@ class DownloadManager:
         thread.start()
 
         return task_id
+
+    def _prune_finished_tasks(self) -> None:
+        """
+        Drop all but the newest finished tasks; running ones always stay.
+
+        Done when a download starts rather than on a timer: the list only grows then.
+        """
+        finished = sorted(
+            (t for t in self.tasks.values() if t.status in _FINISHED_STATUSES),
+            key=lambda t: t.start_time,
+            reverse=True,
+        )
+        for task in finished[_FINISHED_TASKS_KEPT:]:
+            self.tasks.pop(task.task_id, None)
 
     def _download_worker(
         self,

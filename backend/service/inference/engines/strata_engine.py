@@ -66,6 +66,8 @@ _LOAD_ENV_DEFAULTS = {"STRATA_UNBUFFERED_LOAD": "1", "STRATA_NO_ARENA_THP": "1"}
 # puts it, sleep and wake worked. Like the two above, the environment wins.
 _WINDOWS_LOAD_ENV_DEFAULTS = {"STRATA_PLE_AUTO_RAM": "0"}
 _LOG_TAIL_LINES = 40
+# Where Linux lists the graphics devices; a module constant so a test can point it elsewhere.
+_DRM_DEVICES = Path("/sys/class/drm")
 
 
 def strata_settings_file() -> Path:
@@ -101,12 +103,12 @@ def strata_setup_problem() -> str | None:
     python = strata_python()
     if not Path(python).is_file():
         return f"The Strata interpreter does not exist: {python} (STRATA_PYTHON)"
-    # The run config names the engine Strata's setup built, which has no deep sleep; this
-    # backend always starts with --sleep-mode, so it runs only the build named here.
+    # The run config names the engine Strata's setup installed; this one is started instead,
+    # and engine_sleeps() decides whether it is asked to sleep.
     if not STRATA_ENGINE_BINARY.strip():
         return (
-            "STRATA_ENGINE_BINARY is empty: point it at the Strata engine built with deep "
-            "sleep (--sleep-mode)."
+            "STRATA_ENGINE_BINARY is empty: point it at the Strata engine of the installed "
+            "package (engine/strata[.exe])."
         )
     if not Path(STRATA_ENGINE_BINARY).expanduser().is_file():
         return f"STRATA_ENGINE_BINARY does not exist: {STRATA_ENGINE_BINARY}"
@@ -114,11 +116,9 @@ def strata_setup_problem() -> str | None:
 
 
 def strata_installable() -> bool:
-    """Whether a load can install Strata itself: an NVIDIA GPU, the script and its package."""
+    """Whether a load can install Strata itself: a GPU it has a package for, and the script."""
     return (
-        shutil.which("nvidia-smi") is not None
-        and _install_script().is_file()
-        and strata_package() is not None
+        gpu_backend() is not None and _install_script().is_file() and strata_package() is not None
     )
 
 
@@ -127,11 +127,120 @@ def _install_script() -> Path:
     return PROJECT_ROOT / "scripts" / name
 
 
+def _intel_gpu_windows() -> bool:
+    """
+    An Intel display adapter on Windows, from the display class registry.
+
+    Windows has no /sys/class/drm. Strata's own setup reads Win32_VideoController and this
+    same registry key (its patch 0009, intel_gpus_windows); this reads only what the question
+    needs, through winreg, so it costs no subprocess on a path the service calls often.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return False
+    key_path = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as cls:
+            for i in range(winreg.QueryInfoKey(cls)[0]):
+                try:
+                    with winreg.OpenKey(cls, winreg.EnumKey(cls, i)) as sub:
+                        value = str(winreg.QueryValueEx(sub, "MatchingDeviceId")[0])
+                except OSError:
+                    continue
+                if "ven_8086" in value.lower():
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def gpu_backend() -> str | None:
+    """
+    Which engine this host needs: "cuda" for an NVIDIA GPU, "sycl" for an Intel one, None
+    for neither.
+
+    NVIDIA first: on a laptop with both, the discrete card is the one Strata is wanted for.
+    Intel is read from the DRM devices (vendor 0x8086) rather than a tool, because nothing
+    like nvidia-smi is installed with the driver; on Windows, which has no DRM devices, from
+    the display class registry. Upstream has no Intel build for Windows, but strata-sleep
+    makes one (its patches 0007, 0009 and 0010), so both platforms can be Intel.
+    """
+    if shutil.which("nvidia-smi") is not None:
+        return "cuda"
+    if os.name == "nt":
+        return "sycl" if _intel_gpu_windows() else None
+    try:
+        for vendor in sorted(_DRM_DEVICES.glob("card*/device/vendor")):
+            if vendor.read_text().strip().lower() == "0x8086":
+                return "sycl"
+    except OSError:
+        pass
+    return None
+
+
 def strata_package() -> Path | None:
-    """The strata-sleep package an installed build carries in vendor/, or None."""
-    platform = "windows-x86_64.zip" if os.name == "nt" else "linux-x86_64.tar.gz"
-    found = sorted((PROJECT_ROOT / "vendor").glob(f"strata-sleep-*-{platform}"))
+    """
+    The strata-sleep package in vendor/ for this host's GPU, or None.
+
+    The CUDA archives are named strata-sleep-<version>-<platform>.<ext>; another backend's
+    carries its name last (strata-sleep-<version>-linux-x86_64-sycl.tar.gz), so the two
+    never match each other's glob and a payload may hold both.
+    """
+    backend = gpu_backend()
+    if backend is None:
+        return None
+    platform = "windows-x86_64" if os.name == "nt" else "linux-x86_64"
+    ext = "zip" if os.name == "nt" else "tar.gz"
+    pattern = (
+        f"strata-sleep-*-{platform}.{ext}"
+        if backend == "cuda"
+        else f"strata-sleep-*-{platform}-{backend}.{ext}"
+    )
+    found = sorted((PROJECT_ROOT / "vendor").glob(pattern))
     return found[-1] if found else None
+
+
+def engine_build_info() -> dict[str, Any]:
+    """
+    BUILD.json beside STRATA_ENGINE_BINARY: what the engine was built with, or {}.
+
+    scripts/build-*.sh in strata-sleep write it, and strata_sleep.py copies it into the
+    package. A hand-made install may have none, so every reader of it has a fallback.
+    """
+    if not STRATA_ENGINE_BINARY.strip():
+        return {}
+    path = Path(STRATA_ENGINE_BINARY).expanduser().parent / "BUILD.json"
+    try:
+        info = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def engine_backend() -> str:
+    """The engine's backend: BUILD.json's, else "cuda" (every package before Intel was one)."""
+    backend = engine_build_info().get("backend")
+    return backend if isinstance(backend, str) and backend else "cuda"
+
+
+def engine_sleeps() -> bool:
+    """
+    Whether this engine has deep sleep (--sleep-mode).
+
+    BUILD.json says so outright. Without it, the flag's name is in the binary of every build
+    that parses it and in no other, which is how an engine from before BUILD.json carried the
+    field is recognised. The Intel (SYCL) engine has none: deep sleep is CUDA driver virtual
+    memory, and Level Zero has no equivalent, so it is started without the flag and never
+    asked to sleep.
+    """
+    sleeps = engine_build_info().get("sleep_mode")
+    if isinstance(sleeps, bool):
+        return sleeps
+    try:
+        return b"--sleep-mode" in Path(STRATA_ENGINE_BINARY).expanduser().read_bytes()
+    except OSError:
+        return False
 
 
 def strata_python() -> str:
@@ -184,12 +293,23 @@ def _apply_extra_args(args: list[str], extra: list[str]) -> list[str]:
 
 
 def vision_binary() -> Path | None:
-    """Strata's image encoder: STRATA_VISION_BINARY, else strata-vision beside the engine."""
+    """
+    Strata's image encoder: STRATA_VISION_BINARY, else the reader beside the engine.
+
+    An Intel package carries two, as Strata's own strata_control/vision_reader.py expects:
+    strata-vision-sycl runs the encoder on the card, and strata-vision is the CPU one that
+    starts anywhere. The GPU one is taken when it is there. A CUDA package has one file for
+    both (strata-vision, with --gpu), so nothing changes there.
+    """
     if STRATA_VISION_BINARY.strip():
         return Path(STRATA_VISION_BINARY).expanduser()
-    if STRATA_ENGINE_BINARY.strip():
-        name = "strata-vision.exe" if os.name == "nt" else "strata-vision"
-        candidate = Path(STRATA_ENGINE_BINARY).expanduser().parent / name
+    if not STRATA_ENGINE_BINARY.strip():
+        return None
+    folder = Path(STRATA_ENGINE_BINARY).expanduser().parent
+    suffix = ".exe" if os.name == "nt" else ""
+    names = [f"strata-vision-{engine_backend()}{suffix}", f"strata-vision{suffix}"]
+    for name in names:
+        candidate = folder / name
         if candidate.is_file():
             return candidate
     return None
@@ -220,9 +340,10 @@ def _apply_vision(run: dict[str, Any], config: InferenceConfig, args: list[str])
     Image input as the load asks: strata_vision false drops the run config's encoder,
     true keeps it or adds one; omitted leaves the run config as it is.
 
-    Strata's setup is run with --vision no (on a deep-sleep package it would otherwise
-    compile an encoder, and could replace the engine), so a model it prepared has none;
-    the encoder is model-agnostic and needs only its exe, the mmproj and the model's GGUF.
+    Strata's setup is run with --vision no (it would otherwise compile an encoder, and could
+    replace the engine), so a model it prepared has none. The package carries the encoder
+    ready-made (vision_binary); it is model-agnostic and needs only its exe, the mmproj and
+    the model's GGUF.
     """
     vision = run.get("vision")
     wanted = config.strata_vision if config.strata_vision is not None else isinstance(vision, dict)
@@ -484,9 +605,10 @@ def build_run_config(
     args = [a for a in args if a != "--sleep-mode"]  # the run config's sleep_mode key decides
     run["args"] = args
     _apply_vision(run, config, args)
-    # Always on: it costs nothing until the first sleep, and freeing the GPU for another
-    # program is what this engine is chosen for.
-    run["sleep_mode"] = True
+    # On where the engine has it: it costs nothing until the first sleep, and freeing the GPU
+    # for another program is what this engine is chosen for. The Intel engine has no deep
+    # sleep (engine_sleeps), and asking an engine that cannot sleep to sleep stops its start.
+    run["sleep_mode"] = engine_sleeps()
     run["exe"] = str(Path(STRATA_ENGINE_BINARY).expanduser())
     run["log"] = log_path
     run.pop("port", None)  # the server is told its port on the command line
@@ -739,7 +861,8 @@ class StrataEngine(BaseEngine):
             {
                 "status": "ready",
                 "config": config.model_dump(),
-                "device": "cuda",
+                # the engine's own backend: "cuda", or "sycl" on an Intel Arc package
+                "device": engine_backend(),
                 # read by the model card and /inference/status like llama-server's tags
                 "llama_capabilities": capabilities,
                 "served_context_length": health.get("max_context"),

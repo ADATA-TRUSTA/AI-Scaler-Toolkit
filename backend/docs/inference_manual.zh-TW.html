@@ -429,7 +429,7 @@
                     <h3>1. 加載模型 (Load Model)</h3>
                     <code>POST /inference/load_model</code>
                     <p><strong>行為:</strong> 非同步背景加載。</p>
-                    <p>API 立即返回 <code>loading</code> 狀態，需透過 <code>/inference/status</code> 輪詢。若同配置已加載，返回 <code>already_loaded</code>；若不同模型已加載，返回 HTTP 409。</p>
+                    <p>API 立即返回 <code>loading</code> 狀態，需透過 <code>/inference/status</code> 輪詢。若同配置已加載，返回 <code>already_loaded</code>；若不同模型已加載，返回 HTTP 409。同一個模型但任何設定不同，也返回 409，訊息會列出不同的設定：先卸載，再用新設定載入。</p>
                     <p><strong>關鍵參數:</strong> <code>model_name</code>, <code>engine</code>, <code>quantization</code>, <code>device_map</code>, <code>max_memory</code>。</p>
                 </div>
 
@@ -660,7 +660,7 @@ payload = {
             <h3>Step 1: 模型加載流程 (Load Flow)</h3>
             <ol>
                 <li>Client 發送 <code>POST /inference/load_model</code>（帶 <code>engine</code>, <code>model_name</code>, <code>quantization</code> 等）。</li>
-                <li><code>app.py</code> 檢查是否已有相同配置的模型在運行（若是則 <code>already_loaded</code>），或者是否有不同的模型（則 HTTP 409 要求先卸載）。</li>
+                <li><code>app.py</code> 檢查是否已有相同配置的模型在運行（若是則 <code>already_loaded</code>），或者是否有不同的模型、或同一模型但設定不同（則 HTTP 409 要求先卸載）。</li>
                 <li><code>app.py</code> 呼叫 <code>model_manager.start_loading(config)</code>。</li>
                 <li><code>ModelManager</code> 將 <code>load</code> 指令推送到 <strong>Request Queue</strong>（IPC）。</li>
                 <li><strong>Worker Process</strong> 根據 <code>engine</code> 選擇對應引擎：
@@ -800,7 +800,7 @@ payload = {
                 <div class="card">
                     <h3>查詢可用模型</h3>
                     <code>GET /config/models</code>
-                    <p>返回所有已登錄的基礎模型、微調模型、GGUF 模型清單。</p>
+                    <p>返回所有已登錄的基礎模型、微調模型、GGUF 模型清單。每一筆的 <code>model_type</code>（<code>base</code>、<code>finetuned</code> 或 <code>llama_gguf</code>）表示它屬於哪個清單；不要用 <code>model_path</code> 判斷，基礎模型也有這個欄位。</p>
                 </div>
                 <div class="card">
                     <h3>下載模型</h3>

@@ -68,6 +68,10 @@ def checkout(tmp_path, monkeypatch):
     engine = home / "build-sleep" / "strata"
     engine.parent.mkdir()
     engine.write_text("")
+    # what the package's build writes beside the engine: the backend reads whether it sleeps here
+    (engine.parent / "BUILD.json").write_text(
+        json.dumps({"version": "0.1.52", "backend": "cuda", "vision": "cuda", "sleep_mode": True})
+    )
     monkeypatch.setattr(strata_engine, "STRATA_HOME", str(home))
     monkeypatch.setattr(strata_engine, "STRATA_PYTHON", "")
     monkeypatch.setattr(strata_engine, "STRATA_ENGINE_BINARY", str(engine))
@@ -108,7 +112,121 @@ def test_installable_needs_an_nvidia_gpu_the_script_and_the_package(monkeypatch,
     assert strata_engine.strata_installable()
     assert strata_engine.strata_package() == tmp_path / "vendor" / package
     monkeypatch.setattr(strata_engine.shutil, "which", lambda name: None)
-    assert not strata_engine.strata_installable()  # Strata's deep sleep is CUDA-only
+    monkeypatch.setattr(strata_engine, "gpu_backend", lambda: None)
+    assert not strata_engine.strata_installable()  # no GPU this has an engine for
+
+
+@pytest.mark.parametrize(
+    ("win", "cuda_name", "sycl_name"),
+    [
+        (False, "strata-sleep-0.2.7-sleep.2-linux-x86_64.tar.gz",
+         "strata-sleep-0.2.7-sleep.2-linux-x86_64-sycl.tar.gz"),
+        (True, "strata-sleep-0.2.7-sleep.2-windows-x86_64.zip",
+         "strata-sleep-0.2.7-sleep.2-windows-x86_64-sycl.zip"),
+    ],
+    ids=["linux", "windows"],
+)
+def test_each_backend_takes_its_own_package_and_leaves_the_other(
+    monkeypatch, tmp_path, win, cuda_name, sycl_name
+):
+    """The two archives never match each other's glob: -sycl is last in the name for that.
+
+    Both platforms, whichever this test runs on: the Intel package exists for Windows too,
+    and naming it from the host's own os.name would leave one of the two never exercised.
+    """
+    monkeypatch.setattr(strata_engine.os, "name", "nt" if win else "posix")
+    monkeypatch.setattr(strata_engine, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "vendor").mkdir()
+    cuda = tmp_path / "vendor" / cuda_name
+    sycl = tmp_path / "vendor" / sycl_name
+    cuda.write_text("")
+    sycl.write_text("")
+
+    monkeypatch.setattr(strata_engine, "gpu_backend", lambda: "sycl")
+    assert strata_engine.strata_package() == sycl
+    monkeypatch.setattr(strata_engine, "gpu_backend", lambda: "cuda")
+    assert strata_engine.strata_package() == cuda
+    monkeypatch.setattr(strata_engine, "gpu_backend", lambda: None)
+    assert strata_engine.strata_package() is None
+
+
+def test_gpu_backend_prefers_nvidia_then_reads_the_cards(monkeypatch, tmp_path):
+    monkeypatch.setattr(strata_engine.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    assert strata_engine.gpu_backend() == "cuda"  # even on a laptop that also has an Intel iGPU
+    monkeypatch.setattr(strata_engine.shutil, "which", lambda name: None)
+
+    # Linux: the DRM devices carry the vendor id
+    monkeypatch.setattr(strata_engine.os, "name", "posix")
+    monkeypatch.setattr(strata_engine, "_DRM_DEVICES", tmp_path)
+    amd = tmp_path / "card0" / "device"
+    amd.mkdir(parents=True)
+    (amd / "vendor").write_text("0x1002\n")
+    assert strata_engine.gpu_backend() is None  # an AMD card: neither NVIDIA nor Intel
+    intel = tmp_path / "card1" / "device"
+    intel.mkdir(parents=True)
+    (intel / "vendor").write_text("0x8086\n")
+    assert strata_engine.gpu_backend() == "sycl"
+
+    # Windows: no DRM devices, so the display class registry answers instead
+    monkeypatch.setattr(strata_engine.os, "name", "nt")
+    monkeypatch.setattr(strata_engine, "_intel_gpu_windows", lambda: True)
+    assert strata_engine.gpu_backend() == "sycl"
+    monkeypatch.setattr(strata_engine, "_intel_gpu_windows", lambda: False)
+    assert strata_engine.gpu_backend() is None
+
+
+# ------------------------------------------------------------- what the engine can do
+def test_whether_the_engine_sleeps_comes_from_its_build(tmp_path, monkeypatch):
+    engine = tmp_path / "engine" / "strata"
+    engine.parent.mkdir()
+    engine.write_bytes(b"nothing to see")
+    monkeypatch.setattr(strata_engine, "STRATA_ENGINE_BINARY", str(engine))
+    build = engine.parent / "BUILD.json"
+
+    build.write_text(json.dumps({"backend": "cuda", "sleep_mode": True}))
+    assert strata_engine.engine_sleeps() is True
+    assert strata_engine.engine_backend() == "cuda"
+
+    build.write_text(json.dumps({"backend": "sycl", "sleep_mode": False}))
+    assert strata_engine.engine_sleeps() is False
+    assert strata_engine.engine_backend() == "sycl"
+
+    # a package from before BUILD.json carried the field: the flag's name is in the binary
+    build.unlink()
+    assert strata_engine.engine_sleeps() is False
+    assert strata_engine.engine_backend() == "cuda"  # the only backend there was
+    engine.write_bytes(b"usage: strata --sleep-mode ...")
+    assert strata_engine.engine_sleeps() is True
+
+
+def test_an_engine_without_deep_sleep_is_not_asked_to_sleep(tmp_path, monkeypatch):
+    engine = tmp_path / "engine" / "strata"
+    engine.parent.mkdir()
+    engine.write_bytes(b"")
+    (engine.parent / "BUILD.json").write_text(json.dumps({"backend": "sycl", "sleep_mode": False}))
+    monkeypatch.setattr(strata_engine, "STRATA_ENGINE_BINARY", str(engine))
+    run = build_run_config(_strata(), SOURCE, "/r/engine.log")
+    assert run["sleep_mode"] is False
+    assert "--sleep-mode" not in run["args"]
+
+
+def test_an_intel_engine_folder_takes_its_gpu_reader(tmp_path, monkeypatch):
+    engine = tmp_path / "engine" / "strata"
+    engine.parent.mkdir()
+    engine.write_bytes(b"")
+    monkeypatch.setattr(strata_engine, "STRATA_ENGINE_BINARY", str(engine))
+    monkeypatch.setattr(strata_engine, "STRATA_VISION_BINARY", "")
+    suffix = ".exe" if os.name == "nt" else ""
+    (engine.parent / "BUILD.json").write_text(json.dumps({"backend": "sycl", "sleep_mode": False}))
+    cpu_reader = engine.parent / f"strata-vision{suffix}"
+    cpu_reader.write_text("")
+    assert strata_engine.vision_binary() == cpu_reader  # the only one there
+    gpu_reader = engine.parent / f"strata-vision-sycl{suffix}"
+    gpu_reader.write_text("")
+    assert strata_engine.vision_binary() == gpu_reader
+    # a CUDA folder has one file for both, so nothing changes there
+    (engine.parent / "BUILD.json").write_text(json.dumps({"backend": "cuda", "sleep_mode": True}))
+    assert strata_engine.vision_binary() == cpu_reader
 
 
 def test_setup_problem_names_what_is_missing(monkeypatch, checkout):
@@ -120,14 +238,15 @@ def test_setup_problem_names_what_is_missing(monkeypatch, checkout):
     monkeypatch.setattr(strata_engine, "STRATA_PYTHON", "")
     monkeypatch.setattr(strata_engine, "STRATA_ENGINE_BINARY", "/nowhere/strata")
     assert "STRATA_ENGINE_BINARY" in strata_engine.strata_setup_problem()
-    # never the run config's own executable: Strata's setup builds it without deep sleep
+    # never the run config's own executable: Strata's setup installs one without deep sleep
     monkeypatch.setattr(strata_engine, "STRATA_ENGINE_BINARY", "")
-    assert "deep sleep" in strata_engine.strata_setup_problem()
+    assert "STRATA_ENGINE_BINARY" in strata_engine.strata_setup_problem()
 
 
 # ------------------------------------------------------------------- run config
 def test_run_config_applies_only_what_the_load_owns(monkeypatch):
     monkeypatch.setattr(strata_engine, "STRATA_ENGINE_BINARY", "/opt/sleep/strata")
+    monkeypatch.setattr(strata_engine, "engine_sleeps", lambda: True)
     run = build_run_config(
         _strata(strata_max_context=262144), SOURCE, "/r/engine.log", vram_reserve_mib=1200
     )
@@ -146,10 +265,11 @@ def test_run_config_applies_only_what_the_load_owns(monkeypatch):
 
 def test_run_config_keeps_the_source_values_by_default(monkeypatch):
     monkeypatch.setattr(strata_engine, "STRATA_ENGINE_BINARY", "/opt/sleep/strata")
+    monkeypatch.setattr(strata_engine, "engine_sleeps", lambda: True)
     run = build_run_config(_strata(), SOURCE, "/r/engine.log")
     assert run["args"][run["args"].index("--max-context") + 1] == "65536"
     assert run["args"][run["args"].index("--vram-reserve-mib") + 1] == "8150"
-    assert run["sleep_mode"] is True  # always: there is no switch for it
+    assert run["sleep_mode"] is True  # on wherever the engine has it (engine_sleeps)
 
 
 def test_extra_args_replace_the_run_configs_flags_or_add_them(monkeypatch):
@@ -598,7 +718,7 @@ def test_endpoint_is_the_managed_loopback_server():
 
 # --------------------------------------------------------------------- sleeping
 @pytest.fixture
-def control(monkeypatch):
+def control(monkeypatch, checkout):
     """A loaded Strata model whose control routes record every call."""
     calls: list[str] = []
     state = {"fail_wake": False, "strata_says_sleeping": True}

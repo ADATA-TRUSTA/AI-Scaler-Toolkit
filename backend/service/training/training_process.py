@@ -602,6 +602,64 @@ def _convert_training_output_to_q4_k_m(
     return result
 
 
+def _finish_with_gguf_export(
+    training_config: TrainingConfig,
+    *,
+    writer: JobLogWriter,
+    status_q: Queue,
+    emit_stage: Callable[[str, str | None], None],
+) -> None:
+    """
+    Export the saved output to GGUF and record how the job ended.
+
+    Shared by the single- and multi-GPU paths, which each used to carry a copy: only
+    the multi-GPU one caught a failed export, so a single-GPU run whose weights were
+    already saved fell through to the generic handler and read as a failed training.
+    The job still ends in ``error`` -- no GGUF was produced -- but the message says the
+    weights are there and what to run instead of training again.
+    """
+    conv_phase = {
+        "merge fine-tune": Phase.MERGING_LORA,
+        "convert to gguf": Phase.CONVERTING_GGUF,
+    }
+
+    def _on_step(step: str) -> None:
+        emit_stage(conv_phase.get(step, Phase.CONVERTING_GGUF), step)
+
+    try:
+        conversion_result = _convert_training_output_to_q4_k_m(
+            training_config, status_callback=_on_step
+        )
+    except Exception as conv_err:
+        logger.exception(
+            f"[TrainingWorker] GGUF conversion failed after a successful run: {conv_err}"
+        )
+        conv_error = (
+            f"Training finished and the weights were saved to "
+            f"{training_config.output_dir}, but GGUF conversion failed: "
+            f"{conv_err}. Do not retrain -- convert the saved output with "
+            f"POST /config/models/convert."
+        )
+        import traceback
+
+        writer.error(conv_error, traceback=traceback.format_exc())
+        # finalize() is what writes the terminal status and finished_at into
+        # meta.json; writer.error() only updates the live Redis key. Without it the
+        # durable record keeps saying the job is running after Redis has expired.
+        writer.finalize(Phase.ERROR)
+        status_q.put({"status": "error", "error": conv_error})
+        return
+
+    emit_stage(Phase.COMPLETED, None)
+    completed_result = {
+        "gguf_path": conversion_result.get("quantized_output_path"),
+        "gguf_quantization": conversion_result.get("quantization_type"),
+        "mmproj_path": conversion_result.get("mmproj_output_path"),
+    }
+    writer.finalize(Phase.COMPLETED, result=completed_result)
+    status_q.put({"status": "completed", **completed_result})
+
+
 # Prefix rank 0 uses to embed structured status inside stdout.
 _DS_STATUS_PREFIX = "__STATUS__:"
 # Terminal states that are also written to Redis as crash-safe backup.
@@ -1195,55 +1253,12 @@ def _training_worker_process(
                             "[TrainingWorker] Multi-GPU training done. Starting GGUF Q4_K_M conversion..."
                         )
 
-                        _conv_phase = {
-                            "merge fine-tune": Phase.MERGING_LORA,
-                            "convert to gguf": Phase.CONVERTING_GGUF,
-                        }
-
-                        def _cb_multi(
-                            step: str, *, _conv_phase: dict[str, str] = _conv_phase
-                        ) -> None:
-                            _emit_stage(_conv_phase.get(step, Phase.CONVERTING_GGUF), step)
-
-                        try:
-                            conversion_result = _convert_training_output_to_q4_k_m(
-                                training_config, status_callback=_cb_multi
-                            )
-                        except Exception as conv_err:
-                            # The trained weights are already on disk -- only the GGUF
-                            # export failed. Say so, and say what to run, because the
-                            # alternative a user reaches for is training it all again.
-                            logger.exception(
-                                f"[TrainingWorker] GGUF conversion failed after a successful "
-                                f"multi-GPU run: {conv_err}"
-                            )
-                            _conv_error = (
-                                f"Training finished and the weights were saved to "
-                                f"{training_config.output_dir}, but GGUF conversion failed: "
-                                f"{conv_err}. Do not retrain -- convert the saved output with "
-                                f"POST /config/models/convert."
-                            )
-                            import traceback
-
-                            writer.error(_conv_error, traceback=traceback.format_exc())
-                            # finalize() is what writes the terminal status and
-                            # finished_at into meta.json; writer.error() only
-                            # updates the live Redis key, and close() in the
-                            # `finally` just closes handles. Without this the
-                            # durable record keeps saying the job is running long
-                            # after Redis has expired -- which is what every other
-                            # terminal path here avoids by pairing the two calls.
-                            writer.finalize(Phase.ERROR)
-                            status_q.put({"status": "error", "error": _conv_error})
-                            return
-                        _emit_stage(Phase.COMPLETED)
-                        _completed_result = {
-                            "gguf_path": conversion_result.get("quantized_output_path"),
-                            "gguf_quantization": conversion_result.get("quantization_type"),
-                            "mmproj_path": conversion_result.get("mmproj_output_path"),
-                        }
-                        writer.finalize(Phase.COMPLETED, result=_completed_result)
-                        status_q.put({"status": "completed", **_completed_result})
+                        _finish_with_gguf_export(
+                            training_config,
+                            writer=writer,
+                            status_q=status_q,
+                            emit_stage=_emit_stage,
+                        )
                         logger.info(
                             "[TrainingWorker] Multi-GPU training completed, exiting worker process..."
                         )
@@ -1516,28 +1531,12 @@ def _training_worker_process(
                     logger.info(
                         "[TrainingWorker] Saved training artifacts. Starting GGUF Q4_K_M conversion..."
                     )
-                    _conv_phase = {
-                        "merge fine-tune": Phase.MERGING_LORA,
-                        "convert to gguf": Phase.CONVERTING_GGUF,
-                    }
-
-                    def conversion_callback(
-                        step: str, *, _conv_phase: dict[str, str] = _conv_phase
-                    ) -> None:
-                        _emit_stage(_conv_phase.get(step, Phase.CONVERTING_GGUF), step)
-
-                    conversion_result = _convert_training_output_to_q4_k_m(
-                        training_config, status_callback=conversion_callback
+                    _finish_with_gguf_export(
+                        training_config,
+                        writer=writer,
+                        status_q=status_q,
+                        emit_stage=_emit_stage,
                     )
-
-                    _emit_stage(Phase.COMPLETED)
-                    _completed_result = {
-                        "gguf_path": conversion_result.get("quantized_output_path"),
-                        "gguf_quantization": conversion_result.get("quantization_type"),
-                        "mmproj_path": conversion_result.get("mmproj_output_path"),
-                    }
-                    writer.finalize(Phase.COMPLETED, result=_completed_result)
-                    status_q.put({"status": "completed", **_completed_result})
 
                     # Training finished — exit worker process to fully release resources.
                     logger.info(

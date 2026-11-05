@@ -67,6 +67,33 @@ def test_training_start_returns_current_contract(monkeypatch):
     assert captured["config"].model_name == "demo-model"
 
 
+def test_training_start_warns_when_an_inference_model_is_loaded(monkeypatch):
+    monkeypatch.setattr(app_module.model_manager, "is_loaded", lambda: True)
+    monkeypatch.setattr(
+        app_module.training_manager, "start_training", lambda config: {"job_id": "train-123"}
+    )
+
+    response = client.post("/training/start", json=_training_payload())
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert len(data["warnings"]) == 1
+    assert "inference model is loaded" in data["warnings"][0]
+
+
+def test_training_start_has_no_warnings_key_when_nothing_is_loaded(monkeypatch):
+    monkeypatch.setattr(app_module.model_manager, "is_loaded", lambda: False)
+    monkeypatch.setattr(
+        app_module.training_manager, "start_training", lambda config: {"job_id": "train-123"}
+    )
+
+    response = client.post("/training/start", json=_training_payload())
+
+    assert response.status_code == 200
+    assert "warnings" not in response.json()
+
+
 def test_training_start_accepts_num_gpu_alias(monkeypatch):
     captured = {}
 

@@ -427,6 +427,7 @@
                     <p><strong>行為:</strong> 同步驗證 + 非同步訓練。</p>
                     <p>傳入完整 <code>TrainingConfig</code>，驗證通過後立即返回 <code>session_id</code>。實際訓練在 Worker Process 背景執行。</p>
                     <p><strong>注意：</strong> <code>output_dir</code> 非空會被拒絕，但屬於<em>非同步</em>行為。<code>POST /training/start</code> 一律回傳 200 與 <code>session_id</code>；檢查在 worker 內執行，失敗會透過 <code>/training/status</code> 與 job log 浮現。</p>
+                    <p><strong>警告：</strong> 若已載入推論模型，訓練仍會開始，但回應會帶 <code>warnings</code> 清單，說明兩者共用 GPU。單張 16 GB 的卡通常會因此記憶體不足，請先卸載推論模型。沒有警告時不會有這個鍵。</p>
                 </div>
 
                 <div class="card">
@@ -1023,9 +1024,10 @@ CUDA_VISIBLE_DEVICES=0        # 強制使用 GPU 0（防止多 GPU PEFT 問題�
 {
   "finetuned_models": [
     {
+      "model_name": "Qwen/Qwen3-4B",
+      "model_path": "./output/my_model_v1",
+      "model_type": "finetuned",
       "label": "my_model_v1",
-      "output_dir": "./output/my_model_v1",
-      "base_model": "Qwen/Qwen3-4B",
       "method": "lora",
       ...
     }
@@ -1094,6 +1096,7 @@ CUDA_VISIBLE_DEVICES=0        # 強制使用 GPU 0（防止多 GPU PEFT 問題�
                     <li>確認已安裝 llama.cpp 相依套件。</li>
                     <li>確認 <code>output_dir</code> 所在磁碟有足夠空間（原模型大小的 3-4 倍）。</li>
                     <li>HF 格式模型仍存在於 <code>output_dir</code>，可用 Transformers 引擎加載。</li>
+                    <li>不要重新訓練：排除原因後，用 <code>POST /config/models/convert</code> 轉換已存檔的輸出。job 的終止狀態是 <code>error</code>（沒有產出 GGUF），錯誤訊息會寫出權重所在的 <code>output_dir</code>，單 GPU 與多 GPU 皆同。</li>
                 </ul>
             </div>
 

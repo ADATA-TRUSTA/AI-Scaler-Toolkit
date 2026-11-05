@@ -267,6 +267,7 @@ class ModelRegistry:
         {
             "model_name": "base_model_name",
             "model_path": "...",
+            "model_type": "base" | "finetuned" | "llama_gguf",
             "label": "label",
             "size": "size",
             "max_context_length": "max_context_length"
@@ -298,6 +299,9 @@ class ModelRegistry:
         return {
             "model_name": base_model_name,
             "model_path": model_path,
+            # Which list the entry is in, on the entry itself. A base model has a
+            # model_path too (its snapshot), so "has a path" does not mean fine-tuned.
+            "model_type": dict(self._SECTIONS).get(model_type),
             "label": item.get("label"),
             "size": item.get("size"),
             "method": item.get("method"),  # only for finetuned_models

@@ -1,11 +1,15 @@
 # Install the Strata engine (engine="strata") from a strata-sleep package and record it in .env.
 #
-# The Windows twin of scripts/linux/install_strata.sh. The backend always starts Strata with
-# --sleep-mode, which only the deep-sleep build has; that build comes as a package
-# (TRUSTA-SW-FAE/strata-sleep releases: the engine already compiled, plus Strata's Python
-# side), so nothing is cloned or compiled here and no git credentials are needed. This unpacks
-# the package, checks it against its own manifest, makes its venv, runs Strata's setup (which
-# installs the model and writes its run config) and refuses an engine that has no deep sleep.
+# The Windows twin of scripts/linux/install_strata.sh. The backend starts the engine this
+# installs, not the one Strata's own setup would download: that one has no deep sleep. The build
+# comes as a package (TRUSTA-SW-FAE/strata-sleep releases: the engine already compiled, its
+# picture reader, plus Strata's Python side), so nothing is cloned or compiled here and no git
+# credentials are needed. This unpacks the package, checks it against its own manifest, makes its
+# venv, runs Strata's setup (which installs the model and writes its run config) and checks the
+# engine is the package's own. Which backend it is and whether it sleeps are the package's to
+# say (SLEEP.json "backend" and "sleep_mode"): the CUDA package sleeps, the Intel one does not,
+# Level Zero having no driver virtual memory, and the default picks the CUDA package unless
+# TRUSTA_STRATA_PACKAGE names another.
 # setup_env.ps1 runs it when TRUSTA_SETUP_STRATA=1; run it alone to install or update Strata later.
 #
 # Usage:
@@ -14,7 +18,8 @@
 #
 #   TRUSTA_STRATA_PACKAGE     the package: its .zip or the folder it unpacks to (default: the
 #                             newest vendor\strata-sleep-*-windows-x86_64.zip in this repository,
-#                             where the installer's payload carries it)
+#                             where the installer's payload carries it. That pattern is the CUDA
+#                             package: the Intel one ends in -sycl.zip, so name it here)
 #   TRUSTA_STRATA_DIR         where it is installed (default: strata\ beside this repository)
 #   TRUSTA_STRATA_SETUP_ARGS  passed to Strata's setup as they are (default: --model IQ3_XXS,
 #                             which downloads about 76 GB unless --gguf-dir names the files)
@@ -118,26 +123,59 @@ if (-not (Test-Path -LiteralPath $python)) {
     if ($LASTEXITCODE -ne 0) { Die "could not make Strata's venv" }
 }
 
+# What the package says about itself: the backend it was built for, and whether it sleeps.
+$pkgSleeps = $true
+$pkgBackend = "cuda"
+try {
+    $sleepJson = Get-Content -LiteralPath (Join-Path $strataDir "SLEEP.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($null -ne $sleepJson.sleep_mode) { $pkgSleeps = [bool]$sleepJson.sleep_mode }
+    if ($sleepJson.backend) { $pkgBackend = [string]$sleepJson.backend }
+} catch { }
+
+# Strata's setup looks at the machine's cards to decide which backend to use, so a package that
+# is not the CUDA one says so on setup's command line. The Intel path is sycl\setup_intel.py,
+# which that package carries and which patch 0006 taught to use a packaged engine.
+$backendArgs = @()
+switch ($pkgBackend) {
+    "cuda" { }
+    "sycl" {
+        if (-not (Test-Path -LiteralPath (Join-Path $strataDir "sycl\setup_intel.py"))) {
+            Die "$package says backend 'sycl' but carries no sycl\setup_intel.py, which Strata's setup hands over to. Nothing was recorded in .env."
+        }
+        $backendArgs = @("--backend", "sycl")
+    }
+    default {
+        Die "$package is a '$pkgBackend' package, which this script does not know how to install. Nothing was recorded in .env."
+    }
+}
+
 # The package's engine\ is the ready-made engine setup takes as installed. --no-start: the
-# backend starts it, not setup. --vision no: the package has no image encoder.
+# backend starts it, not setup. --vision no: the package carries the picture reader ready-made
+# and the backend points a load at it (STRATA_VISION_BINARY, else beside the engine); with
+# vision on, setup would compile one of its own and could replace the engine.
 $extra = @($setupArgs -split '\s+' | Where-Object { $_ })
 if ($env:TRUSTA_STRATA_GGUF_DIR) { $extra += @("--gguf-dir", $env:TRUSTA_STRATA_GGUF_DIR) }
 if ($env:TRUSTA_STRATA_DATA_DIR) { $extra += @("--data-dir", $env:TRUSTA_STRATA_DATA_DIR, "--set-default-data-dir") }
-Write-Host "$script:LogTag running Strata's setup: --yes --no-start --vision no $($extra -join ' ')"
+Write-Host "$script:LogTag running Strata's setup: --yes --no-start --vision no $($backendArgs -join ' ') $($extra -join ' ')"
 Push-Location $strataDir
-try { & $python setup.py --yes --no-start --vision no @extra; $setupExit = $LASTEXITCODE }
+try { & $python setup.py --yes --no-start --vision no @backendArgs @extra; $setupExit = $LASTEXITCODE }
 finally { Pop-Location }
 if ($setupExit -ne 0) { Die "Strata's setup failed (see above). Nothing was recorded in .env." }
 
 $engine = Join-Path $strataDir "engine\strata.exe"
 if (-not (Test-Path -LiteralPath $engine)) { Die "Strata's setup finished but left no engine at $engine" }
-# The flag's name is in the binary of every build that parses it, and in no other: the
-# ready-made upstream engine has none, and the backend would fail to start it.
-$flag = [System.Text.Encoding]::ASCII.GetBytes("--sleep-mode")
-$bytes = [System.IO.File]::ReadAllBytes($engine)
-$text = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
-if ($text.IndexOf([System.Text.Encoding]::GetEncoding(28591).GetString($flag), [System.StringComparison]::Ordinal) -lt 0) {
-    Die "$engine has no deep sleep (--sleep-mode): it is not a strata-sleep engine. Nothing was recorded in .env."
+# A package that promises deep sleep must have it: the flag's name is in the binary of every
+# build that parses it and in no other, so this catches setup having put its own ready-made
+# engine here instead. A package that says it does not sleep is not asked to.
+if ($pkgSleeps) {
+    $flag = [System.Text.Encoding]::ASCII.GetBytes("--sleep-mode")
+    $bytes = [System.IO.File]::ReadAllBytes($engine)
+    $text = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
+    if ($text.IndexOf([System.Text.Encoding]::GetEncoding(28591).GetString($flag), [System.StringComparison]::Ordinal) -lt 0) {
+        Die "$engine has no deep sleep (--sleep-mode) although the package says it does: it is not a strata-sleep engine. Nothing was recorded in .env."
+    }
+} else {
+    Write-Host "$script:LogTag note: this engine has no deep sleep; the backend will not ask it to sleep"
 }
 
 Save-EnvSetting -Key "STRATA_HOME" -Resolved $strataDir
