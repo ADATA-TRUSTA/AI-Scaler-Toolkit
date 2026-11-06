@@ -35,9 +35,13 @@ PADDING = 0.06
 
 # Preferred source per brand, largest first: the more pixels to resample from, the
 # cleaner every entry below 256.
+#
+# ast-app-icon.png is the application's own mark and takes precedence over the brand
+# logos: the .ico and the setup window's mark are the application, while the brand
+# files stay what the READMEs and the rest of the artwork use.
 SOURCES: dict[str, tuple[str, ...]] = {
-    "trusta": ("trusta-icon-1024.png", "trusta-icon--512.png", "trusta-icon-256.png",
-               "trusta-icon.png"),
+    "trusta": ("ast-app-icon.png", "trusta-icon-1024.png", "trusta-icon--512.png",
+               "trusta-icon-256.png", "trusta-icon.png"),
     "adata": ("adata-icon-1024.png", "adata-icon-512.png", "adata-icon.png"),
 }
 
