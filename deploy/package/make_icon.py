@@ -33,15 +33,16 @@ SIZES: tuple[int, ...] = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 # do run to the edge, so the margin is added here rather than assumed.
 PADDING = 0.06
 
-# Preferred source per brand, largest first: the more pixels to resample from, the
-# cleaner every entry below 256.
+# Preferred source per brand, best first; only the first one found is used, and every
+# entry in the .ico is resampled from it. A source whose square canvas comes out under
+# 256px makes the largest entry an upscale, which build() warns about.
 #
-# ast-app-icon.png is the application's own mark and takes precedence over the brand
-# logos: the .ico and the setup window's mark are the application, while the brand
-# files stay what the READMEs and the rest of the artwork use.
+# ast-app-icon.png is the application's own mark and comes first: the .ico and the
+# setup window's mark are the application, while the brand logos stay what the READMEs
+# and the rest of the artwork use. The brand file is the fallback for a checkout where
+# the mark is missing.
 SOURCES: dict[str, tuple[str, ...]] = {
-    "trusta": ("ast-app-icon.png", "trusta-icon-1024.png", "trusta-icon--512.png",
-               "trusta-icon-256.png", "trusta-icon.png"),
+    "trusta": ("ast-app-icon.png", "trusta-icon.png"),
     "adata": ("adata-icon-1024.png", "adata-icon-512.png", "adata-icon.png"),
 }
 
