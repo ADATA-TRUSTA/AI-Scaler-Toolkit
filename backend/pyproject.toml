@@ -55,7 +55,7 @@ description = "Add your description here"
 name = "service"
 readme = "README.md"
 requires-python = ">=3.12"
-version = "0.5.0"
+version = "0.5.1"
 
 [project.optional-dependencies]
 # RAG with Chroma as the vector store (RAG_BACKEND=chroma); without it RAG stays on SQLite.

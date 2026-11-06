@@ -489,6 +489,13 @@ def prepare_model(gguf_path: str) -> Path:
             env["TRUSTA_STRATA_DATA_DIR"] = str(Path(STRATA_DATA_DIR).expanduser())  # likewise
         if STRATA_INSTALL_DIR.strip():
             env["TRUSTA_STRATA_DIR"] = STRATA_INSTALL_DIR
+        # The script picks a package by itself with a glob that matches only a CUDA archive,
+        # so on an Intel host it would find none (vendor/ has only the -sycl one) or take the
+        # CUDA one beside it. Hand it the package strata_installable() just checked for. A
+        # package someone named in the environment is theirs to choose, and is left alone.
+        package = strata_package()
+        if package is not None:
+            env.setdefault("TRUSTA_STRATA_PACKAGE", str(package))
         script = str(_install_script())
         cmd = (
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]

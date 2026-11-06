@@ -609,6 +609,62 @@ def test_the_first_load_installs_strata_from_the_package(tmp_path, monkeypatch):
     assert strata_engine.strata_setup_problem() is None
 
 
+def _vendor_with_both_packages(tmp_path):
+    """A project whose vendor/ holds the CUDA package and the Intel one, as the release ships them."""
+    project = tmp_path / "project"
+    (project / "vendor").mkdir(parents=True)
+    platform, ext = ("windows-x86_64", "zip") if os.name == "nt" else ("linux-x86_64", "tar.gz")
+    cuda = project / "vendor" / f"strata-sleep-0.2.7-sleep.3-{platform}.{ext}"
+    sycl = project / "vendor" / f"strata-sleep-0.2.7-sleep.3-{platform}-sycl.{ext}"
+    cuda.write_text("")
+    sycl.write_text("")
+    return project, cuda, sycl
+
+
+def _first_load_environment(tmp_path, monkeypatch, backend):
+    """The environment the first load hands install_strata, on a host whose GPU is `backend`."""
+    gguf = _gguf(tmp_path)
+    project, cuda, sycl = _vendor_with_both_packages(tmp_path)
+    monkeypatch.setattr(strata_engine, "PROJECT_ROOT", project)
+    monkeypatch.setattr(strata_engine, "STRATA_INSTALL_DIR", str(tmp_path / "strata"))
+    for key in ("STRATA_HOME", "STRATA_PYTHON", "STRATA_ENGINE_BINARY"):
+        monkeypatch.setattr(strata_engine, key, "")
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(strata_engine, "gpu_backend", lambda: backend)
+    monkeypatch.setattr(strata_engine, "strata_installable", lambda: True)
+    seen: dict = {}
+
+    def capture(cmd, cwd, env):
+        seen["env"] = env
+        raise RuntimeError("stopped before the install ran")
+
+    monkeypatch.setattr(strata_engine, "_run_setup_step", capture)
+    with pytest.raises(RuntimeError, match="stopped before the install ran"):
+        strata_engine.prepare_model(str(gguf))
+    return seen["env"], cuda, sycl
+
+
+@pytest.mark.parametrize("backend", ["cuda", "sycl"])
+def test_the_install_script_is_handed_the_package_this_gpu_needs(tmp_path, monkeypatch, backend):
+    """install_strata chooses a package itself, by a glob that matches only a CUDA archive.
+
+    With both packages in vendor/ (which is how the release ships them) an Intel host would be
+    given the CUDA one, and with only the Intel one the script would find nothing. The package
+    strata_installable() found is passed on, so what was checked is what is installed.
+    """
+    monkeypatch.delenv("TRUSTA_STRATA_PACKAGE", raising=False)
+    env, cuda, sycl = _first_load_environment(tmp_path, monkeypatch, backend)
+    assert env["TRUSTA_STRATA_PACKAGE"] == str(sycl if backend == "sycl" else cuda)
+
+
+def test_a_package_named_in_the_environment_is_kept(tmp_path, monkeypatch):
+    """Someone who set TRUSTA_STRATA_PACKAGE chose a package; the first load does not overrule it."""
+    chosen = tmp_path / "mine.tar.gz"
+    monkeypatch.setenv("TRUSTA_STRATA_PACKAGE", str(chosen))
+    env, _cuda, _sycl = _first_load_environment(tmp_path, monkeypatch, "sycl")
+    assert env["TRUSTA_STRATA_PACKAGE"] == str(chosen)
+
+
 def test_a_failed_setup_reports_its_output(checkout, tmp_path, monkeypatch):
     gguf = _gguf(tmp_path)
     script = tmp_path / "fail.py"
