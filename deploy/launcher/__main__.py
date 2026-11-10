@@ -1989,6 +1989,13 @@ def headless() -> int:
         log.exception("headless: setup failed")
         return 3
 
+    # The menu entry and icon, as the windowed start writes them. A machine with a
+    # desktop but installed through --headless would otherwise have neither until the
+    # first windowed launch. ensure() skips the desktop shortcut where there is no
+    # Desktop directory, and a failure here must not stop the service.
+    with contextlib.suppress(Exception):
+        shortcuts.ensure()
+
     try:
         unanswered_since: float | None = None
         while True:
