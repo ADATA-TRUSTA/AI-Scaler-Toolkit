@@ -607,7 +607,19 @@ def _hermes_python(home: Path) -> Path | None:
     Python is frozen into its executable on Windows."""
     sub = "Scripts/python.exe" if config.IS_WINDOWS else "bin/python"
     candidate = home / "hermes-agent" / "venv" / sub
-    return candidate if candidate.is_file() else None
+    if candidate.is_file():
+        return candidate
+    # Newer Hermes (v0.21 and later) has no venv: it runs the source tree on a Python it
+    # manages itself, under <home>/tools/python-<version>-<platform>/. Looking only for
+    # the venv made the skills fail on those installs with "reinstall Hermes", which
+    # does not help. The newest version wins when an upgrade left an older one behind.
+    flat = "python.exe" if config.IS_WINDOWS else "bin/python"
+    with contextlib.suppress(OSError):
+        managed = sorted((home / "tools").glob("python-*"), reverse=True)
+        for directory in managed:
+            if (directory / flat).is_file():
+                return directory / flat
+    return None
 
 
 def _skills_version(pack: Path) -> str:
@@ -661,7 +673,8 @@ def install_skills(out: Progress) -> bool:
     home = _hermes_home()
     python = _hermes_python(home)
     if python is None:
-        out.note(f"Hermes has no Python environment at {home / 'hermes-agent' / 'venv'}. "
+        out.note(f"Hermes has no Python environment: neither {home / 'hermes-agent' / 'venv'} "
+                 f"nor a python-* directory under {home / 'tools'}. "
                  "Reinstall Hermes, then install the skills again.")
         return False
 
