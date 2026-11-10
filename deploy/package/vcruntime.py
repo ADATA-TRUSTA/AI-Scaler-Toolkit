@@ -122,9 +122,9 @@ _VS_ROOTS = (
 
 INSTALL_HINT = f"""The Visual C++ runtime {CRT_VERSION} could not be obtained.
 
-It ships with Visual Studio or Build Tools {TOOLSET}:
+It ships as redist {TOOLSET} with Visual Studio or Build Tools 2022, and with 2026 as its v143 (14.44) component:
 
-  winget install Microsoft.VisualStudio.2022.BuildTools
+  winget install Microsoft.VisualStudio.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --add Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64"
 
 Without it this downloads Microsoft's own copy, so reaching this means the download
 failed too -- an offline build machine, or a proxy in the way. Either install the
