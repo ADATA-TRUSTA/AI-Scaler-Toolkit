@@ -11,7 +11,7 @@
 | 平台 | 檔案 | 需求 |
 |----------|------|----------|
 | Windows | `AIScalerToolkit-<版本>-x64-Setup.exe` | Windows 10/11，x64。不需要系統管理員權限 |
-| Linux | `AIScalerToolkit-<版本>-x86_64.AppImage` | x86_64，glibc 2.35 以上（例如 Ubuntu 22.04 以上） |
+| Linux | `AIScalerToolkit-<版本>-x86_64.AppImage` | x86_64，glibc 2.39 以上（例如 Ubuntu 24.04 以上） |
 
 **GPU**：NVIDIA 需要 compute capability 7.5 以上（RTX 20、GTX 16 系列以後）以及 R580 以上的驅動；Intel Arc 與內顯也可以。只有 x64／x86_64 版本，沒有 ARM 版。
 

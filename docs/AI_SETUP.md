@@ -26,7 +26,7 @@ Work through the steps in order. Tell the user what you are doing in plain words
 
 | What | Windows (PowerShell) | Linux |
 | --- | --- | --- |
-| OS and architecture | `[Environment]::OSVersion; $env:PROCESSOR_ARCHITECTURE` (must be AMD64) | `cat /etc/os-release; uname -m` (must be x86_64); `ldd --version` (glibc 2.35 or newer) |
+| OS and architecture | `[Environment]::OSVersion; $env:PROCESSOR_ARCHITECTURE` (must be AMD64) | `cat /etc/os-release; uname -m` (must be x86_64); `ldd --version` (glibc 2.39 or newer) |
 | NVIDIA GPU and driver | `nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv` | the same |
 | Intel GPU | `Get-CimInstance Win32_VideoController \| Select-Object Name` | `lspci \| grep -i -E 'vga\|display'` |
 | RAM | `(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB` | `free -g` |

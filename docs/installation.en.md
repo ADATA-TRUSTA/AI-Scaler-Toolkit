@@ -11,7 +11,7 @@ Download the file for your platform from the GitHub [Releases](https://github.co
 | Platform | File | Requires |
 |----------|------|----------|
 | Windows | `AIScalerToolkit-<version>-x64-Setup.exe` | Windows 10/11, x64. No administrator rights needed |
-| Linux | `AIScalerToolkit-<version>-x86_64.AppImage` | x86_64, glibc 2.35 or newer (Ubuntu 22.04 or newer, for example) |
+| Linux | `AIScalerToolkit-<version>-x86_64.AppImage` | x86_64, glibc 2.39 or newer (Ubuntu 24.04 or newer, for example) |
 
 **GPU**: NVIDIA needs compute capability 7.5 or newer (RTX 20, GTX 16 series and later) and an R580 or newer driver; Intel Arc and iGPUs work too. Only x64/x86_64 builds exist; there is no ARM build.
 

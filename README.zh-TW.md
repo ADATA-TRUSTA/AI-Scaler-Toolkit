@@ -44,7 +44,7 @@ Install AI Scaler Toolkit on this PC for me: https://github.com/ADATA-TRUSTA/AI-
 | 平台 | 檔案 | 接著 |
 |---|---|---|
 | Windows 10/11（x64） | `AIScalerToolkit-<版本>-x64-Setup.exe` | 執行它。不需要系統管理員權限 |
-| Linux（x86_64，Ubuntu 22.04 以上） | `AIScalerToolkit-<版本>-x86_64.AppImage` | `chmod +x` 後執行 |
+| Linux（x86_64，Ubuntu 24.04 以上） | `AIScalerToolkit-<版本>-x86_64.AppImage` | `chmod +x` 後執行 |
 
 **需要**：compute capability 7.5 以上的 NVIDIA GPU（RTX 20／GTX 16 系列以後）與 580 以上的驅動，或 Intel Arc 顯示卡、Intel 內顯；以及約 20 GB 的磁碟空間。Linux 上用較新的 Intel GPU 時，要先加入 Intel 的顯示套件來源（[說明](docs/installation.md#linux)）。
 

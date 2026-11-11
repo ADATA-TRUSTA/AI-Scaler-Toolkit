@@ -4,12 +4,12 @@
 #
 # Runs on the same machine as the Windows build, through WSL2 -- WSL2 has a real
 # kernel so FUSE works, and no second host or paid container runtime is needed. It
-# works just as well on a native Linux runner or inside an ubuntu:22.04 container.
+# works just as well on a native Linux runner or inside an ubuntu:24.04 container.
 #
-# The distribution matters and is not interchangeable. Ubuntu 22.04 ships glibc 2.35,
-# and the glibc of the build host is the AppImage's compatibility floor: one built on
-# 24.04 (glibc 2.39) will not start on older systems, which is most of the ones this
-# is meant to reach. 22.04 also matches what the official llama CUDA prebuilds expect.
+# The distribution matters and is not interchangeable. Ubuntu 24.04 ships glibc 2.39,
+# and the glibc of the build host is the AppImage's compatibility floor: one built here
+# will not start on older systems (Ubuntu 22.04 has 2.35, Debian 12 has 2.36). 24.04 is
+# the oldest release this supports; it was 22.04 until this was raised.
 #
 # Only the official appimagetool is used. linuxdeploy exists to collect a C++ shared
 # library tree, which a payload of Python and data files does not have, so it would be
@@ -72,11 +72,11 @@ check_glibc() {
   log "build host glibc: $version"
   # Louder than a comment: building on a newer glibc produces a binary that fails to
   # start on older systems, and it fails at launch on the user's machine, not here.
-  if [[ "$(printf '%s\n2.35\n' "$version" | sort -V | head -1)" != "2.35" ]]; then
-    log "WARNING: glibc $version is older than the expected 2.35 floor"
-  elif [[ "$version" != "2.35" ]]; then
-    log "WARNING: glibc $version is newer than 2.35 -- the AppImage will not run on older systems."
-    log "         Build inside ubuntu:22.04 (container or WSL distribution) instead."
+  if [[ "$(printf '%s\n2.39\n' "$version" | sort -V | head -1)" != "2.39" ]]; then
+    log "WARNING: glibc $version is older than the expected 2.39 floor"
+  elif [[ "$version" != "2.39" ]]; then
+    log "WARNING: glibc $version is newer than 2.39 -- the AppImage will not run on 24.04."
+    log "         Build inside ubuntu:24.04 (container or WSL distribution) instead."
   fi
 }
 
@@ -124,8 +124,8 @@ fetch_appimagetool() {
 #
 # With hashes, now that they can be. They used to be stripped and the comment here used
 # to claim a version parity that did not exist: AppRun installed into whatever
-# /usr/bin/python3 was, 3.12 on Ubuntu 24.04 and 3.10 on the 22.04 this build's glibc
-# floor targets, and uv resolved whatever fitted. Hashes made that fail rather than
+# /usr/bin/python3 was, 3.12 on Ubuntu 24.04 and 3.10 on 22.04 (no longer supported here),
+# and uv resolved whatever fitted. Hashes made that fail rather than
 # diverge quietly -- an artifact listed for one Python, installed under another, falls
 # back to the sdist, and building Pillow on a desktop with no compiler is where it
 # ended. Fixing the interpreter fixes the artifacts, so the hashes can go back in.
@@ -141,15 +141,15 @@ export_requirements() {
 # PyGObject, built here for the interpreter the AppImage will run, and shipped.
 #
 # This is what makes fixing the interpreter possible at all. gi is an ABI-tagged C
-# extension, so the distribution's own is built for the distribution's Python -- cp310
-# on 22.04, cp312 on 24.04 -- and a uv-managed 3.12 can load 24.04's and not 22.04's.
+# extension, so the distribution's own is built for the distribution's Python -- cp312
+# on 24.04, cp310 on 22.04 -- and a uv-managed 3.12 can load 24.04's and not 22.04's.
 # Building it here instead cuts that tie: the extension links against libglib,
 # libgobject and libgirepository-1.0.so.1 and nothing else, and those are present with a
-# stable ABI on both. Measured: built on 22.04 against glib 2.72, it loads Gtk 3.24 and
+# stable ABI on both. Measured on the earlier 22.04 build (glib 2.72): it loaded Gtk 3.24 and
 # WebKit2 4.1 on 24.04 with glib 2.80.
 #
 # Pinned below 3.52 because that release requires girepository-2.0, which wants glib
-# 2.80 -- newer than the 2.72 on the oldest distribution this supports. The typelibs and
+# 2.80 -- newer than the 2.72 on 22.04, which this build once targeted. Kept as is: lifting it is untested. The typelibs and
 # the libraries themselves still come from the machine, as they always did; only the
 # Python binding is ours.
 GI_PIN="${GI_PIN:-pygobject<3.52}"

@@ -44,7 +44,7 @@ Download the file for your platform from the [latest release](https://github.com
 | Platform | File | Then |
 |---|---|---|
 | Windows 10/11 (x64) | `AIScalerToolkit-<version>-x64-Setup.exe` | Run it. No administrator rights needed |
-| Linux (x86_64, Ubuntu 22.04 or newer) | `AIScalerToolkit-<version>-x86_64.AppImage` | `chmod +x` it and run it |
+| Linux (x86_64, Ubuntu 24.04 or newer) | `AIScalerToolkit-<version>-x86_64.AppImage` | `chmod +x` it and run it |
 
 **You need**: an NVIDIA GPU with compute capability 7.5 or newer (RTX 20 / GTX 16 series and later) and driver 580 or newer, or an Intel Arc GPU or Intel iGPU; and about 20 GB of free disk. On Linux with a recent Intel GPU, add Intel's graphics package source first ([details](docs/installation.en.md#linux)).
 
