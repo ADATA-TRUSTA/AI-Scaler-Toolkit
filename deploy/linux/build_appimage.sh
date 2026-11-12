@@ -169,7 +169,9 @@ build_gi() {
   work="$(mktemp -d)"
   # shellcheck disable=SC2064 - the path is wanted now, not at trap time
   trap "rm -rf '$work'" RETURN
-  uv venv --python "$LAUNCHER_PYTHON" "$work/v" >/dev/null 2>&1 \
+  # only-managed, as AppRun does: a bare "--python 3.12" takes the machine's own 3.12 when it has
+  # one, and Ubuntu 24.04's is 3.12 without Python.h, so pycairo cannot build against it.
+  uv venv --python "$LAUNCHER_PYTHON" --python-preference only-managed "$work/v" >/dev/null 2>&1 \
     || die "could not create a $LAUNCHER_PYTHON environment to build PyGObject in"
   uv pip install --python "$work/v/bin/python" --quiet "$GI_PIN" \
     || die "could not build PyGObject. The dev packages above are the usual cause."
