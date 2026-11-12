@@ -32,8 +32,9 @@ EXPECTED = {
         # native build", docs/INTEL_ARC.md - but strata-sleep builds one (its patches 0007,
         # 0009 and 0010), so a payload may carry it. Optional for the same reason as the
         # Linux one below, and -sycl is last in the name so the CUDA glob above cannot
-        # match it.
-        "strata_optional_packages": ("strata-sleep-*-windows-x86_64-sycl.zip",),
+        # match it. From strata-sleep 0.2.11-sleep.1 the name has no -sleep (no deep sleep);
+        # strata-* finds both that and the older strata-sleep-*.
+        "strata_optional_packages": ("strata-*-windows-x86_64-sycl.zip",),
     },
     "linux": {
         "title": "TRUSTA-AST",
@@ -45,7 +46,7 @@ EXPECTED = {
         #
         # -sycl sits at the end of the name on purpose: it keeps this out of the CUDA
         # glob above, so the two never match each other's packages. Do not reorder it.
-        "strata_optional_packages": ("strata-sleep-*-linux-x86_64-sycl.tar.gz",),
+        "strata_optional_packages": ("strata-*-linux-x86_64-sycl.tar.gz",),
     },
 }
 
