@@ -139,13 +139,58 @@ begin
   Result := ExpandConstant('{localappdata}\AIScalerToolkit');
 end;
 
+// Empty a directory that DelTree could not, and remove it.
+//
+// The backend's environment holds files deeper than Windows' 260 characters: torch
+// ships licence texts at ...\torch-*.dist-info\licenses\third_party\..., 254 characters
+// plus the account's name under the default location -- measured at 258 for a name of
+// four letters, so past the limit for one of six. uv writes them without trouble, and
+// DelTree cannot delete them -- nor can it be handed the \\?\ form of the path, which
+// it refuses outright. So an uninstall left the environment's deepest files in place
+// with its interpreter gone, and the next install stopped at uv's "not a valid Python
+// environment": uninstalling and installing again, the first thing anyone tries, was
+// the one sequence that could not work.
+//
+// robocopy has no such limit, and mirroring an empty folder over a directory empties
+// it. It leaves a junction's target alone, removing only the junction -- checked, since
+// people do link a models folder to another drive. It only ever sees what DelTree left.
+procedure EmptyOut(Dir: String);
+var
+  Empty: String;
+  Code: Integer;
+begin
+  Empty := ExpandConstant('{tmp}\empty');
+  if not ForceDirectories(Empty) then
+  begin
+    Log('could not create ' + Empty);
+    Exit;
+  end;
+  // Below 8 is success for robocopy; 8 and above means something could not be removed.
+  if not Exec(ExpandConstant('{sys}\robocopy.exe'),
+              '"' + Empty + '" "' + Dir + '" /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NP',
+              '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Log('robocopy could not be started: ' + SysErrorMessage(Code))
+  else
+    Log('robocopy exited ' + IntToStr(Code));
+  RemoveDir(Dir);
+end;
+
 // "Label" is reserved in Pascal -- it names a goto target -- hence What.
 procedure RemoveIfExists(Target: String; What: String);
 begin
+  Target := RemoveBackslashUnlessRoot(Target);
   if DirExists(Target) then
   begin
     Log('removing directory (' + What + '): ' + Target);
     DelTree(Target, True, True, True);
+    // Never a drive root, whatever a path constant came to.
+    if DirExists(Target) and (Length(Target) > 3) then
+    begin
+      Log('paths too long for DelTree are left in ' + Target + '; emptying it');
+      EmptyOut(Target);
+    end;
+    if DirExists(Target) then
+      Log('could not remove all of ' + Target);
   end
   else if FileExists(Target) then
   begin
@@ -259,8 +304,28 @@ begin
   end;
 end;
 
+// What [UninstallDelete] could not take of the program directory: the paths past 260
+// characters (see EmptyOut). After the uninstall proper, so everything it can remove
+// in the ordinary way is already gone and this only has the remainder to deal with.
+procedure RemoveWhatIsLeftOfTheProgramDirectory();
+begin
+  RemoveIfExists(ExpandConstant('{app}'), 'what was left of the program directory');
+end;
+
 procedure CurUninstallStepChanged(CurStep: TUninstallStep);
 begin
+  if CurStep = usPostUninstall then
+  begin
+    // Guarded like the cleanup below, and for the same reason: nothing here is worth
+    // ending the uninstall on an error for.
+    try
+      RemoveWhatIsLeftOfTheProgramDirectory();
+    except
+      Log('removing what was left of the program directory failed: ' + GetExceptionMessage);
+    end;
+    Exit;
+  end;
+
   if CurStep <> usUninstall then
     Exit;
 
