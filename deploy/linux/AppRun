@@ -2,8 +2,8 @@
 #
 # AppImage entry point.
 #
-# Three jobs: say something a person can read when a dependency is missing, make sure
-# the launcher has an interpreter that can draw a window, and start it.
+# Two jobs: say something a person can read when a dependency is missing, and start
+# the launcher on the interpreter this AppImage carries.
 #
 # WebKitGTK is deliberately not bundled. It is large, and a bundled copy conflicts
 # with the system one often enough that shipping it causes more breakage than
@@ -16,14 +16,10 @@ HERE="$(dirname "$(readlink -f "${0}")")"
 APP_ID="ai-scaler-toolkit"
 APP_TITLE="AI Scaler Toolkit"
 APP_ROOT="$HERE/usr/share/$APP_ID"
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_ID"
 USER_BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
-VENV="$DATA_DIR/launcher-venv"
-REQUIREMENTS="$APP_ROOT/launcher-requirements.txt"
-# PyGObject, built for LAUNCHER_PYTHON when this AppImage was built. See
-# ensure_launcher_env for why it is carried rather than borrowed from the system.
-GI_DIR="$APP_ROOT/launcher-gi"
-LAUNCHER_PYTHON="3.12"
+# The launcher's interpreter, with everything it imports already in it. Built by
+# build_appimage.sh; see "The interpreter" below for why it is carried.
+PYTHON="$HERE/usr/lib/$APP_ID/python/bin/python3"
 
 export PATH="$HERE/usr/bin:$USER_BIN:$PATH"
 
@@ -112,197 +108,6 @@ apt_install() {
   # fixed it.
   "${as_root[@]}" env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || return 1
   "${as_root[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
-}
-
-# curl, wget, then python3. A clean Ubuntu Desktop has no curl -- measured, not
-# assumed. python3 is the backstop because GNOME depends on it.
-fetch_to() {
-  local url="$1" out="$2"
-  if command -v curl >/dev/null 2>&1; then
-    curl -LsSf "$url" -o "$out"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$out" "$url"
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import sys,urllib.request; open(sys.argv[2],"wb").write(urllib.request.urlopen(sys.argv[1],timeout=60).read())' "$url" "$out"
-  else
-    return 1
-  fi
-  [[ -s "$out" ]]
-}
-
-ensure_uv() {
-  # The copy this AppImage carries, pinned and hashed at build time, before anything
-  # on the machine and before the network. It is put on PATH rather than only called
-  # by path, because uv re-executes itself by name and a bare "uv" has to reach the
-  # same binary. See deploy/package/uvtool.py.
-  if [[ -x "$APP_ROOT/uv/uv" ]]; then
-    PATH="$APP_ROOT/uv:$PATH"
-    export PATH
-    return 0
-  fi
-  command -v uv >/dev/null 2>&1 && return 0
-  local script
-  script="$(mktemp)"
-  if ! fetch_to "https://astral.sh/uv/install.sh" "$script"; then
-    rm -f "$script"
-    report_problem "$APP_TITLE needs uv, and it could not be downloaded.
-
-Check the network connection and try again, or install it by hand:
-
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-
-It installs into your home directory and needs no administrator rights."
-    return 1
-  fi
-  env UV_INSTALL_DIR="$USER_BIN" UV_UNMANAGED_INSTALL="$USER_BIN" sh "$script" >/dev/null 2>&1
-  rm -f "$script"
-  command -v uv >/dev/null 2>&1
-}
-
-# The launcher runs on an interpreter uv manages, with the PyGObject this AppImage
-# carries, built for that interpreter when the AppImage was built.
-#
-# It used to run on /usr/bin/python3 with --system-site-packages, because pywebview
-# draws its window through PyGObject and PyGObject is an ABI-tagged C extension of the
-# distribution's Python: cp310 on Ubuntu 22.04, cp312 on 24.04. Borrowing it meant
-# borrowing the interpreter, and that meant a different Python -- and so a different
-# resolution of every other package -- on every distribution, which is the opposite of
-# what shipping a single artifact is for.
-#
-# Carrying gi cuts that tie. The extension links against libglib, libgobject and
-# libgirepository-1.0.so.1 and nothing else, all present with a stable ABI across the
-# range this supports, so one build works everywhere. The typelibs and the libraries
-# still come from the machine; only the Python binding is ours.
-#
-# Everything else pywebview needs (itself, pystray, pillow, pyyaml) comes from the
-# requirements file beside this AppImage, hash-pinned from the same lock the Windows
-# build freezes from -- which is only possible because the interpreter is now fixed.
-ensure_launcher_env() {
-  local stamp="$VENV/.requirements-stamp"
-  local want
-  # Both inputs, because a rebuilt gi with unchanged requirements is still a different
-  # environment, and reusing the old one would keep an extension built for another
-  # interpreter in place.
-  #
-  # Hashed from inside APP_ROOT, so the names are relative. sha256sum prints the name
-  # it was given beside each hash, and APP_ROOT is a fresh /tmp/.mount_XXXXXX on every
-  # start -- so with absolute names the fingerprint changed every time, no stamp ever
-  # matched, and every start deleted the environment and installed it again. Online
-  # that cost a few seconds nobody saw. Offline it worked only while uv's copy of the
-  # index was fresh, about ten minutes after the last start; after that the reinstall
-  # failed, the environment was already gone, and the application would not open
-  # without a network. Measured on the Linux VM: the same AppImage mounted twice gave
-  # two different fingerprints.
-  #
-  # __pycache__ left out: the mount is read-only, but an extracted AppImage is not, and
-  # there Python writes bytecode into launcher-gi on the first start -- which changed
-  # the fingerprint again on the second.
-  want="$( { cd "$APP_ROOT" && sha256sum launcher-requirements.txt &&
-             find launcher-gi -type f -not -path '*/__pycache__/*' -exec sha256sum {} +; } 2>/dev/null \
-           | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
-
-  if [[ -x "$VENV/bin/python" && -n "$want" && -f "$stamp" ]] \
-     && [[ "$(cat "$stamp")" == "$want" ]]; then
-    # The environment is right, but where gi lives is not -- see link_bundled_gi.
-    link_bundled_gi
-    return $?
-  fi
-
-  # Built beside the old one and swapped in only once it is complete. Deleting first
-  # meant a build that failed -- no network, no space -- left nothing to start on, when
-  # the old environment would have opened the window perfectly well.
-  local next="$VENV.new"
-  if ! ensure_uv || ! build_launcher_env "$next"; then
-    rm -rf "$next"
-    if [[ -x "$VENV/bin/python" ]] && "$VENV/bin/python" -c 'import webview' >/dev/null 2>&1; then
-      # Not stamped, so the next start with a connection tries again.
-      printf '%s\n' "$APP_TITLE: could not update its window environment; starting on the existing one" >&2
-      link_bundled_gi
-      return $?
-    fi
-    # Empty when ensure_uv was what failed: it has already said so.
-    [[ -n "$LAUNCHER_ENV_PROBLEM" ]] && report_problem "$LAUNCHER_ENV_PROBLEM"
-    return 1
-  fi
-  rm -rf "$VENV"
-  mv "$next" "$VENV"
-
-  link_bundled_gi || return 1
-  printf '%s' "$want" > "$stamp"
-}
-
-# What build_launcher_env could not do, in a sentence for the user. Set by it, shown by
-# the caller only when there is no older environment to fall back on.
-LAUNCHER_ENV_PROBLEM=""
-
-build_launcher_env() {
-  local dir="$1"
-  rm -rf "$dir"
-  mkdir -p "$(dirname "$dir")"
-  # No --system-site-packages: the distribution's packages are built for its own
-  # interpreter, and mixing them into this one is what this arrangement exists to stop.
-  #
-  # only-managed, because "--python 3.12" alone takes whatever 3.12 the machine already
-  # has and only downloads one when there is none. That reintroduces exactly what this
-  # replaced: observed here, the same command produced uv's 3.12.14 on a machine that
-  # had it cached and the distribution's 3.12.3 on one that did not. Both load the
-  # carried gi and select the same wheels, so nothing visibly breaks -- which is what
-  # makes it worth pinning rather than leaving to chance.
-  #
-  # --relocatable, because it is built under another name and moved into place.
-  if ! uv venv --relocatable --python "$LAUNCHER_PYTHON" --python-preference only-managed \
-       "$dir" >/dev/null 2>&1; then
-    LAUNCHER_ENV_PROBLEM="$APP_TITLE could not create its Python environment at
-
-  $VENV
-
-It needs to download Python $LAUNCHER_PYTHON the first time. Check the network
-connection and that there is space in your home directory."
-    return 1
-  fi
-  # Offline as a second try: what has been downloaded before is still in uv's cache,
-  # and --offline uses it however old uv's copy of the index is. Without it, a machine
-  # with every wheel on disk was refused for want of a network.
-  if ! uv pip install --python "$dir/bin/python" --quiet -r "$REQUIREMENTS" >/dev/null 2>&1 &&
-     ! uv pip install --offline --python "$dir/bin/python" --quiet -r "$REQUIREMENTS" >/dev/null 2>&1; then
-    LAUNCHER_ENV_PROBLEM="$APP_TITLE could not install the packages it needs to draw its window.
-
-Check the network connection and try again."
-    return 1
-  fi
-}
-
-# Point the environment at the gi this AppImage carries. Rewritten on every start, not
-# only when the environment is rebuilt, because the path changes on every start: an
-# AppImage mounts itself at a fresh /tmp/.mount_XXXXXX each time it runs, and $GI_DIR is
-# inside it. Written once and left, the file names a mount that no longer exists -- the
-# second launch of a build then cannot import gi and pywebview says "You must have
-# either QT or GTK with Python extensions installed", which is no window at all.
-#
-# That is not hypothetical, and it hid well: rebuilding the AppImage changes the hash
-# the environment is stamped with, which rebuilds it and rewrites this file, so every
-# test that followed a build passed. Only a second run of the same build fails, which is
-# what every user does and no build-and-test cycle does.
-#
-# A .pth rather than PYTHONPATH: this process starts the backend, and PYTHONPATH is
-# inherited, so it would put this interpreter's gi on the path of a service that has its
-# own environment. A .pth belongs to this interpreter and goes no further.
-link_bundled_gi() {
-  local site
-  site="$("$VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null)"
-  if [[ -z "$site" ]]; then
-    report_problem "$APP_TITLE could not work out where to install its GTK bindings."
-    return 1
-  fi
-  printf '%s\n' "$GI_DIR" > "$site/trusta-gi.pth"
-
-  if ! "$VENV/bin/python" -c 'import gi' >/dev/null 2>&1; then
-    report_problem "$APP_TITLE carries GTK bindings that this system cannot load.
-
-This build is for x86_64 systems with GLib 2.72 or newer. Please report it with
-your distribution and version."
-    return 1
-  fi
 }
 
 # llama.cpp is built on this machine during first setup: there is no Linux CUDA build
@@ -440,27 +245,43 @@ mapfile -t gpu_packages < <(intel_gpu_packages)
 ((${#gpu_packages[@]} == 0)) ||
   echo "[AppRun] the Intel GPU still needs: ${gpu_packages[*]} (sudo apt install ${gpu_packages[*]})" >&2
 
-if [[ ! -f "$REQUIREMENTS" ]]; then
+# The interpreter.
+#
+# Carried whole: a Python of this AppImage's own, with pywebview, pystray, Pillow and
+# PyYAML installed into it from the lock the Windows build freezes from, and PyGObject
+# built for it. Nothing is downloaded or built on this machine to open the window.
+#
+# It used to be: the first start asked uv for a Python, built a virtual environment in
+# the data directory and installed the packages into it, and only then could draw
+# anything. So a first start needed a network before it could show a window to say it
+# needed one, sat for as long as that took with nothing on screen, and did not start
+# at all offline. Keeping that environment right across updates -- a stamp to tell
+# when to rebuild it, a path file rewritten on every start because the AppImage mounts
+# somewhere new each time -- went wrong three separate ways, each one a window that
+# did not open on a machine where it had opened the day before.
+#
+# PyGObject is still the one part that reaches outside: gi is ours, built for this
+# interpreter, and the typelibs and GTK itself are the machine's (checked for above).
+# It links against libglib, libgobject and libgirepository-1.0 and nothing else, so one
+# build loads everywhere this AppImage runs -- and where it does not, say so here
+# rather than let pywebview report that no GUI toolkit is installed.
+if [[ ! -x "$PYTHON" ]]; then
   report_problem "This build of $APP_TITLE is incomplete: it carries no
 
-  usr/share/$APP_ID/launcher-requirements.txt
+  usr/lib/$APP_ID/python
 
-so there is no way to know what the launcher needs. Please report this build as
-broken."
+so there is nothing to run it with. Please report this build as broken."
   exit 1
 fi
 
-if [[ ! -d "$GI_DIR/gi" ]]; then
-  report_problem "This build of $APP_TITLE is incomplete: it carries no
+if ! "$PYTHON" -c 'import gi' >/dev/null 2>&1; then
+  report_problem "$APP_TITLE carries GTK bindings that this system cannot load.
 
-  usr/share/$APP_ID/launcher-gi
-
-so there is nothing to draw its window with. Please report this build as broken."
+This build is for x86_64 systems with glibc 2.39 or newer (Ubuntu 24.04 and
+later). Please report it with your distribution and version."
   exit 1
 fi
-
-ensure_launcher_env || exit 1
 
 cd "$APP_ROOT"
 export PYTHONPATH="$APP_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-exec "$VENV/bin/python" -m launcher "$@"
+exec "$PYTHON" -m launcher "$@"

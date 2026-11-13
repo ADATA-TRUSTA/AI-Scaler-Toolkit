@@ -1935,6 +1935,7 @@ def headless() -> int:
     if not single_instance.acquire(lambda: None):
         log.error("headless: another copy is already running")
         return 2
+    maintenance.old_window_environment()
 
     report = preflight.run()
     blocking = [c for c in report.blocking if c.key not in WINDOW_ONLY_CHECKS]
@@ -2089,6 +2090,7 @@ def main(argv: list[str] | None = None) -> int:
     if not single_instance.acquire(launcher.show_window, on_quit=launcher.quit):
         log.info("another copy is already running; exiting")
         return 0
+    maintenance.old_window_environment()
 
     # Sized before it is created, not after. Every launch used to open at the setup
     # size and then jump to the interface size once the service answered -- which on

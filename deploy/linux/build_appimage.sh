@@ -26,8 +26,10 @@ APP_ID="ai-scaler-toolkit"
 SERVICE_PORT="${SERVICE_PORT:-8571}"
 VERSION="${APP_VERSION:-0.0.0}"
 # The interpreter the launcher runs on, obtained by uv rather than taken from the
-# machine. Fixing it is what makes one set of packages -- and one PyGObject build --
-# correct everywhere, instead of whatever the distribution happened to ship.
+# machine, and shipped inside the AppImage with the launcher's packages already in it.
+# Fixing it is what makes one set of packages -- and one PyGObject build -- correct
+# everywhere, instead of whatever the distribution happened to ship; carrying it is
+# what lets a first start open a window with no network. See bundle_python.
 LAUNCHER_PYTHON="${LAUNCHER_PYTHON:-3.12}"
 
 # The assembled layout to package. Defaults to this repository, which is where a
@@ -45,6 +47,12 @@ SIGN_KEY="${SIGN_KEY:-}"
 
 BUILD_DIR="$REPO_ROOT/build/appimage"
 APPDIR="$BUILD_DIR/AppDir"
+# Where uv puts the launcher's interpreter while it is being prepared, and where it
+# sits in the AppImage. Beside the payload, not in it: the launcher copies the payload
+# somewhere writable on first run (config.ensure_writable_payload), and an interpreter
+# that nothing writes to has no business being copied along.
+PYTHON_STORE="$BUILD_DIR/python"
+PYTHON_IN_APPDIR="usr/lib/$APP_ID/python"
 OUT_DIR="$REPO_ROOT/dist-unsigned"
 TOOL_DIR="$BUILD_DIR/tools"
 # A release tag, not "continuous". That tag is a moving target: it is republished whenever the
@@ -118,44 +126,49 @@ fetch_appimagetool() {
   printf '%s' "$tool"
 }
 
-# The launcher is not frozen on Linux; AppRun runs it on an interpreter uv manages, and
-# what it needs is the list of packages to install -- exported from the same lock the
-# Windows build freezes from, so the two platforms do ship the same versions.
-#
-# With hashes, now that they can be. They used to be stripped and the comment here used
-# to claim a version parity that did not exist: AppRun installed into whatever
-# /usr/bin/python3 was, 3.12 on Ubuntu 24.04 and 3.10 on 22.04 (no longer supported here),
-# and uv resolved whatever fitted. Hashes made that fail rather than
-# diverge quietly -- an artifact listed for one Python, installed under another, falls
-# back to the sdist, and building Pillow on a desktop with no compiler is where it
-# ended. Fixing the interpreter fixes the artifacts, so the hashes can go back in.
-export_requirements() {
-  local out="$BUILD_DIR/payload/launcher-requirements.txt"
-  log "exporting the launcher's requirements from deploy/uv.lock"
-  uv export --project "$REPO_ROOT/deploy" --no-dev --no-emit-project -o "$out" >/dev/null
-  [[ -s "$out" ]] || die "uv export produced no requirements"
-  grep -q -- "--hash=sha256:" "$out" || die "the exported requirements carry no hashes"
-  log "launcher requirements: $(grep -c -- '--hash=sha256:' "$out") hashed artifacts"
-}
-
-# PyGObject, built here for the interpreter the AppImage will run, and shipped.
-#
-# This is what makes fixing the interpreter possible at all. gi is an ABI-tagged C
-# extension, so the distribution's own is built for the distribution's Python -- cp312
-# on 24.04, cp310 on 22.04 -- and a uv-managed 3.12 can load 24.04's and not 22.04's.
-# Building it here instead cuts that tie: the extension links against libglib,
-# libgobject and libgirepository-1.0.so.1 and nothing else, and those are present with a
-# stable ABI on both. Measured on the earlier 22.04 build (glib 2.72): it loaded Gtk 3.24 and
-# WebKit2 4.1 on 24.04 with glib 2.80.
-#
-# Pinned below 3.52 because that release requires girepository-2.0, which wants glib
-# 2.80 -- newer than the 2.72 on 22.04, which this build once targeted. Kept as is: lifting it is untested. The typelibs and
-# the libraries themselves still come from the machine, as they always did; only the
-# Python binding is ours.
+# PyGObject is built against the newest release that still uses girepository-1.0. 3.52
+# requires girepository-2.0, which wants glib 2.80; lifting the pin is untested.
 GI_PIN="${GI_PIN:-pygobject<3.52}"
 
-build_gi() {
-  local out="$BUILD_DIR/payload/launcher-gi"
+# Set by bundle_python: the interpreter's own directory, ready to copy into the AppDir.
+PYTHON_ROOT=""
+
+# The launcher's interpreter, complete: Python, the launcher's packages, PyGObject.
+#
+# The launcher is not frozen on Linux. pywebview draws through PyGObject, and a frozen
+# build would have to carry GTK and WebKitGTK with it, which is what AppRun declines
+# to do. So it runs as sources on an ordinary interpreter -- and that interpreter used
+# to be made on the user's machine, on the first start: AppRun asked uv for a Python,
+# built a virtual environment and installed these same packages into it. A first start
+# therefore needed a network before it could draw the window that says setup needs a
+# network, and showed nothing while it worked.
+#
+# Built here instead, once, and shipped. What is in it:
+#
+#   Python          uv's own build (python-build-standalone), which is made to be moved:
+#                   it finds its library from where its executable is, so it runs from
+#                   wherever the AppImage is mounted.
+#   the packages    from deploy/uv.lock, the lock the Windows build freezes from, with
+#                   their hashes. Into the interpreter itself rather than a virtual
+#                   environment: a venv records the absolute path of the interpreter it
+#                   was made from, and here that path changes on every start.
+#   PyGObject       built for this interpreter. gi is an ABI-tagged C extension, so the
+#                   distribution's own only loads in the distribution's Python. Ours
+#                   links against libglib, libgobject and libgirepository-1.0.so.1 and
+#                   nothing else, present with a stable ABI everywhere this runs. The
+#                   typelibs and the libraries themselves still come from the machine.
+#
+# Everything is compiled to bytecode here, because the mount is read-only and Python
+# would otherwise compile every module again on every start.
+bundle_python() {
+  local requirements="$BUILD_DIR/launcher-requirements.txt"
+  log "exporting the launcher's requirements from deploy/uv.lock"
+  # --frozen: the lock is the record of what ships. Exporting must not be what rewrites it.
+  uv export --project "$REPO_ROOT/deploy" --frozen --no-dev --no-emit-project -o "$requirements" >/dev/null
+  [[ -s "$requirements" ]] || die "uv export produced no requirements"
+  grep -q -- "--hash=sha256:" "$requirements" || die "the exported requirements carry no hashes"
+  log "launcher requirements: $(grep -c -- '--hash=sha256:' "$requirements") hashed artifacts"
+
   for tool in pkg-config cc; do
     command -v "$tool" >/dev/null 2>&1 || die \
       "$tool is needed to build PyGObject. On Debian/Ubuntu:
@@ -164,28 +177,87 @@ build_gi() {
   pkg-config --exists gobject-introspection-1.0 || die \
     "libgirepository1.0-dev is needed to build PyGObject (apt-get install libgirepository1.0-dev)"
 
-  log "building PyGObject ($GI_PIN) for the launcher's interpreter"
+  # A directory of its own, so the interpreter that ships is one nothing else on this
+  # machine has installed into, and a build never inherits the last one's packages.
+  log "installing Python $LAUNCHER_PYTHON for the launcher"
+  rm -rf "$PYTHON_STORE"
+  UV_PYTHON_INSTALL_DIR="$PYTHON_STORE" uv python install --quiet "$LAUNCHER_PYTHON" \
+    || die "could not install Python $LAUNCHER_PYTHON"
+  local root
+  root="$(find "$PYTHON_STORE" -mindepth 1 -maxdepth 1 -type d -name "cpython-${LAUNCHER_PYTHON}*" | sort | head -1)"
+  [[ -n "$root" && -x "$root/bin/python3" ]] || die "uv installed no Python $LAUNCHER_PYTHON under $PYTHON_STORE"
+  local py="$root/bin/python3"
+  local version site
+  version="$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  site="$("$py" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+  [[ "$site" == "$root"/* ]] || die "the interpreter's site-packages is outside it: $site"
+  log "Python $("$py" -c 'import platform; print(platform.python_version())') at ${root#"$BUILD_DIR"/}"
+
+  # uv marks its own interpreters as not to be installed into; this one exists to be.
+  uv pip install --python "$py" --break-system-packages --require-hashes --quiet -r "$requirements" \
+    || die "could not install the launcher's packages"
+
+  log "building PyGObject ($GI_PIN) for it"
   local work
   work="$(mktemp -d)"
   # shellcheck disable=SC2064 - the path is wanted now, not at trap time
   trap "rm -rf '$work'" RETURN
-  # only-managed, as AppRun does: a bare "--python 3.12" takes the machine's own 3.12 when it has
-  # one, and Ubuntu 24.04's is 3.12 without Python.h, so pycairo cannot build against it.
-  uv venv --python "$LAUNCHER_PYTHON" --python-preference only-managed "$work/v" >/dev/null 2>&1 \
-    || die "could not create a $LAUNCHER_PYTHON environment to build PyGObject in"
+  # In a throwaway environment on the same interpreter, so only gi itself is carried
+  # over and none of what was needed to build it.
+  uv venv --python "$py" "$work/v" >/dev/null 2>&1 \
+    || die "could not create an environment to build PyGObject in"
   uv pip install --python "$work/v/bin/python" --quiet "$GI_PIN" \
     || die "could not build PyGObject. The dev packages above are the usual cause."
-
-  rm -rf "$out"
-  mkdir -p "$out"
-  cp -a "$work/v/lib/python"*/site-packages/gi "$out/"
+  rm -rf "$site/gi"
+  cp -a "$work/v/lib/python"*/site-packages/gi "$site/"
   # The build host's glibc is this AppImage's floor already, so an extension built here
   # runs anywhere the AppImage does. Checked rather than assumed, because a missing
   # extension shows up as "no module named gi" on a user's machine and nowhere here.
   local ext
-  ext="$(find "$out/gi" -name '_gi.cpython-*.so' -printf '%f\n' | head -1)"
+  ext="$(find "$site/gi" -name '_gi.cpython-*.so' -printf '%f\n' | head -1)"
   [[ -n "$ext" ]] || die "PyGObject built no _gi extension; the build produced nothing usable"
-  log "PyGObject: $ext ($(du -sh "$out" | cut -f1))"
+  log "PyGObject: $ext"
+
+  # What only a build needs, or nothing here imports: headers and static libraries, pip,
+  # Tcl/Tk and the modules on top of it, the bundled test suite.
+  rm -rf "$root/include" "$root/share" "$root/lib/pkgconfig" \
+         "$root/lib/python$version/config-"* \
+         "$root/lib/python$version/test" "$root/lib/python$version/idlelib" \
+         "$root/lib/python$version/tkinter" "$root/lib/python$version/turtledemo" \
+         "$root/lib/python$version/ensurepip" "$root/lib/python$version/lib2to3" \
+         "$root/lib/python$version/lib-dynload/"_tkinter*.so \
+         "$root"/lib/tcl* "$root"/lib/tk* "$root"/lib/itcl* "$root"/lib/thread* \
+         "$root"/lib/libtcl* "$root"/lib/libtk* \
+         "$site"/pip "$site"/pip-*.dist-info "$root"/bin/pip*
+  find "$root" -depth -type d -name __pycache__ -exec rm -rf {} +
+
+  # unchecked-hash: valid whatever the source file's timestamp comes to inside the
+  # squashfs, and never re-read against it.
+  "$py" -m compileall -q -j 0 --invalidation-mode unchecked-hash "$root/lib" >/dev/null \
+    || log "some modules did not compile to bytecode; they will be compiled on each start"
+
+  # The interpreter as it will run: from another path, with nothing of this machine's
+  # Python in its environment. Imported rather than looked for -- a package that is
+  # there and cannot be imported is the failure this catches. pystray is only looked
+  # for: importing it picks a tray backend, which needs a desktop.
+  local trial="$work/moved"
+  cp -a "$root" "$trial"
+  env -u PYTHONPATH -u PYTHONHOME "$trial/bin/python3" -c '
+import importlib.util
+import sys
+
+import gi
+import PIL.Image
+import webview
+import yaml
+
+if importlib.util.find_spec("pystray") is None:
+    sys.exit("pystray is not installed")
+' || die "the bundled interpreter cannot import what the launcher needs"
+  rm -rf "$trial"
+
+  PYTHON_ROOT="$root"
+  log "bundled interpreter: $(du -sh "$root" | cut -f1)"
 }
 
 build_payload() {
@@ -196,10 +268,10 @@ build_payload() {
   uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/make_payload.py" \
     --platform linux --source "$LAYOUT" --out "$BUILD_DIR/payload" \
     --port "$SERVICE_PORT" --version "$VERSION"
-  export_requirements
-  build_gi
+  bundle_python
   uv run --project "$REPO_ROOT/deploy" python "$REPO_ROOT/deploy/package/assert_payload.py" \
-    --platform linux --payload "$BUILD_DIR/payload" --port "$SERVICE_PORT"
+    --platform linux --payload "$BUILD_DIR/payload" --port "$SERVICE_PORT" \
+    --launcher-python "$PYTHON_ROOT"
 }
 
 build_appdir() {
@@ -207,6 +279,9 @@ build_appdir() {
   mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
   cp -a "$BUILD_DIR/payload/." "$APPDIR/usr/share/$APP_ID/"
+
+  mkdir -p "$APPDIR/$PYTHON_IN_APPDIR"
+  cp -a "$PYTHON_ROOT/." "$APPDIR/$PYTHON_IN_APPDIR/"
 
   install -m 0755 "$SCRIPT_DIR/AppRun" "$APPDIR/AppRun"
   install -m 0644 "$SCRIPT_DIR/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"

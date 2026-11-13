@@ -52,10 +52,16 @@ EXPECTED = {
 
 TITLE_RE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
-# The interpreter AppRun asks uv for, as a C extension's ABI tag. Kept here rather than
-# read from the payload: the point is to check the built extension against what will run
-# it, and taking both from the same place would check nothing.
+# The interpreter the AppImage carries, as a version and as a C extension's ABI tag.
+# Kept here rather than read from what was built: the point is to check the interpreter
+# and the extension built for it against what is meant to ship, and taking both from the
+# same place would check nothing.
+PY_VERSION = "3.12"
 PY_TAG = "cpython-312"
+
+# What the launcher imports that is not in the standard library, as each appears in
+# site-packages. gi is checked apart, by its extension.
+LAUNCHER_PACKAGES = ("webview", "pystray", "PIL", "yaml")
 
 
 def check_health_fingerprint(root: Path) -> list[str]:
@@ -183,11 +189,56 @@ def _check_uv(root: Path, binary: str, failures: list[str]) -> None:
         failures.append(f"payload has {uvtool.PAYLOAD_DIR}/{binary} but no VERSION beside it")
 
 
+def check_launcher_python(python: Path) -> list[str]:
+    """The interpreter the AppImage carries has to be complete, because nothing on the
+    user's machine will complete it.
+
+    AppRun starts the launcher on it and installs nothing: the first start has no
+    network to rely on and no step in which to notice something missing. So a package
+    left out here is a window that never opens, on every machine, reported by nobody
+    who can say why.
+    """
+    problems: list[str] = []
+    if not (python / "bin" / "python3").exists():
+        return [f"{python} has no bin/python3; AppRun would have nothing to run the launcher with"]
+
+    site = python / "lib" / f"python{PY_VERSION}" / "site-packages"
+    if not site.is_dir():
+        return [f"{python} is not a Python {PY_VERSION}: it has no {site.relative_to(python)}"]
+
+    for package in LAUNCHER_PACKAGES:
+        if not (site / package).is_dir():
+            problems.append(
+                f"the bundled interpreter has no {package} in site-packages; the launcher "
+                "imports it and nothing installs it on the user's machine"
+            )
+
+    # PyGObject, built for this interpreter. Absent, the window cannot be drawn at all
+    # -- and the failure lands on the user as "No module named gi", long after the
+    # build that forgot it.
+    extensions = sorted((site / "gi").glob("_gi.cpython-*.so"))
+    if not extensions:
+        problems.append(
+            "the bundled interpreter has no gi/_gi.cpython-*.so; pywebview would have no "
+            "GTK bindings and the launcher would start without a window. "
+            "build_appimage.sh builds it"
+        )
+    elif f".{PY_TAG}-" not in extensions[0].name:
+        problems.append(
+            f"the bundled interpreter carries {extensions[0].name}, which is not built "
+            f"for {PY_TAG}; it would not import"
+        )
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=sorted(EXPECTED), required=True)
     parser.add_argument("--payload", default="payload")
     parser.add_argument("--port", type=int, required=True, help="SERVICE_PORT the launcher will write")
+    parser.add_argument("--launcher-python", default="",
+                        help="Linux: the interpreter build_appimage.sh prepared for the "
+                             "AppImage, checked for everything the launcher imports")
     args = parser.parse_args()
 
     expected = EXPECTED[args.platform]
@@ -298,11 +349,10 @@ def main() -> int:
     # shipping sources there builds an installer whose shortcut points at nothing --
     # which installs cleanly first, so nothing catches it but this.
     #
-    # Linux ships sources. pywebview draws through PyGObject, a compiled module tied
-    # to the system Python and its typelibs; a frozen build carries its own
-    # interpreter, cannot see gi, and fails to open a window on every machine. AppRun
-    # builds a virtual environment on the system Python instead, which is what
-    # launcher-requirements.txt is for.
+    # Linux ships sources, and the interpreter to run them. pywebview draws through
+    # PyGObject, and a frozen build would have to carry GTK and WebKitGTK with it. So
+    # the AppImage carries an ordinary interpreter with the launcher's packages and a
+    # PyGObject built for it, beside the payload rather than in it.
     if args.platform == "windows":
         exe = "AIScalerToolkit.exe"
         if not (root / exe).is_file() and not (root / "launcher" / "__main__.py").is_file():
@@ -322,27 +372,13 @@ def main() -> int:
         _check_uv(root, "uv", failures)
         if not (root / "launcher" / "__main__.py").is_file():
             failures.append("payload has no launcher sources; AppRun has nothing to run")
-        if not (root / "launcher-requirements.txt").is_file():
+        if not args.launcher_python:
             failures.append(
-                "payload has no launcher-requirements.txt, so AppRun cannot build the "
-                "environment that draws the window; build_appimage.sh exports it from "
-                "deploy/uv.lock"
+                "--launcher-python was not given: a Linux payload is only half of what "
+                "the AppImage runs on, and the interpreter has to be checked with it"
             )
-        # PyGObject, built for the interpreter AppRun uses. Absent, the window cannot be
-        # drawn at all -- and the failure lands on the user as "No module named gi",
-        # long after the build that forgot it.
-        extensions = sorted((root / "launcher-gi" / "gi").glob("_gi.cpython-*.so"))
-        if not extensions:
-            failures.append(
-                "payload has no launcher-gi/gi/_gi.cpython-*.so; pywebview would have no "
-                "GTK bindings and the launcher would start without a window. "
-                "build_appimage.sh builds it"
-            )
-        elif f".{PY_TAG}-" not in extensions[0].name:
-            failures.append(
-                f"launcher-gi carries {extensions[0].name}, which is not built for the "
-                f"{PY_TAG} interpreter AppRun runs; it would not import"
-            )
+        else:
+            failures.extend(check_launcher_python(Path(args.launcher_python).resolve()))
 
     icon = root / "app.ico"
     if not icon.is_file():

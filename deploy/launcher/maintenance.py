@@ -13,6 +13,7 @@ reaches tens of gigabytes -- so removing it is always a deliberate, separate dec
 from __future__ import annotations
 
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -99,6 +100,32 @@ def remove_tree(path: Path) -> None:
     shutil.rmtree(_extended(path), onerror=_clear_readonly)
     if path.exists():
         raise OSError(f"{path} is still there after removing it")
+
+
+def old_window_environment() -> None:
+    """Remove the environment earlier AppImages built to draw their window with.
+
+    They made one on the first start, in the data directory, and ran the launcher on
+    it. The AppImage carries its interpreter now (deploy/linux/build_appimage.sh), so
+    what an earlier version left is a hundred megabytes nothing will use again.
+
+    Called once this copy holds the single-instance lock, and not from AppRun: an
+    older copy still running is running *on* that environment, and a newer AppImage
+    started beside it only asks it to come forward and exits. Removing it there would
+    pull the packages out from under a process that is still using them.
+    """
+    if config.IS_WINDOWS:
+        return
+    here = Path(sys.prefix).resolve()
+    for name in ("launcher-venv", "launcher-venv.new"):
+        path = config.data_dir() / name
+        if not path.exists():
+            continue
+        # A copy started on it -- an older AppRun, or by hand -- is this very process.
+        if here == path.resolve() or path.resolve() in here.parents:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        log.info("removed the window environment an earlier version built: %s", path)
 
 
 def provisioning_output(*, dry_run: bool = False) -> Removal:
