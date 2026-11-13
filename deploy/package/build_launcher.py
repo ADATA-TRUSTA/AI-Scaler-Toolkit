@@ -34,6 +34,18 @@ DATA = (
     ("launcher/ui", "launcher/ui"),
 )
 
+# Parts of Pillow the launcher never reaches. It opens one .ico for the tray and
+# nothing else, but PyInstaller follows every plugin Pillow can import and takes its
+# compiled half with it: the AVIF codec alone is 7.5 MB, a fifth of the frozen
+# launcher. Pillow imports each of these inside a try, so leaving one out turns a
+# format off rather than breaking anything.
+EXCLUDED_MODULES = (
+    "PIL._avif",
+    "PIL._webp",
+    "PIL._imagingcms",
+    "PIL._imagingtk",
+)
+
 
 def run(*args: str, cwd: Path) -> None:
     print(f"[launcher] $ {' '.join(args)}")
@@ -80,6 +92,8 @@ def main() -> int:
         command += ["--icon", str(icon)]
     for source, dest in DATA:
         command += ["--add-data", f"{DEPLOY_DIR / source}{separator}{dest}"]
+    for module in EXCLUDED_MODULES:
+        command += ["--exclude-module", module]
     # launcher_main.py, not launcher/__main__.py: freezing the latter runs it outside
     # its package and breaks every relative import.
     command += [str(DEPLOY_DIR / "launcher_main.py")]
