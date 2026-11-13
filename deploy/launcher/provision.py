@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import applog, config, env_file, progress, state
+from . import applog, config, env_file, maintenance, progress, state
 
 log = applog.get("provision")
 
@@ -176,6 +176,44 @@ def check_disk() -> None:
         )
 
 
+def environment_interpreter() -> Path:
+    return config.venv_dir() / ("Scripts/python.exe" if config.IS_WINDOWS else "bin/python")
+
+
+def discard_broken_environment() -> bool:
+    """Remove an environment directory that is not an environment. True if it did.
+
+    uv refuses to sync into one: "cannot be used because it is not a valid Python
+    environment (no Python executable was found)", and setup stops there every time it
+    is tried, because nothing here ever cleared it.
+
+    What leaves one behind is an uninstall. The environment sits in the program
+    directory, it holds paths past 260 characters, and an uninstaller that cannot
+    delete those leaves the tree with its interpreter gone and its deepest files still
+    there. The next install then lands on it. The uninstaller removes them now (see
+    installer.iss), but a directory left by an older one is still on people's disks,
+    and an interrupted removal of any kind leaves the same thing.
+
+    Nothing of value can be in it: without an interpreter and a pyvenv.cfg it cannot
+    run, and uv would have to build it again from nothing either way.
+    """
+    venv = config.venv_dir()
+    if not venv.exists():
+        return False
+    if environment_interpreter().is_file() and (venv / "pyvenv.cfg").is_file():
+        return False
+    log.warning("%s is not a usable environment (no interpreter or no pyvenv.cfg); "
+                "removing it so setup can build one", venv)
+    try:
+        maintenance.remove_tree(venv)
+    except OSError as exc:
+        raise RuntimeError(
+            f"An earlier installation left a broken environment at {venv}, and it could "
+            f"not be removed ({exc}). Delete that folder and start setup again."
+        ) from exc
+    return True
+
+
 def build_command() -> list[str]:
     script = config.setup_env_script()
     log.info("setup_env script: %s (exists: %s)", script, script.is_file())
@@ -237,6 +275,8 @@ def run(on_line: Callable[[str], None] | None = None,
     log.info("disk free at %s: %.1f GB (need %s GB)",
              config.components_root(), free, config.MIN_FREE_DISK_GB)
     check_disk()
+
+    discard_broken_environment()
 
     port = state.service_port()
     written = env_file.ensure(port)
@@ -351,7 +391,7 @@ def _run_setup(command, environment, log_path, meter, on_line, on_phase, on_phas
     # nothing checked its exit code, and the script carried on to the end. That has
     # been fixed in the script, but "provisioned" is this application's claim to its
     # user, so it is checked here against the one artefact that has to exist.
-    interpreter = config.venv_dir() / ("Scripts/python.exe" if config.IS_WINDOWS else "bin/python")
+    interpreter = environment_interpreter()
     if not interpreter.is_file():
         raise RuntimeError(
             "Setup reported success but installed no Python environment "

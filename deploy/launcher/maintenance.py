@@ -46,9 +46,7 @@ def _remove(path: Path, label: str, result: Removal, *, dry_run: bool) -> None:
         return
     try:
         if path.is_dir():
-            # Provisioning leaves a git checkout behind and git marks its pack files
-            # read-only, which stops an ordinary tree removal part-way on Windows.
-            shutil.rmtree(path, onerror=_clear_readonly)
+            remove_tree(path)
         else:
             path.unlink()
     except OSError as exc:
@@ -65,6 +63,42 @@ def _clear_readonly(func, name, _exc):
 
     os.chmod(name, stat.S_IWRITE)
     func(name)
+
+
+def _extended(path: Path) -> str:
+    r"""The path in the form Windows does not cut off at 260 characters.
+
+    The backend's environment holds files deeper than that: torch ships licence texts
+    at ...\torch-*.dist-info\licenses\third_party\..., 254 characters plus the length
+    of the account's name under the default install location -- past the limit for
+    any name of six or more. uv writes them without trouble, and then nothing that goes
+    through the ordinary path form can delete them -- shutil.rmtree stops with "the
+    system cannot find the path specified" and leaves the tree half there. The \\?\
+    form has no such limit and needs no machine-wide setting.
+    """
+    if not config.IS_WINDOWS:
+        return str(path)
+    full = str(path.resolve())
+    if full.startswith("\\\\?\\"):
+        return full
+    if full.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + full[2:]
+    return "\\\\?\\" + full
+
+
+def remove_tree(path: Path) -> None:
+    """Remove a directory completely, or raise OSError.
+
+    Two things stop an ordinary removal part-way on Windows, and a tree removed
+    part-way is worse than one left alone: read-only files (provisioning leaves a git
+    checkout behind, and git marks its pack files read-only) and paths past 260
+    characters (see _extended). Checked afterwards as well, because a removal that
+    reports nothing and leaves the directory behind is how a broken environment gets
+    taken for an installed one.
+    """
+    shutil.rmtree(_extended(path), onerror=_clear_readonly)
+    if path.exists():
+        raise OSError(f"{path} is still there after removing it")
 
 
 def provisioning_output(*, dry_run: bool = False) -> Removal:
