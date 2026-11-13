@@ -37,12 +37,39 @@ sequence would drift from the backend's within a release or two.
 
 ## Two details that look wrong until you hit them
 
-**The virtual environment is not inside the payload.** `UV_PROJECT_ENVIRONMENT` moves
-it to the per-user data directory, so a reinstall does not re-download several GB and
-the program directory does not grow after setup. The side effect is that the backend's
-own `run_service` scripts, which look for `.venv` in the project root, do not work in
-an installed build — they fail loudly with "environment not found", which is the right
-way for that to go wrong. Use the tray, or `dev_reset.py --gui`.
+**The virtual environment is not in the backend project, and where it is depends on
+the platform.** `UV_PROJECT_ENVIRONMENT` moves it to `config.venv_dir()`. On an
+installed Windows build that is `service\.venv` in the program directory, so it lands
+on the drive the person installing chose -- the program is 0.3 GB, the environment and
+ComfyUI are 7.6, and they used to fill the system drive whatever the installer was
+told. Everywhere else (an AppImage, a source checkout) it is the per-user data
+directory, and an install from before it moved keeps the one it has: see
+`config.components_root`. The side effect is that the backend's own `run_service`
+scripts, which look for `.venv` in the project root, do not work in an installed build
+-- they fail loudly with "environment not found", which is the right way for that to
+go wrong. Use the tray, or `dev_reset.py --gui`.
+
+**That environment holds paths longer than Windows allows.** torch ships licence texts
+at `...\torch-*.dist-info\licenses\third_party\...`: 254 characters plus the length of
+the account's name, under the default install location. That was measured at 258 for
+an account called `test` and is 267 for the release runner's, so every name of six
+characters or more is past the 260 that anything using the ordinary form of a path
+stops at -- and a longer install directory gets there with any name. uv writes them
+without trouble; Inno's `DelTree`, `shutil.rmtree` and
+`Remove-Item` all fail to delete them, and each leaves the tree half there. An
+uninstall used to end that way: the interpreter gone, the deepest files still in
+place, and the next install stopped by uv at "not a valid Python environment" --
+uninstalling and installing again was the one sequence that could not work. Three
+places know about it now, and a fourth checks them:
+
+- `installer.iss` empties what `DelTree` leaves with robocopy (`EmptyOut`), for the
+  program directory and for the data directory alike;
+- `maintenance.remove_tree` removes through the `\\?\` form of the path, which is what
+  the settings window's repair and `dev_reset.py --purge` go through;
+- `provision.discard_broken_environment` clears an environment directory that has no
+  interpreter before setup runs, for the ones older uninstallers already left behind;
+- the release pipeline's post-test uninstalls and installs again, and fails if the
+  program directory survives the uninstall.
 
 **A `.env` that does not exist is worse than an empty one.** The service falls back to
 `.env.example`, which ships with the payload — so a missing `.env` does not mean code
@@ -50,6 +77,32 @@ defaults, it means the example's values: port 8000, and an `HF_HOME` relative to
 project, which puts tens of gigabytes of models under the install directory. The
 launcher writes its keys on first run and only ever fills in ones that are absent,
 because `setup_env` appends to the same file and the user may have edited it.
+
+## The AppImage carries its own interpreter
+
+The Linux launcher is not frozen: pywebview draws through PyGObject, and a frozen build
+would have to carry GTK and WebKitGTK, which conflicts with the system's often enough
+to be worse than depending on it. So the AppImage ships the launcher as sources, and
+`linux/build_appimage.sh` ships the interpreter to run them at
+`usr/lib/ai-scaler-toolkit/python`: uv's own Python, the launcher's packages installed
+into it from `deploy/uv.lock`, and a PyGObject built for it. `AppRun` checks the
+system for WebKitGTK and starts it. Nothing is downloaded or built to open the window.
+
+It used to be built on the user's machine. The first start asked uv for a Python, made
+a virtual environment in the data directory and installed the packages, and only then
+could draw anything -- so it needed a network before it could show the window that says
+setup needs a network, showed nothing while it worked, and did not start at all
+offline. Keeping that environment right across updates went wrong three separate ways
+(a stamp that never matched, a path file naming a mount that no longer existed, an
+environment deleted before its replacement was built), each one a window that did not
+open on a machine where it had opened the day before.
+
+The interpreter sits beside the payload rather than in it, because the launcher copies
+the payload to the data directory on first run (`config.ensure_writable_payload`) and
+there is no reason to copy an interpreter along. `maintenance.old_window_environment`
+removes the environment an earlier version built, once this copy holds the
+single-instance lock -- not from `AppRun`, where an older copy might still be running
+on it.
 
 ## The tray menu, and why it stopped being a service console
 
