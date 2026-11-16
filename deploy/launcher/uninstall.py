@@ -62,12 +62,50 @@ def _remove_all_but(directory: Path, keep: str) -> None:
             _remove(child, child.name)
 
 
+COMFY_USER_DATA = ("models", "output")
+
+
+def _comfy_dir(data: Path) -> Path:
+    return data / "components" / "comfyui" / "ComfyUI"
+
+
+def _rescue_comfy_data(data: Path, keep: list[str]) -> Path | None:
+    """Move ComfyUI's models/output out of the data directory before it is swept.
+
+    Beside the data directory, so it is a rename on the same volume and not a copy of
+    what can be a hundred gigabytes. Returns the folder they went to.
+    """
+    target = data.parent / f"{config.APP_ID}-kept"
+    moved = False
+    for name in keep:
+        src = _comfy_dir(data) / name
+        if not src.is_dir():
+            continue
+        dest = target / f"ComfyUI-{name}"
+        suffix = 1
+        while dest.exists():
+            suffix += 1
+            dest = target / f"ComfyUI-{name}-{suffix}"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dest))
+        except OSError as exc:
+            print(f"  could not keep {src}: {exc}")
+            continue
+        print(f"  kept ComfyUI {name} at {dest}")
+        moved = True
+    return target if moved else None
+
+
 def _stop_the_service() -> None:
-    from .service_manager import listening_pid, terminate_pid
+    from .service_manager import listening_pid, probe, terminate_pid
 
     port = state.service_port()
     pid = listening_pid(port)
     if pid is None:
+        return
+    if probe(port) != "ours":
+        print(f"  port {port} is held by pid {pid}, which is not this service; leaving it")
         return
     print(f"  stopping the service on port {port} (pid {pid})")
     terminate_pid(pid)
@@ -103,6 +141,19 @@ def run(assume_yes: bool = False) -> int:
             "downloaded models,\n"
             "  and makes it again the next time a model is loaded with Strata.")
 
+    comfy_keep = []
+    for name in COMFY_USER_DATA:
+        folder = _comfy_dir(data) / name
+        if not folder.is_dir():
+            continue
+        if assume_yes or not _ask(
+                f"Also remove ComfyUI's {name}?",
+                f"  {folder}\n"
+                "  These can be tens of gigabytes and were put there by you or by "
+                "ComfyUI.\n"
+                "  Keeping them moves them next to the data directory."):
+            comfy_keep.append(name)
+
     remove_models = False
     if models.is_dir() and not assume_yes:
         remove_models = _ask(
@@ -117,6 +168,7 @@ def run(assume_yes: bool = False) -> int:
 
     print()
     _stop_the_service()
+    _rescue_comfy_data(data, comfy_keep)
     autostart.disable()
     shortcuts.remove()
     print("  removed the autostart entry, the menu entry and the desktop shortcut")

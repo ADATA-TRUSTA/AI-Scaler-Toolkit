@@ -18,6 +18,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -128,6 +129,53 @@ def listening_pid(port: int) -> int | None:
     return None
 
 
+_CTRL_C_HELPER = "; ".join([
+    "import ctypes, signal, sys",
+    "signal.signal(signal.SIGBREAK, signal.SIG_IGN)",
+    "k = ctypes.windll.kernel32",
+    "k.FreeConsole()",
+    "sys.exit(1) if not k.AttachConsole(int(sys.argv[1])) else None",
+    "k.SetConsoleCtrlHandler(None, 1)",
+    "k.GenerateConsoleCtrlEvent(1, 0)",
+])
+
+
+GRACEFUL_STOP_SECONDS = 20.0
+
+
+def request_graceful_exit(pid: int) -> bool:
+    """Windows: send Ctrl+Break to the console the service runs on, so uvicorn's lifespan
+    shutdown runs and the backend unloads its engines.
+
+    Terminating the venv launcher shim, or taskkill without /F, never gives the
+    backend that chance: the Job Object hard-kills it, and the inference worker and
+    llama-server it spawned were left running. Returns False when the console cannot
+    be reached (an adopted service started without one), and the caller then forces.
+    """
+    if not config.IS_WINDOWS:
+        return False
+    try:
+        python = venv_python()
+        interpreter = str(python) if python.is_file() else sys.executable
+        result = subprocess.run([interpreter, "-c", _CTRL_C_HELPER, str(pid)],
+                                capture_output=True, timeout=15,
+                                creationflags=config.subprocess_flags())
+    except (OSError, subprocess.SubprocessError):
+        return False
+    # The event reaches the helper too, which shares the console for that moment, so a
+    # STATUS_CONTROL_C_EXIT exit is the event having been sent, not a failure.
+    return (result.returncode & 0xFFFFFFFF) in (0, 0xC000013A)
+
+
+def wait_for_exit(pid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not listening_pid_alive(pid):
+            return True
+        time.sleep(0.3)
+    return not listening_pid_alive(pid)
+
+
 def terminate_pid(pid: int) -> bool:
     """Ask a process to go, then insist. Someone else's service is still someone's."""
     if not config.IS_WINDOWS:
@@ -177,6 +225,8 @@ def terminate_pid(pid: int) -> bool:
         return False
 
     try:
+        if request_graceful_exit(pid) and wait_for_exit(pid, GRACEFUL_STOP_SECONDS):
+            return True
         subprocess.run(["taskkill", "/PID", str(pid), "/T"],
                        capture_output=True, timeout=20,
                        creationflags=config.subprocess_flags())
@@ -605,11 +655,17 @@ class ServiceManager:
         """
         self.unwatch()
         if self._process is not None and self._process.poll() is None:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
+            # Let the backend shut down on its own first (Windows: Ctrl+Break), so its
+            # engines and workers are released; only then insist.
+            if config.IS_WINDOWS and request_graceful_exit(self._process.pid):
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    self._process.wait(timeout=min(timeout, GRACEFUL_STOP_SECONDS))
+            if self._process.poll() is None:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    self._process.kill()
         self._process = None
         if self._log_handle is not None:
             self._log_handle.close()
@@ -617,11 +673,16 @@ class ServiceManager:
 
         if not self._wait_for_port(5):
             owner = listening_pid(self.port)
-            if owner is not None:
+            if owner is not None and probe(self.port) == "ours":
                 log.info("port %s is held by pid %s, which this launcher did not "
                          "start; stopping it", self.port, owner)
                 terminate_pid(owner)
                 self._wait_for_port(10)
+            elif owner is not None:
+                # Without the /health fingerprint it is someone else's program: leave
+                # it alone rather than kill an unrelated process that took our port.
+                log.warning("port %s is held by pid %s, which is not this service; "
+                            "leaving it running", self.port, owner)
 
         if not is_port_free(self.port):
             log.warning("port %s is still occupied after stopping the service", self.port)

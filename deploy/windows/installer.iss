@@ -239,6 +239,57 @@ begin
   end;
 end;
 
+// ComfyUI keeps the user's models and everything it generates under the program
+// directory ({app}\components\comfyui\ComfyUI), which [UninstallDelete] clears
+// wholesale. Those are tens to hundreds of gigabytes the user put there, so they are
+// asked about like the model cache, and the ones to keep are moved out of {app}
+// beside it (same volume, so a rename and not a copy) before it is removed.
+procedure KeepOrRemoveComfyData();
+var
+  ComfyDir: String;
+  KeepDir: String;
+  Names: array[0..1] of String;
+  I: Integer;
+  Src: String;
+  Dest: String;
+begin
+  ComfyDir := ExpandConstant('{app}') + '\components\comfyui\ComfyUI';
+  KeepDir := ExtractFilePath(RemoveBackslash(ExpandConstant('{app}'))) + 'AIScalerToolkit-kept';
+  Names[0] := 'models';
+  Names[1] := 'output';
+  for I := 0 to 1 do
+  begin
+    Src := ComfyDir + '' + Names[I];
+    if not DirExists(Src) then
+      Continue;
+    if SuppressibleMsgBox(
+         'Also remove ComfyUI''s ' + Names[I] + '?' + #13#10#13#10 +
+         Src + #13#10#13#10 +
+         'These can be tens of gigabytes. Choose No to keep them: they are moved to ' +
+         KeepDir + '.',
+         mbConfirmation, MB_YESNO, IDNO) = IDYES then
+    begin
+      Log('removing ComfyUI ' + Names[I] + ' with the program directory');
+      Continue;
+    end;
+    Dest := KeepDir + '\ComfyUI-' + Names[I];
+    ForceDirectories(KeepDir);
+    if DirExists(Dest) then
+      Dest := Dest + '-' + GetDateTimeString('yyyymmdd-hhnnss', '-', ':');
+    if RenameFile(Src, Dest) then
+      Log('kept ComfyUI ' + Names[I] + ' at ' + Dest)
+    else
+    begin
+      Log('could not move ' + Src + ' to ' + Dest);
+      SuppressibleMsgBox(
+        'Could not move ' + Src + ' out of the program directory, so it will be ' +
+        'deleted with it.' + #13#10#13#10 +
+        'Copy it somewhere else now if you want to keep it, then press OK.',
+        mbError, MB_OK, IDOK);
+    end;
+  end;
+end;
+
 procedure CleanUpBeyondTheProgramDirectory();
 var
   ModelCache: String;
@@ -266,6 +317,8 @@ begin
   // layer) in Strata-data beside its install: gigabytes, and minutes of setup to make
   // again. Asked about like the model cache, so the rest of the data directory goes
   // either way.
+  KeepOrRemoveComfyData();
+
   StrataData := DataDir() + '\Strata-data';
   KeepStrataData := False;
   if DirExists(StrataData) then

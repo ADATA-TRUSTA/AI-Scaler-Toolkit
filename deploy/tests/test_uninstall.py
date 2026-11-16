@@ -73,3 +73,41 @@ def test_on_windows_it_points_at_the_installer_instead(installed, monkeypatch, c
     assert uninstall.run(assume_yes=True) == 1
     assert data.is_dir()  # nothing touched
     assert "Start menu" in capsys.readouterr().out
+
+
+def _seed_comfy(data):
+    comfy = data / "components" / "comfyui" / "ComfyUI"
+    (comfy / "models").mkdir(parents=True)
+    (comfy / "output").mkdir(parents=True)
+    (comfy / "models" / "m.safetensors").write_text("weights", encoding="utf-8")
+    (comfy / "output" / "a.png").write_text("img", encoding="utf-8")
+
+
+def test_comfyui_models_and_output_survive_by_default(installed):
+    data, _settings, _models = installed
+    _seed_comfy(data)
+    assert uninstall.run(assume_yes=True) == 0
+    kept = data.parent / f"{config.APP_ID}-kept"
+    assert (kept / "ComfyUI-models" / "m.safetensors").is_file()
+    assert (kept / "ComfyUI-output" / "a.png").is_file()
+    assert not (data / "components").exists()
+
+
+def test_comfyui_data_is_removed_only_when_the_user_says_so(installed, monkeypatch):
+    data, _settings, _models = installed
+    _seed_comfy(data)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    assert uninstall.run() == 0
+    assert not (data.parent / f"{config.APP_ID}-kept").exists()
+
+
+def test_a_foreign_listener_is_not_stopped(monkeypatch, capsys):
+    from launcher import service_manager
+
+    killed = []
+    monkeypatch.setattr(service_manager, "listening_pid", lambda port: 4242)
+    monkeypatch.setattr(service_manager, "probe", lambda port: "foreign")
+    monkeypatch.setattr(service_manager, "terminate_pid", lambda pid: killed.append(pid))
+    monkeypatch.setattr(uninstall.state, "service_port", lambda: 8571)
+    uninstall._stop_the_service()
+    assert killed == []
