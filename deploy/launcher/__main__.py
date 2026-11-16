@@ -116,6 +116,23 @@ _OUR_RESIZE_WINDOW = 2.0
 _DRAG_SETTLE_SECONDS = 0.4
 
 
+REPAIR_KEEPS = ("service_port", "lan_access", "api_key", "autostart", "starter_model")
+
+
+def _restore_user_settings(kept: dict) -> None:
+    """Put the user's own choices back after a repair cleared the launcher state.
+
+    The port goes through set_port so the .env and the frontend's config.json agree
+    with it again, not just the state file.
+    """
+    for key, value in kept.items():
+        if key != "service_port" and value is not None:
+            state.set(key, value)
+    port = kept.get("service_port")
+    if isinstance(port, int) and port != config.DEFAULT_SERVICE_PORT:
+        service_manager.set_port(port)
+
+
 def claim_desktop_identity() -> None:
     """Say which application this window belongs to, before one is created.
 
@@ -491,12 +508,21 @@ class SettingsApi:
         if port != current and not service_manager.is_port_free(port):
             return {"ok": False, "error": f"Port {port} is already in use by something else."}
 
+        service = self._launcher.service
         try:
+            # Stopped while the old port is still the recorded one. A service this
+            # launcher adopted has no process handle, so stop() finds it by port; after
+            # set_port it would look at the new port and leave the old backend running.
+            service.stop()
             service_manager.set_port(port)
-            self._launcher.service.restart()
+            service.start()
             self._launcher.reload_window()
             return {"ok": True}
         except Exception as exc:
+            with contextlib.suppress(Exception):
+                if state.service_port() != current:
+                    service_manager.set_port(current)
+                service.start()
             return {"ok": False, "error": str(exc)}
 
     def repair_environment(self) -> dict[str, Any]:
@@ -1242,6 +1268,12 @@ class Launcher:
             self._js(f"window.setMark({_js_string(_mark_data_uri())})")
             self._set_step("Removing the current environment", None, "", 0)
 
+            # What the user chose, as opposed to what setup derived. Clearing the state
+            # file resets it all, and a user on port 8572 came back to a UI that asked
+            # the default port while the service ran there, with LAN access and the API
+            # key gone too. Written back once the environment is rebuilt.
+            kept = {key: state.get(key) for key in REPAIR_KEEPS}
+
             result = maintenance.provisioning_output()
             log.info("repair: %s", result.summary())
             if not result.ok:
@@ -1255,6 +1287,7 @@ class Launcher:
                 on_progress=self._report_progress,
                 on_phases=self._publish_phases,
             )
+            _restore_user_settings(kept)
             self.service.start(on_wait=lambda seconds: self._set_step(
                 "Starting the service", None, "loading the GPU runtime", seconds))
             self.service.watch(self._service_lost)
@@ -2054,6 +2087,18 @@ def main(argv: list[str] | None = None) -> int:
         log.info("handed over to a copy without the mitigation; exiting")
         return 0
 
+    # Before the payload is touched, and before anything else is created. A second
+    # launch should raise the window that is already open, not add a tray icon and a
+    # second manager for one service -- where "Quit" on either would stop the service
+    # under the other. Taking the slot first also keeps a second AppImage start from
+    # replacing the payload the running backend is executing from.
+    import webview
+
+    launcher = Launcher()
+    if not single_instance.acquire(launcher.show_window, on_quit=launcher.quit):
+        log.info("another copy is already running; exiting")
+        return 0
+
     # Also before anything reads a path. Inside an AppImage the payload is mounted
     # read-only, and both the backend's .env and the llama build land inside it.
     try:
@@ -2080,16 +2125,6 @@ def main(argv: list[str] | None = None) -> int:
 
     claim_desktop_identity()
 
-    import webview
-
-    launcher = Launcher()
-
-    # Before anything else is created. A second launch should raise the window that is
-    # already open, not add a tray icon and a second manager for one service -- where
-    # "Quit" on either would stop the service under the other.
-    if not single_instance.acquire(launcher.show_window, on_quit=launcher.quit):
-        log.info("another copy is already running; exiting")
-        return 0
     maintenance.old_window_environment()
 
     # Sized before it is created, not after. Every launch used to open at the setup
