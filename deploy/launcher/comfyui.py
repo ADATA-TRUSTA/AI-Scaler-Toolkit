@@ -387,6 +387,27 @@ def _latest_tag(out) -> str:
     return str(tag) if tag else FALLBACK_TAG
 
 
+def _move_into_place(source: Path, destination: Path) -> None:
+    """Rename a directory into place, copying when the rename is refused.
+
+    Some company machines deny renaming a directory under %LOCALAPPDATA% (WinError 5),
+    which failed every install after the download. A copy needs no such permission;
+    the half-copied destination is removed if it fails so detection never sees it.
+    """
+    try:
+        source.replace(destination)
+        return
+    except PermissionError:
+        pass
+    shutil.rmtree(destination, ignore_errors=True)
+    try:
+        shutil.copytree(source, destination)
+    except OSError:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    shutil.rmtree(source, ignore_errors=True)
+
+
 def ensure_source(out) -> bool:
     """Download and unpack the ComfyUI source once. Every environment shares it."""
     from .components import _download
@@ -416,7 +437,7 @@ def ensure_source(out) -> bool:
             return False
         (roots[0] / ".trusta-version").write_text(tag + "\n", encoding="utf-8")
         shutil.rmtree(source_dir(), ignore_errors=True)
-        roots[0].replace(source_dir())
+        _move_into_place(roots[0], source_dir())
     except (OSError, zipfile.BadZipFile) as exc:
         out.note(f"Could not unpack ComfyUI: {exc}")
         return False
@@ -618,7 +639,7 @@ def ensure_nodes(out) -> bool:
                 out.note(f"The archive did not contain {node.name}.")
                 return False
             (roots[0] / ".trusta-version").write_text(node.commit + "\n", encoding="utf-8")
-            roots[0].replace(target)
+            _move_into_place(roots[0], target)
         except (OSError, zipfile.BadZipFile) as exc:
             out.note(f"Could not unpack {node.name}: {exc}")
             return False
