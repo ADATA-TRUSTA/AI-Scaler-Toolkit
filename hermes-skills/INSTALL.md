@@ -418,7 +418,11 @@ a 16 GB card. Holding that back for it would leave nothing to render with, so fo
 3. if the sleep is refused — on Windows the backup must fit in free **commit** plus 2 GiB, and Strata's resident mode
    page-locks 13.5 GiB of experts at load, so on a 32 GB box it never fits — `POST /inference/unload_model`
    instead (AST saves the conversation to a slot file and restores it on the next load);
-4. render; then wake it, or `POST /inference/load_model` with the same config (~35 s).
+4. render; `POST /free` to ComfyUI, and wait until the card is back to what it held while the LLM was away —
+   `/free` answers about a second before ComfyUI's models are off the card, and waking into that gap fails
+   (Linux: the engine refuses for lack of free VRAM) or, worse, succeeds into an overcommitted card (Windows:
+   WDDM parks part of the LLM in system RAM and prefill crawls until the next sleep);
+5. wake it, or `POST /inference/load_model` with the same config (~35 s).
 
 The planner counts that LLM's VRAM (read from the per-process GPU counters; AST reports 0 for Strata) and,
 when it will be unloaded, its RAM as available, and `start_comfy.py` does not reserve it. A lent LLM is
@@ -429,6 +433,8 @@ recorded in `jobs/LLM_LENT.json`. `recast` keeps it lent for a whole run and ret
 | `VIDGEN_LLM_SLEEP=off` | never lend; hold VRAM back as for any other engine |
 | `VIDGEN_LLM_RETURN=defer` | keep it lent after this job (what `recast` sets for its passes) |
 | `gen.py llm-return` (vidgen) | give a lent LLM back now — after an interrupted run |
+| `VIDGEN_WAKE_VRAM_MARGIN_GB=1.0` | how far above its level while the LLM was away the card may still be when it is given back |
+| `VIDGEN_WAKE_WAIT_S=20` | the longest to wait for that before giving it back anyway |
 
 While the GPU is lent, **the agent cannot answer anything**: it is asleep or unloaded until the render ends.
 

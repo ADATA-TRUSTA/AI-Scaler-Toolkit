@@ -72,6 +72,14 @@ GB = 1024.0
 HOLD_GB = float(os.environ.get("VIDGEN_LLM_VRAM_BUDGET") or 7.0)
 _vram_cache: tuple[float, float | None] = (0.0, None)
 
+# ComfyUI's /free answers before its models are off the card (~1 s later). Waking
+# into that gap fails on Linux (the engine refuses: not enough free VRAM) and on
+# Windows succeeds into an overcommitted card: WDDM parks 3-4 GB of the LLM in
+# system RAM and prefill crawls until the next sleep. So the LLM goes back only
+# once the card is down to what it held while the LLM slept, plus this margin.
+WAKE_MARGIN_GB = float(os.environ.get("VIDGEN_WAKE_VRAM_MARGIN_GB") or 1.0)
+WAKE_WAIT_S = float(os.environ.get("VIDGEN_WAKE_WAIT_S") or 20.0)
+
 # /inference/status fields that describe the running model rather than the load
 # request. Only a fallback: the load body is normally built from the backend's
 # own schema, and anything still extra is dropped on the 422 that names it.
@@ -298,6 +306,8 @@ def lend(reason: str = "") -> dict:
     rec = {"how": how, "config": config, "reason": reason,
            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
            "freed_gb": round(before - after, 1) if before is not None and after is not None else None,
+           # what the card held with the LLM away: the level to wait for before giving it back
+           "asleep_gb": after,
            "seconds": round(time.time() - t0, 1)}
     _write_lent(rec)
     _say("LLM %s for %s: %s GB of VRAM lent (%.1fs)"
@@ -306,12 +316,35 @@ def lend(reason: str = "") -> dict:
     return rec
 
 
+def _wait_card_freed(rec: dict) -> dict:
+    """Wait until the render's VRAM is really off the card (see WAKE_MARGIN_GB)."""
+    target = rec.get("asleep_gb")
+    used, t0 = _used_gb(), time.time()
+    if target is None or used is None:
+        # nothing to compare against: a pause covers /free's ~1 s lag
+        time.sleep(2.0)
+        return {"waited_s": 2.0, "measured": False}
+    target += WAKE_MARGIN_GB
+    while used is not None and used > target and time.time() - t0 < WAKE_WAIT_S:
+        time.sleep(0.25)
+        used = _used_gb()
+    waited = round(time.time() - t0, 1)
+    if used is not None and used > target:
+        _say("the card still holds %.1f GB after %.0fs (%.1f GB expected); giving the LLM back anyway"
+             % (used, waited, target))
+    return {"waited_s": waited, "measured": True, "used_gb": used, "target_gb": round(target, 1)}
+
+
 def restore(tries: int = 6, wait_s: float = 5.0) -> dict:
     """Give a lent LLM back (wake or reload). Never raises."""
     if not is_lent():
         return {"returned": False, "why": "nothing lent"}
     with open(LENT_FILE, encoding="utf-8") as f:
         rec = json.load(f)
+    try:
+        freed = _wait_card_freed(rec)
+    except Exception as e:                     # a failed reading must not keep the LLM away
+        freed = {"error": _err(e)}
     t0, last = time.time(), None
     for _ in range(tries):
         try:
@@ -331,9 +364,11 @@ def restore(tries: int = 6, wait_s: float = 5.0) -> dict:
                 else:
                     raise RuntimeError("model did not finish loading in 600 s")
             os.remove(LENT_FILE)
-            _say("LLM back (%s, %.1fs)" % ("woken" if rec.get("how") == "sleep" else "reloaded",
-                                         time.time() - t0))
-            return {"returned": True, "how": rec.get("how"), "seconds": round(time.time() - t0, 1)}
+            _say("LLM back (%s, %.1fs, after waiting %ss for the card to empty)"
+                 % ("woken" if rec.get("how") == "sleep" else "reloaded", time.time() - t0,
+                    freed.get("waited_s", "?")))
+            return {"returned": True, "how": rec.get("how"), "seconds": round(time.time() - t0, 1),
+                    "card": freed}
         except Exception as e:
             last = _err(e)
             time.sleep(wait_s)     # /free returns before the driver has every page back

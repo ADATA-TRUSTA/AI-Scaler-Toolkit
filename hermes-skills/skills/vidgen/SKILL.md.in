@@ -193,6 +193,7 @@ resident LLM on the same machine, then decides which reason to give:
 | A resident LLM on the same machine (the usual case) | The LLM's DRAM has been handed back; do not send any prompt meanwhile (every call re-reads the weights from SSD) |
 | **No resident LLM visible** (e.g. the LLM is on another machine/another OS, as in a WSL split install) | Only says not to send commands that **use the GPU** — because there is no DRAM hand-off at all |
 | **A local LLM that fills the GPU** (Strata) | The LLM is asleep/unloaded for the render, so **any message fails until it is loaded back** after the render (~35 s) |
+| **The LLM has a GPU of its own** (multi-GPU: the LLM on one card, ComfyUI on another) | The render is on the other card and the LLM keeps working: the user may keep chatting, and further image/video jobs queue behind this one. No DRAM hand-off, no sleep |
 
 **Reciting "the LLM's DRAM has been handed back to it" from memory is false in the second case**, and the only purpose of this notice
 is to let the user know **why** they should wait; giving a reason they cannot verify and that is not true only confuses them more.
@@ -203,6 +204,8 @@ seconds. Do not start it as a background process and then wait or poll for its o
 that fills the GPU, the render takes your GPU once you have been quiet for ~45 s, and a turn still waiting
 on a background process then fails mid-way (measured: the failed request was misread as a context
 overflow and the session was compressed from 65 messages to 15). Relay the notice, end the turn.
+
+**Multi-GPU (the notice says the render is on another card)**: submit with `background=true` + `notify_on_complete=true` and `--wait`, relay the notice, and end the turn right away. The render does not touch the LLM, so answer whatever the user asks next as usual; when the completion notification arrives, report the output path. Still never poll `status`. The rules below are for a GPU shared with the LLM.
 
 **During rendering you must follow the same rule yourself**:
 - ❌ Do not poll progress with `status` (each poll = one full inference = reloading the weights; measured about 28% slower)

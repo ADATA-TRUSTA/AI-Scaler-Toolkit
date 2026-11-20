@@ -121,6 +121,11 @@
 # Reference box: 16 GB card, 35B LLM at 7 GB -> ~7.5 GB left for video.
 VIDGEN_LLM_VRAM_BUDGET=7.0
 
+# On a card that is not NVIDIA, vidgen tells the agent to expect a very slow render: its timings
+# were measured on an Intel iGPU. A machine that measured its own card can say so here instead
+# (quote it), or "off" to drop the note, e.g.
+#VIDGEN_SPEED_NOTE="A 5 s 848x480 clip takes about 3.5 minutes on this card."
+
 # ---------------------------------------------------------------------------
 # The TRUSTA-AST backend
 # ---------------------------------------------------------------------------
@@ -254,6 +259,9 @@ VIDGEN_LLM_VRAM_BUDGET=7.0
 # imggen waits this long in the foreground (counted from its start), then prints
 # {"status": "running", "prompt_id": ...} and leaves ComfyUI to finish; collect it
 # with `gen.py status <prompt_id>`. Keep it under the agent's terminal timeout.
+# Image models this machine must not use, comma-separated; imggen refuses them
+# (e.g. qwen21,qwen21_edit,qwen21_move where Qwen-Image 2.1's licence does not fit).
+#IMGGEN_DISABLED_MODELS=
 #IMGGEN_WAIT_SECONDS=240
 # A running render with no progress (its server log not growing) for this long is
 # reported as stuck. One step on a slow card has been measured at two minutes.

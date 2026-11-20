@@ -72,6 +72,15 @@ _BUSY_NOTICE_NO_LLM = (
 )
 
 
+# Multi-GPU deployment: the LLM has a card of its own, so the render neither
+# trims its DRAM nor lends its GPU, and it keeps serving everyone meanwhile.
+_BUSY_NOTICE_OTHER_CARD = (
+    "🎬 影片正在另一張顯示卡上算圖,本機 LLM 在自己的顯示卡上照常運作,"
+    "可以繼續對話或問其他問題;如果還要生成圖片或影片,會排在這次之後。"
+    "算完我會回報輸出路徑。"
+)
+
+
 def busy_notice() -> str:
     """The standing 'do not disturb' notice, matched to what actually happened.
 
@@ -91,6 +100,12 @@ def busy_notice() -> str:
         visible = bool(memplan.llm_dram().get("found"))
     except Exception:
         visible = False
+    if visible:
+        try:
+            if not llmsleep.on_render_card():
+                return _BUSY_NOTICE_OTHER_CARD
+        except Exception:
+            pass
     return BUSY_NOTICE if visible else _BUSY_NOTICE_NO_LLM
 
 # After the render: the trim is why the next turn feels sluggish. Without this
@@ -566,6 +581,15 @@ def _release_llm_when_running(prompt_id: str, timeout_s: float = 120.0) -> None:
     global _LLM_TRIMMED
     if _LLM_TRIMMED:
         return
+    try:
+        if not llmsleep.on_render_card():
+            # Multi-GPU: the LLM keeps serving from its own card during the render;
+            # paging its weights out would only slow down its next answers.
+            _LLM_TRIMMED = True
+            _log("[llm] not trimming: the LLM is on another card and keeps serving")
+            return
+    except Exception:
+        pass
     t0 = time.time()
     while time.time() - t0 < timeout_s:
         if _is_executing(prompt_id):

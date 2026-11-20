@@ -24,7 +24,7 @@ GPUSHARE_TIMEOUT. "size" is the film's frame (default 1280:704).
 GPUSHARE_PRESET names a Python file for a production with its own vocabulary, used for the shots that
 have no "args". It may define ALIASES ({its card name: "render" | "llm"}), validate(shot) -> list of
 errors, args(shot, index, out_dir) -> (tool, gen.py args), and video_filter(shot) -> filters to run
-on a clip, ending in a comma.
+on a clip, ending in a comma, and finish(shot, file, out_dir) -> fields to merge into a finished shot's record.
 """
 import importlib.util, json, os, subprocess, time
 from pathlib import Path
@@ -95,6 +95,19 @@ def shot_args(s, idx, out_dir):
     return tool, args
 
 
+def finish(s, rec, out_dir):
+    """Let the preset turn a finished shot's output into what the plan asked for, e.g. a
+    poster taken from a short clip. The preset's finish(shot, file, out_dir) returns fields
+    to merge into the record (normally a new "file")."""
+    hook = preset_hook(s, "finish")
+    if hook and rec.get("status") == "done":
+        try:
+            rec.update(hook(s, rec["file"], out_dir) or {})
+        except Exception as e:
+            rec.update(status="error", error=f"finish: {e}")
+    return rec
+
+
 def state_path(plan_path):
     return Path(plan_path).with_suffix(".state.json")
 
@@ -147,6 +160,7 @@ def dispatch(plan_path):
                     p = subprocess.run([gs.PY, str(gs.SKILLS / tool / "gen.py"), *args], env=gs.comfy_env(),
                                        capture_output=True, text=True, timeout=budget)
                     rec.update(result(p, t0))
+                    finish(s, rec, out_dir)
                 except subprocess.TimeoutExpired:
                     gs.stop_comfy_jobs()
                     rec.update(status="error", error=f"did not finish inside the sleep window ({int(budget)} s)")
@@ -181,7 +195,7 @@ def render_runner(plan_path):
         tool, args = shot_args(s, i, out_dir)
         t0 = time.time()
         p = subprocess.run([gs.PY, str(gs.SKILLS / tool / "gen.py"), *args], env=RENDER_ENV, capture_output=True, text=True)
-        res[s["id"]] = result(p, t0)
+        res[s["id"]] = finish(s, result(p, t0), out_dir)
         render_path(plan_path).write_text(json.dumps(res, ensure_ascii=False))
 
 

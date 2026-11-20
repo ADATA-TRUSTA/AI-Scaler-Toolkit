@@ -414,7 +414,11 @@ expert cache 一路擴大到只剩約 0.3 GB，16 GB 的卡用掉 14.3 GB。替�
 3. 如果 sleep 被拒 —— Windows 上備份必須放得進可用的 **commit** 再加 2 GiB，而 Strata 的 resident 模式
    載入時就 page-lock 了 13.5 GiB 的 experts，32 GB 的機器上永遠放不下 —— 就改用 `POST /inference/unload_model`
    （AST 會先把對話存成 slot 檔，下次載入時還原）；
-4. 算圖；結束後喚醒它，或用同一份設定 `POST /inference/load_model`（約 35 秒）。
+4. 算圖；對 ComfyUI `POST /free`，並等顯示卡用量回到 LLM 借出期間的水準 ——
+   `/free` 會在 ComfyUI 的模型真的離開顯示卡之前約 1 秒就回應，在這段空檔喚醒會失敗
+   （Linux：引擎以可用 VRAM 不足拒絕），或更糟地喚醒到超用的顯示卡上（Windows：WDDM 把 LLM 的一部分
+   放到系統 RAM，直到下一次 sleep 前 prefill 都很慢）；
+5. 喚醒它，或用同一份設定 `POST /inference/load_model`（約 35 秒）。
 
 planner 會把這顆 LLM 的 VRAM（從每個程序的 GPU 計數器讀取；AST 對 Strata 回報 0）—— 以及要卸載時它的 RAM ——
 算成可用，`start_comfy.py` 也不會替它保留。借出中的 LLM 記錄在 `jobs/LLM_LENT.json`。
@@ -425,6 +429,8 @@ planner 會把這顆 LLM 的 VRAM（從每個程序的 GPU 計數器讀取；AST
 | `VIDGEN_LLM_SLEEP=off` | 永不借出；跟其他引擎一樣保留 VRAM |
 | `VIDGEN_LLM_RETURN=defer` | 這個工作結束後先不要還（`recast` 為它的各個 pass 設定的） |
 | `gen.py llm-return`（vidgen） | 立刻把借出的 LLM 還回去 —— 用在中途被中斷的時候 |
+| `VIDGEN_WAKE_VRAM_MARGIN_GB=1.0` | 歸還時，顯示卡用量最多可以比 LLM 借出期間高出多少 |
+| `VIDGEN_WAKE_WAIT_S=20` | 最多等多久；超過就照樣歸還 |
 
 借出期間，**agent 什麼都沒辦法回答**：在算圖結束前它是休眠或卸載狀態。
 

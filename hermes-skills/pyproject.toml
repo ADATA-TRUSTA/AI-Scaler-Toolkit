@@ -4,7 +4,7 @@
 # skills a user has installed are older than the ones it carries.
 [project]
 name = "comfyui-skill"
-version = "0.2.0"
+version = "0.3.0"
 description = "Image, video and animation skills for a Hermes agent on a local ComfyUI"
 license = "Apache-2.0"
 requires-python = ">=3.11"

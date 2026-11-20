@@ -742,6 +742,16 @@ def main():
                          "starves the co-resident LLM. Free it yourself when done.")
     a = ap.parse_args()
 
+    # A deployment can rule models out (IMGGEN_DISABLED_MODELS in hermes-comfy.conf),
+    # e.g. one whose licence does not cover a public show. Refuse before any work.
+    disabled = {m.strip() for m in os.environ.get("IMGGEN_DISABLED_MODELS", "").split(",")
+                if m.strip()}
+    if a.model in disabled:
+        print(json.dumps({"status": "error", "error": (
+            "model '%s' is disabled on this machine (IMGGEN_DISABLED_MODELS); pick another "
+            "model from the table in SKILL.md" % a.model)}, ensure_ascii=False))
+        sys.exit(2)
+
     # A linked install (install.py --link) re-renders its SKILL.md after a git
     # pull through a hook; this catches an update the hook did not see.
     import linkcheck

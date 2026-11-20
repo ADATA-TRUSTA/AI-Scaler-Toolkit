@@ -577,6 +577,11 @@ def speed_note() -> str | None:
     vendor = getattr(paths, "GPU_VENDOR", "") or ""
     if not vendor or vendor == "nvidia":
         return None
+    # A deployment that measured its own card replaces this iGPU-based warning
+    # (VIDGEN_SPEED_NOTE in hermes-comfy.conf; "off" drops the note).
+    override = os.environ.get("VIDGEN_SPEED_NOTE", "").strip()
+    if override:
+        return None if override.lower() == "off" else override
     name = {"intel": "an Intel", "amd": "an AMD"}.get(vendor, "a %s" % vendor)
     return ("ComfyUI is running on %s GPU, and every time estimate here was measured "
             "on NVIDIA cards. Expect far slower: on an Intel iGPU, Wan 5B at 480p took "

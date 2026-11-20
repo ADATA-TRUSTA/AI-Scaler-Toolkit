@@ -7,6 +7,19 @@ metadata:
     category: creative
 ---
 
+> **Models a machine has disabled.** `hermes-comfy.conf` can list models this machine must not use in
+> `IMGGEN_DISABLED_MODELS` (for example a model whose licence does not cover the occasion);
+> `gen.py` refuses them. Check `"error"` and choose another model from the table below.
+> - With the `qwen21` family disabled, use `flux` (English prompt) for text-to-image, and
+>   `img2img --image <path>` to redraw an image the user gave.
+> - No other model takes `--ref`. For a picture of a **reference character** (an image the user gave),
+>   make it a frame of a short video: vidgen `r2v "<scene, full body, facing the camera, she does not
+>   speak, static camera>" --ref <character image> --ref <location image> --short 480 --seconds 3
+>   --wait`, then take a frame 80% in: `ffmpeg -v error -y -ss 2.4 -i <clip.mp4> -frames:v 1 <out.png>`.
+>   One H3 segment holds the references; at 480p that covers 3 s, while a 720p segment is only
+>   1.62 s, too short for the location to appear. Tell the user the picture is a still from a clip.
+
+
 # imggen — local image generation
 **Always reply to the user in Traditional Chinese (zh-Hant).** These instructions are in English; the user speaks Chinese.
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.3.0 (2026-11-20)
+
+### Features
+
+- **gpushare:** add a finish hook for presets (4d6fd1c)
+- **vidgen:** let a machine replace the non-NVIDIA speed note (de89596)
+- **imggen:** let a machine disable image models (e15d115)
+
+### Fixes
+
+- **engine:** give a lent LLM back only once the card is empty (7fceed9)
+- **vidgen:** tell the user an LLM on another card keeps serving during a render (e973fb9)
+
 ## v0.2.0 (2026-11-04)
 
 ### Features
