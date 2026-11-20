@@ -69,7 +69,7 @@ Mind the last row: **unload the inference model before you start training.**
 |---|---|---|
 | transformers, llama.cpp | ✅ | ✅ |
 | vLLM | ❌ | ✅ (installed by default with NVIDIA; Intel needs `TRUSTA_SETUP_VLLM=1`) |
-| Strata | Depends on the package | Depends on the package; **NVIDIA only** |
+| Strata | NVIDIA and Intel Arc packages (no deep sleep on Intel) | NVIDIA and Intel Arc packages (no deep sleep on Intel) |
 | Fine-tuning | ❌ | ✅ (WSL2 counts as Linux) |
 
 The backend reports the engines and fine-tuning this machine can actually run through

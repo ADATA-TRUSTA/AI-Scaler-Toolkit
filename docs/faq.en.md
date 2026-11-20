@@ -50,7 +50,7 @@ The NVIDIA build needs a card with compute capability 7.5 or newer (RTX 20 / GTX
 
 ### Q7. vLLM or fine-tuning is missing
 
-Both run on Linux only. vLLM is installed with an NVIDIA GPU; on an Intel GPU it is not installed by default. Fine-tuning works on Linux with NVIDIA or Intel. On Windows the engines are Transformers and llama.cpp. With an NVIDIA GPU you can still use them on Windows by running the Linux version inside WSL2 (an Ubuntu distribution), for example the AppImage with `--headless` (see [Installation](installation.en.md#no-desktop-linux-servers)).
+Both run on Linux only. vLLM is installed with an NVIDIA GPU; on an Intel GPU it is not installed by default. Fine-tuning works on Linux with NVIDIA or Intel. On Windows the engines are Transformers, llama.cpp and (optional) Strata. With an NVIDIA GPU you can still use them on Windows by running the Linux version inside WSL2 (an Ubuntu distribution), for example the AppImage with `--headless` (see [Installation](installation.en.md#no-desktop-linux-servers)).
 
 ### Q8. The service will not start: the port is in use
 
@@ -146,3 +146,11 @@ If you use NVMe offload, also verify:
 - The disk at `nvme_path` has enough free space
 - Prefer SSD / NVMe instead of a slow HDD
 - Avoid sharing the same disk with other heavy I/O workloads
+
+### Q16. What is the Strata engine, and does my GPU support it?
+
+Strata is an optional engine for very large MoE models: the experts stay in system memory and the GPU caches the ones in use. The installer carries it and installs it the first time you load a Strata model; only GGUF files from its supported list are offered (see [the Strata page](../wiki/en/engines/strata.md)).
+
+- **NVIDIA**: supported, with *deep sleep*: the GPU is released in about a second for another program (for example image generation) and your conversation is kept.
+- **Intel Arc** (Windows or Linux): supported, **without deep sleep**: `POST /inference/sleep` answers 409. Speed on an integrated Arc GPU is in [Strata on Intel Arc](../wiki/en/benchmarks/strata-intel-arc.md). This path is newer and has seen less testing.
+- Other GPUs: the Strata engine is not offered.

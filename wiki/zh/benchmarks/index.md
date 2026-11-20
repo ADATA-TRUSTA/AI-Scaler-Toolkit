@@ -1,7 +1,7 @@
 ---
 title: 實測結果
 summary: 與 AST 核心（DRAM／SSD offload、引擎選擇、記憶體估算、GPU 切換、低顯存訓練）直接相關的實測，每份都附硬體、模型與設定。
-updatedAt: 2026-10-29
+updatedAt: 2026-11-20
 ---
 
 # 實測結果
@@ -16,6 +16,7 @@ updatedAt: 2026-10-29
 | [GGUF 記憶體估算的準確度](gguf-estimation-accuracy.md) | 權重與 KV 誤差 ≤1 MiB 且從不低估；`recommend` 給的參數用掉預算的 97% 左右 |
 | [Gen5 NVMe 對本地 AI 流程的影響](gen5-ssd.md) | 效益看工作負載有多少時間在等磁碟；預熱 page cache 讓 MoE decode 快 2 倍 |
 | [把 GPU 讓給其他程式：三種切換方式](gpu-handoff.md) | 256K 對話下，Strata sleep/wake 拿回 GPU 到答出第一句約 1.8 秒，重新載入約 26–33 秒 |
+| [Strata 在 Intel Arc 內顯上](strata-intel-arc.md) | 58 GB 的 Q1 模型在 30～32 GB 共用記憶體的筆電上跑得動：Windows 開 MTP 約 11 tok/s decode、175 tok/s prefill；256K 對話存檔後重啟只要 6 秒還原 |
 | [16 GB 顯卡上用 LoRA 訓練 35B MoE](deepspeed-lora-16gb.md) | DeepSpeed 0.19.2 下 peak 3.08 GiB；0.19.3 以後第一步就 OOM |
 
 ## 共通的測試機器

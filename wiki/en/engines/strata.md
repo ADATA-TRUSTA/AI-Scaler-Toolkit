@@ -1,7 +1,7 @@
 ---
 title: The Strata engine
-summary: Experts of a large MoE live in DRAM, hot experts are cached on the GPU; deep sleep releases the GPU in about a second and keeps the conversation. Optional, NVIDIA only.
-updatedAt: 2026-10-29
+summary: Experts of a large MoE live in DRAM, hot experts are cached on the GPU; deep sleep (NVIDIA) releases the GPU in about a second and keeps the conversation. Optional; the installer carries the package, for NVIDIA and for Intel Arc.
+updatedAt: 2026-11-20
 ---
 
 # The Strata engine
@@ -22,14 +22,60 @@ fill the card.
 
 ## Can it be used
 
-Optional, **NVIDIA only**. Backend 0.3.0 does not contain Strata: `strata` appears in
-`GET /health`'s `supported_engines` only when `STRATA_HOME` points to an installed Strata whose
-engine is a deep-sleep build supporting `--sleep-mode`. The settings are in the Strata section of
-[`backend/.env.example`](../../../backend/.env.example).
+Optional. **The installer carries a Strata package and installs it the first time you load a Strata
+model**, so you do not set `STRATA_HOME` yourself. Which package depends on the GPU:
 
-> The backend **always** starts Strata with `--sleep-mode`, so the prebuilt engine Strata's own
-> setup downloads (which lacks that flag) cannot be used; `STRATA_ENGINE_BINARY` must point to a
-> deep-sleep build.
+| GPU | Package | Deep sleep |
+|---|---|---|
+| NVIDIA (checked first: a PC with both gets this one) | CUDA | **Yes** |
+| Intel Arc (Windows or Linux) | Intel (SYCL) | **No** (see below) |
+| Anything else | None; the `strata` engine is not offered | |
+
+> The package is Strata with **deep sleep** added, compiled, together with Strata's Python side;
+> it does not come from Strata's own download. The backend always starts the CUDA engine with
+> `--sleep-mode`, so the prebuilt engine Strata's own setup downloads (which lacks that flag)
+> cannot be used.
+
+If you run the backend from a source checkout instead, `STRATA_HOME` pointing to an installed
+package (holding `serve/server.py`) makes `strata` appear in `GET /health`'s `supported_engines`;
+the settings are in the Strata section of [`backend/.env.example`](../../../backend/.env.example).
+
+### Which GGUF files
+
+Strata's setup accepts a fixed list of GGUF files (the first shard's file name): GSQ-RCO
+(Q2_0, IQ2_XS, IQ3_XXS, IQ3_S), Swift 1.5 (IQ2_XS, IQ3_XXS, IQ3_S), Coder (IQ1_M), Unsloth
+(UD-IQ4_XS, UD-Q4_K_XL, UD-Q5_K_XL, UD-Q6_K_XL, Q8_0) and Gyro-S / Gyro-M. Other quantizations,
+including Unsloth's UD-IQ3_XXS and UD-Q2_K_XL, are refused. `GET /config/models` marks each GGUF
+with `strata_supported`, and the Strata menu only offers those.
+
+### The first load
+
+If the GGUF has no run config yet, the first load installs the package (if needed) and runs
+Strata's setup against the GGUF **where it already is**; only the expert pack, the draft layer and
+the run config are generated. A file name that is not in the list is refused before any of this.
+Later loads start directly.
+
+## Intel Arc (SYCL) package
+
+| | CUDA package | Intel Arc package |
+|---|---|---|
+| Deep sleep | Yes | **No**: it is built on the CUDA driver's virtual memory, which Level Zero has no equivalent of |
+| `POST /inference/sleep`, `/wake` | Allowed | **409** `This Strata engine has no deep sleep…` |
+| Image reader | `strata-vision` on the GPU | `strata-vision-sycl` on the GPU, `strata-vision` on the CPU as the fallback |
+| `device` in the ready message | `cuda` | `sycl` |
+
+The Intel engine is built to run on **any x86-64 CPU with AVX2**, not only the one it was built on,
+and a model that is sharded keeps its own file names (as a Hugging Face cache symlink does).
+Both were fixed in the 0.2.11-sleep.2 packages after a build made on a newer CPU died with an
+illegal-instruction error on a Xeon.
+
+Measured numbers: [Strata on Intel Arc](../benchmarks/strata-intel-arc.md).
+
+> **Newer and less tested than the CUDA path.** The packages were installed and run on a laptop
+> with an integrated Arc GPU (Windows) and on a PC with a discrete Arc GPU of about 32 GB (Linux), but through Strata's own launcher; the full path
+> through AST's backend has not been run on an Intel machine yet. On Windows the backend sets
+> `STRATA_DOORBELL_CHECK=1` for the Intel engine by default (without it the engine stays up but
+> its replies can drift).
 
 ## How a model is described: the run config
 
@@ -88,13 +134,19 @@ next load. No saved file is not an error: `{"restored": false, "reason": "no sav
 > This is not the server-side chat history of `session_id`: what is saved here is the engine's own
 > KV, not a message list.
 
-## Two environment defaults at load
+## Environment defaults at load
 
 ```
-STRATA_UNBUFFERED_LOAD=1    STRATA_NO_ARENA_THP=1
+STRATA_UNBUFFERED_LOAD=1    STRATA_NO_ARENA_THP=1          (all platforms)
+STRATA_PLE_AUTO_RAM=0                                       (Windows)
+STRATA_DOORBELL_CHECK=1                                     (Windows, Intel engine)
 ```
 
-Applied only when you have not set them yourself. The reason is a measured incident: loading a
+Applied only when you have not set them yourself. The first two are explained below; on Windows the
+third keeps the engine from locking a large table in RAM, which would leave no room for the sleep
+backup (every sleep answered 409), and the fourth is the Intel check described above.
+
+The first two: The reason is a measured incident: loading a
 50 GiB expert arena through the page cache kept memory pressure above systemd-oomd's 50% threshold
 for long enough (69.8% measured) that **oomd logged out the whole desktop session**. Unbuffered,
 with transparent huge pages off, the same load peaked at 0.2% and **read faster**
@@ -111,9 +163,10 @@ lines of the server log are attached.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `STRATA_HOME` | empty | Strata's install directory (holding `serve/server.py`); empty means the engine is not offered |
+| `STRATA_HOME` | empty | Strata's install directory (holding `serve/server.py`). Empty: the installer's package is installed on the first load |
+| `STRATA_INSTALL_DIR` | empty | Where that package is installed: empty means next to the project; the desktop app uses a `strata` folder in its data directory |
 | `STRATA_PYTHON` | — | Interpreter for `serve/server.py`, normally Strata's own `.venv` |
-| `STRATA_ENGINE_BINARY` | — | **Required**: the deep-sleep engine build |
+| `STRATA_ENGINE_BINARY` | — | The engine build; written for you when the package is installed |
 | `STRATA_PORT` | `5002` | Loopback port |
 | `STRATA_HEALTH_TIMEOUT` | `900` | Seconds to wait for the model to load |
 | `STRATA_RUNTIME_DIR` | `./.cache/strata` | Run-config copies, server log, saved conversations |
@@ -122,4 +175,5 @@ lines of the server log are attached.
 
 - [Choosing an inference engine](index.md)
 - [vLLM](vllm.md) — the other engine that can sleep
+- [Strata on Intel Arc](../benchmarks/strata-intel-arc.md)
 - [Three ways to hand off the GPU](../benchmarks/gpu-handoff.md)

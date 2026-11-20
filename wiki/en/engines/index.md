@@ -11,7 +11,7 @@ updatedAt: 2026-10-29
 | | `transformers` | `llama_server` (llama.cpp) | `vllm` | `strata` |
 |---|---|---|---|---|
 | Model format | HF safetensors | **GGUF** | HF safetensors | GGUF (large MoE) |
-| Platform | All | All | **Linux** | **NVIDIA**, optional component |
+| Platform | All | All | **Linux** | **NVIDIA** and **Intel Arc** (no deep sleep on Intel), optional component |
 | Runs as | Inside the backend's worker | A managed child process | A managed child process | A managed child process |
 | Concurrency | Weak (one forward at a time) | `-np` slots | **Strong** (continuous batching) | Mostly single-user |
 | Quantization | bitsandbytes int8/int4 | In the GGUF | AWQ / GPTQ / FP8 etc. | In the GGUF |

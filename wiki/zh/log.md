@@ -2,6 +2,12 @@
 
 新的在最上面。
 
+## 2026-11-20 — Strata 在 Intel Arc 上
+
+- [Strata](engines/strata.md)：安裝檔帶著套件並在第一次載入時安裝；Intel Arc（Windows 與 Linux）也有套件，但沒有 deep sleep；寫下支援的 GGUF 清單、第一次載入的流程與載入時的環境變數預設。
+- 新增實測 [Strata 在 Intel Arc 上](benchmarks/strata-intel-arc.md)。
+- wiki 的其餘部分仍是依後端 0.3.0 寫的。
+
 ## 2026-10-29 — 重建
 
 整個 wiki 依後端 0.3.0 的程式碼重寫。

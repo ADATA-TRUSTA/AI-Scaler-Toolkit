@@ -2,6 +2,12 @@
 
 Newest first.
 
+## 2026-11-20 — Strata on Intel Arc
+
+- [Strata](engines/strata.md): the installer carries the package and installs it on the first load; Intel Arc (Windows and Linux) has a package too, without deep sleep; the supported GGUF list, the first-load flow and the load-time environment defaults are written down.
+- Added the measured result [Strata on Intel Arc](benchmarks/strata-intel-arc.md).
+- The rest of the wiki is still written against backend 0.3.0.
+
 ## 2026-10-29 — Rebuilt
 
 The whole wiki was rewritten against the backend 0.3.0 code.

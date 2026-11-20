@@ -11,7 +11,7 @@ updatedAt: 2026-10-29
 | | `transformers` | `llama_server`（llama.cpp） | `vllm` | `strata` |
 |---|---|---|---|---|
 | 模型格式 | HF safetensors | **GGUF** | HF safetensors | GGUF（大型 MoE） |
-| 平台 | 全平台 | 全平台 | **Linux** | **NVIDIA**，選用元件 |
+| 平台 | 全平台 | 全平台 | **Linux** | **NVIDIA** 與 **Intel Arc**（Intel 沒有 deep sleep），選用元件 |
 | 執行方式 | 在後端的 worker 行程內 | 管理一個子行程 | 管理一個子行程 | 管理一個子行程 |
 | 併發 | 弱（一次一個 forward） | `-np` 個 slot | **強**（continuous batching） | 以單人為主 |
 | 量化 | bitsandbytes int8／int4 | GGUF 內建 | AWQ／GPTQ／FP8 等 | GGUF 內建 |

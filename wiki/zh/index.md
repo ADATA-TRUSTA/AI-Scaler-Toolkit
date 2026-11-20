@@ -28,7 +28,7 @@
 - [transformers](engines/transformers.md) — 微調完直接載 adapter；`device_map` 的注意事項
 - [llama.cpp（llama_server）](engines/llama-server.md) — GGUF、slot 快取、mmproj、`--jinja`
 - [vLLM](engines/vllm.md) — 併發、KV offload、sleep/wake、tool parser 自動偵測
-- [Strata](engines/strata.md) — 大型 MoE 的專家放 DRAM，deep sleep 保住對話（NVIDIA）
+- [Strata](engines/strata.md) — 大型 MoE 的專家放 DRAM，deep sleep 保住對話（NVIDIA；Intel Arc 沒有 deep sleep）
 
 ## 記憶體與模型格式
 

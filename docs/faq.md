@@ -50,7 +50,7 @@ NVIDIA 版需要 compute capability 7.5 以上的顯卡（RTX 20／GTX 16 系列
 
 ### Q7. 找不到 vLLM 或微調
 
-兩者都只在 Linux 上。有 NVIDIA GPU 時會裝 vLLM；Intel GPU 預設不裝。微調在 Linux 上的 NVIDIA 或 Intel 都可以。Windows 上的引擎是 Transformers 與 llama.cpp。有 NVIDIA 顯卡的話，還是可以在 Windows 上用：在 WSL2（Ubuntu 發行版）裡執行 Linux 版，例如用 `--headless` 執行 AppImage（見[安裝](installation.md#沒有桌面linux-伺服器)）。
+兩者都只在 Linux 上。有 NVIDIA GPU 時會裝 vLLM；Intel GPU 預設不裝。微調在 Linux 上的 NVIDIA 或 Intel 都可以。Windows 上的引擎是 Transformers、llama.cpp 與（選用的）Strata。有 NVIDIA 顯卡的話，還是可以在 Windows 上用：在 WSL2（Ubuntu 發行版）裡執行 Linux 版，例如用 `--headless` 執行 AppImage（見[安裝](installation.md#沒有桌面linux-伺服器)）。
 
 ### Q8. 服務起不來：port 被佔用
 
@@ -146,3 +146,11 @@ NVIDIA。設定時會先找 NVIDIA 顯卡，找到就裝 CUDA 版，所以有 NV
 - `nvme_path` 所在磁碟空間足夠
 - 盡量使用 SSD / NVMe，不要放在慢速 HDD
 - 避免與其他高 I/O 工作共用同一顆磁碟
+
+### Q16. Strata 引擎是什麼？我的顯卡能用嗎？
+
+Strata 是給超大 MoE 模型用的選用引擎：專家放在系統記憶體，GPU 只快取正在用的。安裝檔已經帶著它，第一次載入 Strata 模型時自動安裝；只有它支援清單裡的 GGUF 檔會出現在選單（見 [Strata 頁](../wiki/zh/engines/strata.md)）。
+
+- **NVIDIA**：支援，並有 *deep sleep*：約一秒放掉 GPU 給別的程式（例如生圖），你的對話還在。
+- **Intel Arc**（Windows 或 Linux）：支援，但**沒有 deep sleep**：`POST /inference/sleep` 會回 409。Arc 內顯上的速度見 [Strata 在 Intel Arc 上](../wiki/zh/benchmarks/strata-intel-arc.md)。這條路比較新，測得比較少。
+- 其他顯卡：不提供 Strata 引擎。

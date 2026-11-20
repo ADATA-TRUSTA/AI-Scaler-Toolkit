@@ -68,7 +68,7 @@ NVMe SSD 在這裡被當成**記憶體階層的一部分**，不只是放檔案�
 |---|---|---|
 | transformers、llama.cpp | ✅ | ✅ |
 | vLLM | ❌ | ✅（NVIDIA 預設安裝；Intel 要 `TRUSTA_SETUP_VLLM=1`） |
-| Strata | 依安裝包 | 依安裝包；**只支援 NVIDIA** |
+| Strata | NVIDIA 與 Intel Arc 套件（Intel 沒有 deep sleep） | NVIDIA 與 Intel Arc 套件（Intel 沒有 deep sleep） |
 | 微調 | ❌ | ✅（WSL2 也算 Linux） |
 
 後端用 `GET /health` 回報這台機器實際能用的引擎與微調；網頁介面依此決定要顯示哪些選項。

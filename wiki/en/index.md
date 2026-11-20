@@ -29,7 +29,7 @@
 - [transformers](engines/transformers.md) — load a fresh adapter directly; `device_map` caveats
 - [llama.cpp (llama_server)](engines/llama-server.md) — GGUF, slot cache, mmproj, `--jinja`
 - [vLLM](engines/vllm.md) — concurrency, KV offload, sleep/wake, automatic tool-parser detection
-- [Strata](engines/strata.md) — experts of a large MoE in DRAM; deep sleep keeps the conversation (NVIDIA)
+- [Strata](engines/strata.md) — experts of a large MoE in DRAM; deep sleep keeps the conversation (NVIDIA; Intel Arc without deep sleep)
 
 ## Memory and model formats
 
