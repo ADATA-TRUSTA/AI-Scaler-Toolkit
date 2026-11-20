@@ -95,6 +95,12 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 ; an upgrade leaves it behind -- 67 files with no interpreter to run them, in the
 ; directory a user browses when looking for the application.
 Type: filesandordirs; Name: "{app}\console"
+; Strata engine packages are picked by name from backend\vendor, newest last, and a name
+; like strata-sleep-0.2.7-sleep.3-... sorts after strata-0.2.11-sleep.2-..., so a package
+; an older build left behind is the one that gets installed: an upgraded Arc B390 ran the
+; 0.2.7 engine that crashes on it. This runs before the new files are copied, so only this
+; build's packages remain.
+Type: files; Name: "{app}\backend\vendor\strata-*"
 
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
