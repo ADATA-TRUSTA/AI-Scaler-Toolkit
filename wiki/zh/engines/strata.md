@@ -58,7 +58,7 @@ Gyro-S／Gyro-M。其他量化（含 Unsloth 的 UD-IQ3_XXS、UD-Q2_K_XL）會�
 | 就緒訊息的 `device` | `cuda` | `sycl` |
 
 Intel 引擎建成可以在**任何有 AVX2 的 x86-64 CPU** 上跑，不只是建置那一台；分片的模型也保有自己的檔名（Hugging Face 快取的符號連結就是這樣）。
-這兩點都在 0.2.11-sleep.2 的套件修好：在較新 CPU 上建的引擎，曾在 Xeon 上以非法指令錯誤當掉。
+這兩點都在 0.2.11-sleep.2 的套件修好：在較新 CPU 上建的引擎，曾在沒有那些指令的伺服器 CPU 上以非法指令錯誤當掉。
 
 實測數字：[Strata 在 Intel Arc 上](../benchmarks/strata-intel-arc.md)。
 
@@ -158,4 +158,6 @@ STRATA_DOORBELL_CHECK=1                                     （Windows，Intel �
 - [推論引擎怎麼選](index.md)
 - [vLLM](vllm.md) — 另一個能 sleep 的引擎
 - [Strata 在 Intel Arc 上](../benchmarks/strata-intel-arc.md)
+- [用 AMX 讀 prompt](../benchmarks/strata-amx-prefill.md)
+- [Strata 與 vLLM 在一張 48 GB 卡上](../benchmarks/strata-vs-vllm.md)
 - [三種切換方式](../benchmarks/gpu-handoff.md)

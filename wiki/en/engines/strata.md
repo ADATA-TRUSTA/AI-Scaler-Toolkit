@@ -67,7 +67,7 @@ Later loads start directly.
 The Intel engine is built to run on **any x86-64 CPU with AVX2**, not only the one it was built on,
 and a model that is sharded keeps its own file names (as a Hugging Face cache symlink does).
 Both were fixed in the 0.2.11-sleep.2 packages after a build made on a newer CPU died with an
-illegal-instruction error on a Xeon.
+illegal-instruction error on a server CPU without those instructions.
 
 Measured numbers: [Strata on Intel Arc](../benchmarks/strata-intel-arc.md).
 
@@ -176,4 +176,6 @@ lines of the server log are attached.
 - [Choosing an inference engine](index.md)
 - [vLLM](vllm.md) — the other engine that can sleep
 - [Strata on Intel Arc](../benchmarks/strata-intel-arc.md)
+- [Prompt reading with AMX](../benchmarks/strata-amx-prefill.md)
+- [Strata and vLLM on one 48 GB GPU](../benchmarks/strata-vs-vllm.md)
 - [Three ways to hand off the GPU](../benchmarks/gpu-handoff.md)

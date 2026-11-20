@@ -1,7 +1,7 @@
 ---
 title: vLLM native KV cache offload to DRAM/NVMe
 summary: On a 16 GB card, Qwen3.5-35B at full context, 8 concurrent requests, and many users sharing one document all worked; revisits went from 445 s to 6 s and from 1,676 s to 37.6 s. When the DRAM tier cannot hold the prefix to bring back, the hit rate is 0% even though the data was read.
-updatedAt: 2026-10-29
+updatedAt: 2026-11-20
 measuredAt: 2026-09-23
 ---
 
@@ -40,6 +40,47 @@ measuredAt: 2026-09-23
    cleanup endpoint; see [vLLM](../engines/vllm.md).
 5. **Reuse across restarts needs a fixed `PYTHONHASHSEED`**, which the backend sets when starting
    vLLM; after a full machine restart the measured hit rate was 99.3%.
+
+## Update: vLLM 0.32, 100 users, DRAM and SSD (2026-11)
+
+The same question on a bigger setup: the GPU's KV cache is made deliberately small, and 100 people
+take turns.
+
+| Item | Value |
+|---|---|
+| Hardware | two GPUs with 48 GB each (tensor parallel 2), 20-core workstation CPU, 503 GiB DRAM; the KV tier on a Gen5 NVMe SSD, separate from the model disk |
+| vLLM | 0.32.0, `vllm serve`; requests to `/v1/completions`, streaming; reuse read from `cached_tokens` |
+| Model | Qwen3.5-35B-A3B GPTQ-8bit (41 GB), all weights on the GPUs |
+| Settings | model length 262,144, `max_num_seqs` 128, **GPU KV limited to 816,244 tokens** (8 GiB; unrestricted it would be 2,139,300 and the working set would fit, so offload would not be used) |
+| Workload | 100 users, each a different 16,000-token document, all sending at once with the whole history plus a new question, 3 rounds; a working set of about 1.6 M tokens, twice the GPU KV. `max_tokens` 16 |
+| SSD runs | the page cache dropped every second, so reads really come from the disk |
+
+Time for a round of 100 requests, and how much was reused:
+
+| Setting | Round 1 | Round 2 | Round 3 | Round 2 hit | Users hit |
+|---|---|---|---|---|---|
+| No offload | 111.1 s | 111.2 s | 111.5 s | 0% | 0 |
+| DRAM 8 GiB | 114.0 s | 113.8 s | 114.6 s | 0% | 0 |
+| DRAM 32 GiB | 113.5 s | 113.5 s | 112.9 s | 0% | 0 (1 in round 3) |
+| DRAM 8 GiB + SSD | 113.8 s | 70.1 s | 71.6 s | 40.5% | 41 |
+| **DRAM 32 GiB + SSD** | 114.2 s | **8.1 s** | **5.7 s** | **98.7%** | **100** |
+
+With DRAM 32 GiB + SSD the mean time to first token in round 2 was 4.5 s (p95 7.8 s), against 56.2 s
+(p95 105.5 s) with no offload. One user's 200,000-token document, asked about again after the
+100-user rounds had pushed it out of the GPU: 25.5 s without the SSD tier, **1.8 s** with it
+(199,584 tokens reused).
+
+- **All the saving comes from the SSD tier.** With DRAM only, even 32 GiB, the hit rate stays near 0:
+  the working set is cycled through and the DRAM LRU, smaller than it, evicts it all in turn.
+- **A DRAM tier that is too small cripples the SSD tier.** With 8 GiB, the SSD tier read 529 GB but
+  only 30.6 GB reached the GPU; 100 simultaneous requests load blocks that are evicted before they
+  are used. With 32 GiB it read 47.3 GB (wrote 52.7 GB) and all 100 hit.
+- Cost: round 1 is 2–3% slower (it writes the tier); SSD reads peaked at about 3.1–3.6 GB/s.
+- Without offload, the time is recomputing: about 8,400 tok/s for this 35B (a 200K document cold in 23.7 s).
+
+Only 8 and 32 GiB were tried; that the DRAM tier must hold the blocks of the requests loading at once
+is inferred from the counters, not from a sweep. A GGUF model could not be tried: vLLM 0.28 and 0.32
+have no GGUF loader.
 
 ## Limits
 

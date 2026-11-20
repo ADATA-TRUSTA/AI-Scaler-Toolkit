@@ -17,6 +17,8 @@ can give different results. Each page states its conditions first and its limits
 | [What Gen5 NVMe does for local AI workloads](gen5-ssd.md) | The gain depends on how much time is spent waiting for the disk; pre-warming the page cache doubles MoE decode |
 | [Handing the GPU to another program: three ways](gpu-handoff.md) | At a 256K conversation, Strata sleep/wake takes about 1.8 s from getting the GPU back to the first answer; reloading takes 26–33 s |
 | [Strata on an Intel Arc integrated GPU](strata-intel-arc.md) | A 58 GB Q1 model runs on a 30–32 GB shared-memory laptop: about 11 tok/s decode and 175 tok/s prefill on Windows with MTP; a 256K conversation is saved and restored in 6 s after a restart |
+| [Strata prompt reading with the CPU's AMX units](strata-amx-prefill.md) | A 4K prompt reads about 90–110% faster when the CPU computes a share of the experts; at 32K there is no gain, and with the engine's default limit AMX does nothing above about 3K tokens |
+| [Strata and vLLM on one 48 GB GPU, experts in DRAM](strata-vs-vllm.md) | Four users reading 4K each finish in 23 s on Strata and 150 s on vLLM; with a KV cache a 4K follow-up takes 2.3 s against 16–19 s |
 | [LoRA training a 35B MoE on a 16 GB GPU](deepspeed-lora-16gb.md) | 3.08 GiB peak with DeepSpeed 0.19.2; OOM on the first step from 0.19.3 |
 
 ## The usual test machine
