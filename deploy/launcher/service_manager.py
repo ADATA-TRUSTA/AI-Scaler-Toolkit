@@ -362,6 +362,25 @@ def _log_tail(path: Path, lines: int = 12) -> str:
     return f"Last lines of {path}:\n" + "\n".join(content[-lines:])
 
 
+def with_bundled_uv(environment: dict[str, str]) -> bool:
+    """Put the uv the payload carries first on PATH and name it in TRUSTA_UV.
+
+    Provisioning already does this for setup_env, but the service is started from a
+    different environment, and what it runs by name afterwards needs the same uv: Strata's
+    install_strata script refuses to start without a bare ``uv`` on PATH, and vLLM looks
+    for one too. A machine without a uv of its own -- most of them -- failed there with
+    "uv is needed for Strata's venv", while a developer's machine, which has one, never
+    saw it. Returns whether the payload carries one; a source checkout has none and is
+    left alone.
+    """
+    uv = config.uv_binary()
+    if uv is None:
+        return False
+    environment["TRUSTA_UV"] = str(uv)
+    environment["PATH"] = str(uv.parent) + os.pathsep + environment.get("PATH", "")
+    return True
+
+
 class ServiceManager:
     def __init__(self) -> None:
         self._process: subprocess.Popen | None = None
@@ -508,6 +527,10 @@ class ServiceManager:
             merged["CUDA_HOME"] = str(cuda_home)
             merged["PATH"] = str(cuda_home / "bin") + os.pathsep + merged.get("PATH", "")
             log.info("CUDA_HOME=%s (the toolkit the cuda extra installed)", cuda_home)
+
+        # The uv the payload ships, for the install scripts the backend runs by name.
+        if with_bundled_uv(merged):
+            log.info("uv=%s (the one the installer carries)", merged["TRUSTA_UV"])
 
         # Intel only: setup_env.sh links libze_loader.so into the environment when
         # libze-dev is absent, because oneCCL opens that unversioned name and training
