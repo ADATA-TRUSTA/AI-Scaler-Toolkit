@@ -4,6 +4,8 @@ Uses separate process for model loading/inference to avoid OOM VRAM issues.
 """
 
 import asyncio
+import contextlib
+import sys
 import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -46,6 +48,13 @@ class ModelSleepingError(RuntimeError):
     """A generation reached a sleeping model while its auto-wake is off."""
 
 
+UNLOADING_MESSAGE = "A model is being unloaded. Wait for the unload to finish, then load again."
+
+
+class ModelUnloadingError(RuntimeError):
+    """A load was requested while an unload was still running."""
+
+
 class ModelManager:
     """
     Singleton Model Manager for inference
@@ -54,6 +63,9 @@ class ModelManager:
 
     _instance = None
     _lock = Lock()
+    # Class-level defaults so a manager built without __init__ (tests do) still works.
+    _unloading = 0
+    _unloading_guard = Lock()
 
     def __new__(cls) -> "ModelManager":
         """Return the process-wide singleton instance."""
@@ -95,6 +107,12 @@ class ModelManager:
         # requests that find it asleep share one wake-up instead of racing.
         self._sleeping = False
         self._sleep_lock = asyncio.Lock()
+        # Unloads (and forced cleanups) in progress. Counted outside self._lock on
+        # purpose: an unload holds that lock for as long as the engine takes to shut
+        # down, so a load request that waited on it would block the event loop for
+        # that long, and then see a half-unloaded model as loaded.
+        self._unloading = 0
+        self._unloading_guard = Lock()
 
         self._initialized = True
 
@@ -456,6 +474,20 @@ class ModelManager:
         except Exception as e:
             logger.warning(f"Failed to persist inference config: {e}")
 
+    def is_unloading(self) -> bool:
+        """True while an unload or forced cleanup is running. Never blocks."""
+        return self._unloading > 0
+
+    @contextlib.contextmanager
+    def _unloading_scope(self) -> Iterator[None]:
+        with self._unloading_guard:
+            self._unloading += 1
+        try:
+            yield
+        finally:
+            with self._unloading_guard:
+                self._unloading -= 1
+
     def prepare_config(self, config: InferenceConfig) -> bool:
         """
         Stage one: validate and persist the config, then mark it current/pending.
@@ -463,6 +495,8 @@ class ModelManager:
         No tokenizer or model weight download happens here, so /inference/status
         reflects the settings immediately.
         """
+        if self.is_unloading():
+            raise ModelUnloadingError(UNLOADING_MESSAGE)
         with self._lock:
             if self.is_loaded():
                 raise RuntimeError("Model already loaded. Please unload first.")
@@ -492,7 +526,7 @@ class ModelManager:
 
     def unload_model(self) -> dict:
         """Unload the model."""
-        with self._lock:
+        with self._unloading_scope(), self._lock:
             # Check whether a model is loaded or still loading
             status = self.inference_process.get_status()
 
@@ -545,6 +579,21 @@ class ModelManager:
             }
         return result
 
+    def abort_generations(self) -> bool:
+        """
+        End every generation in flight, if there is any. True when there was one.
+
+        Call it on the event loop: the async requests' stop events are asyncio.Events. The
+        worker is told only when it has a request of its own running, because a stop marks
+        the time, and an unload within 3 s of one waits out the rest for the worker's
+        generation thread (ModelInferenceProcess.unload_model).
+        """
+        async_stopped = self._signal_async_stop(None)
+        worker_busy = self.inference_process.has_active_requests()
+        if worker_busy:
+            self.inference_process.stop_generation()
+        return async_stopped or worker_busy
+
     def is_loaded(self) -> bool:
         """Check whether a model is loaded."""
         return self.inference_process.is_loaded()
@@ -578,6 +627,7 @@ class ModelManager:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
         request_id: str | None = None,
+        strata_amx: bool | None = None,
     ) -> dict:
         """
         Generate text (non-streaming).
@@ -586,6 +636,7 @@ class ModelManager:
             total_timeout: Total generation timeout in seconds (DEFAULT_GENERATION_TIMEOUT)
             enable_thinking: Whether to enable thinking mode
             reasoning_effort: Graded thinking level (low/medium/high) for models that take one
+            strata_amx: Strata's per-request AMX switch; the worker engines have no use for it
         """
         if not self.is_loaded():
             raise RuntimeError("Model not loaded. Please load a model first.")
@@ -636,6 +687,7 @@ class ModelManager:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
         request_id: str | None = None,
+        strata_amx: bool | None = None,
     ) -> Iterator[dict]:
         """
         Generate text (streaming).
@@ -644,6 +696,7 @@ class ModelManager:
             total_timeout: Total generation timeout in seconds (DEFAULT_GENERATION_TIMEOUT)
             enable_thinking: Whether to enable thinking mode
             reasoning_effort: Graded thinking level (low/medium/high) for models that take one
+            strata_amx: Strata's per-request AMX switch; the worker engines have no use for it
         """
         if not self.is_loaded():
             raise RuntimeError("Model not loaded. Please load a model first.")
@@ -695,6 +748,7 @@ class ModelManager:
         images: list[str] | None,
         tools: list[dict[str, Any]] | None,
         tool_choice: Any | None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
+        strata_amx: bool | None = None,
     ) -> dict[str, Any]:
         return {
             "max_new_tokens": max_new_tokens,
@@ -708,6 +762,7 @@ class ModelManager:
             "images": images,
             "tools": tools,
             "tool_choice": tool_choice,
+            "strata_amx": strata_amx,
         }
 
     @staticmethod
@@ -739,6 +794,7 @@ class ModelManager:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
         request_id: str | None = None,
+        strata_amx: bool | None = None,
     ) -> dict:
         """Async non-stream generation via direct HTTP (server engines only)."""
         if not self.is_loaded():
@@ -756,6 +812,7 @@ class ModelManager:
             images=images,
             tools=tools,
             tool_choice=tool_choice,
+            strata_amx=strata_amx,
         )
         await self._ensure_awake()
         client = await self._acquire_async_client()
@@ -816,6 +873,7 @@ class ModelManager:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any | None = None,  # noqa: ANN401 - OpenAI-style tool selection, passed through
         request_id: str | None = None,
+        strata_amx: bool | None = None,
     ) -> AsyncIterator[dict]:
         """Async streaming generation via direct HTTP (server engines only)."""
         if not self.is_loaded():
@@ -833,6 +891,7 @@ class ModelManager:
             images=images,
             tools=tools,
             tool_choice=tool_choice,
+            strata_amx=strata_amx,
         )
         await self._ensure_awake()
         client = await self._acquire_async_client()
@@ -889,6 +948,9 @@ class ModelManager:
             "prefill_strategy": process_status.get("prefill_strategy"),
             "loaded_at": process_status.get("loaded_at"),
             "n_gpu_layers": cfg.n_gpu_layers if cfg else None,
+            # Without it a page reload shows 0 for a model loaded with -ncmoe 15, and the
+            # next load from that form silently drops the expert offload (F-0080).
+            "n_cpu_moe": cfg.n_cpu_moe if cfg else None,
             "n_ctx": cfg.n_ctx if cfg else None,
             "n_batch": cfg.n_batch if cfg else None,
             # llama.cpp splits -c across its -np slots, so callers deriving the
@@ -954,9 +1016,11 @@ class ModelManager:
             # Fallback: read it in the main process (only sees main-process usage, usually 0).
             # torch is imported here rather than at module import, which it would slow by
             # seconds; this branch is reached only once a model is loaded.
-            import torch
-
-            if torch.cuda.is_available():
+            # Only when something else already imported it: this runs on the event
+            # loop, where a first `import torch` stalls every request for seconds.
+            # The worker reports its own numbers, which is the normal path.
+            torch = sys.modules.get("torch")
+            if torch is not None and torch.cuda.is_available():
                 try:
                     status["memory_usage"] = {
                         "allocated_gb": torch.cuda.memory_allocated() / (1024**3),
@@ -1015,7 +1079,7 @@ class ModelManager:
         """
         logger.warning("Force cleanup GPU - terminating worker process...")
 
-        with self._lock:
+        with self._unloading_scope(), self._lock:
             # Force-stop the current process
             if self.inference_process.process and self.inference_process.process.is_alive():
                 try:

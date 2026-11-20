@@ -75,6 +75,24 @@ def test_build_chat_payload_defaults_no_extra_body():
     assert "tools" not in payload
 
 
+@pytest.mark.parametrize("engine", [InferenceEngine.STRATA, InferenceEngine.LLAMA_SERVER])
+@pytest.mark.parametrize("amx", [True, False])
+def test_build_chat_payload_forwards_strata_amx(engine, amx):
+    payload = build_chat_payload(
+        "m", [{"role": "user", "content": "hi"}], {"strata_amx": amx}, stream=True, engine=engine
+    )
+    assert payload["extra_body"]["strata_tune"] == {"amx": amx}
+
+
+@pytest.mark.parametrize("engine", [InferenceEngine.VLLM, InferenceEngine.STRATA])
+def test_build_chat_payload_no_strata_tune_unless_asked_or_on_vllm(engine):
+    asked = {"strata_amx": True} if engine == InferenceEngine.VLLM else {}
+    payload = build_chat_payload(
+        "m", [{"role": "user", "content": "hi"}], asked, stream=True, engine=engine
+    )
+    assert "strata_tune" not in payload.get("extra_body", {})
+
+
 def test_build_chat_payload_output_cap_clamps_and_never_invents(monkeypatch):
     """
     MAX_OUTPUT_TOKENS_CAP is a ceiling, not a default.

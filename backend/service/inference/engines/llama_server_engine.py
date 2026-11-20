@@ -27,6 +27,7 @@ from ...settings import (
     configure_logging,
     effective_llama_binary,
 )
+from ...utils.process_identity import process_identity
 from ..generate.llama_server_runner import (
     handle_server_log_line,
 )
@@ -1084,6 +1085,7 @@ class LlamaServerEngine(BaseEngine):
             env=env,
         )
         self.managed_process = True
+        self._report_server_started()
 
         # Start log-forwarding threads to avoid PIPE blocking and surface llama-server logs in the service log
         self._stdout_pump_thread = threading.Thread(
@@ -1098,6 +1100,33 @@ class LlamaServerEngine(BaseEngine):
         )
         self._stdout_pump_thread.start()
         self._stderr_pump_thread.start()
+
+    def _report_server_started(self) -> None:
+        """
+        Tell the API process which llama-server this worker started.
+
+        The server is a child of the worker, not part of it: a worker that is terminated
+        (force_cleanup_gpu, a crash, a kill) never runs unload(), and the server stays
+        behind with its port and the model in memory. The API process stops whatever is
+        left once the worker is gone, and needs the PID and start time to know it is still
+        this server. The server shares the worker's session, so only the process tree is
+        stopped (own_session False).
+        """
+        try:
+            pid = self.server_process.pid  # type: ignore[union-attr]
+            create_time = process_identity(pid)
+        except (AttributeError, TypeError):
+            return  # already gone: nothing to leave behind
+        if create_time is None:
+            return
+        self.status_queue.put(
+            {
+                "status": "server_started",
+                "pid": pid,
+                "create_time": create_time,
+                "own_session": False,
+            }
+        )
 
     def _drain_log_pump_threads(self, timeout: float = 2.0) -> None:
         for attr_name in ("_stdout_pump_thread", "_stderr_pump_thread"):

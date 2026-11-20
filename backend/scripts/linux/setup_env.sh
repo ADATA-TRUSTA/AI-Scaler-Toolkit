@@ -756,6 +756,11 @@ build_llama_from_source() {
     # gets all three for free from the release zip; here they have to be asked for, and both
     # resolvers look for them beside llama-server.
     echo "[setup_env] building ${targets[*]} $ver ($LLAMA_BACKEND, GGML_NATIVE=ON); this takes a few minutes"
+    # The sources are a tag tarball without .git, so llama.cpp's CMake computes build number 0 and
+    # fetches the web UI assets for tag "b0", which does not exist (404). The retry with "latest"
+    # then fails the hash check and the configure aborts. Naming the tag keeps the UI in step with
+    # the sources. An explicit HF_UI_VERSION from the caller still wins.
+    export HF_UI_VERSION="${HF_UI_VERSION:-$ver}"
     cmake "${cmake_args[@]}" || return 1
     cmake --build "$LLAMA_BUILD_DIR/build" --target "${targets[@]}" --parallel "$(nproc)" || return 1
 

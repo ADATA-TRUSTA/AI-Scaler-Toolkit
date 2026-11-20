@@ -17,10 +17,13 @@ from queue import Empty
 from queue import Queue as ThreadQueue
 from typing import Any, cast
 
+import psutil
+
 from ..config_models import InferenceConfig, InferenceEngine
 
 # Import settings BEFORE torch/transformers (sets HF_HOME environment variable)
 from ..settings import DEFAULT_GENERATION_TIMEOUT, configure_logging
+from ..utils.process_identity import process_identity
 from .engines.llama_server_engine import LlamaServerEngine
 from .engines.strata_engine import StrataEngine
 from .engines.vllm_engine import VllmEngine
@@ -30,6 +33,89 @@ from .engines.vllm_engine import VllmEngine
 # worker needs them: torch + transformers + peft cost a few seconds of each start.
 
 logger = configure_logging(__name__)
+
+# How long an unload waits for the engine to say it is done before the worker is stopped.
+# The engine's own unload is what ends a server engine cleanly: Strata saves the
+# conversation and then stops its server, which may take 60 s by itself. The worker used
+# to get 7.5 s; with a 50 GB Strata model that was not enough, so it was killed mid-unload
+# and the server, in a session of its own, kept 49.7 GB of RAM and 15 GB of VRAM after the
+# API had reported the model unloaded (F-0086). An engine that reports sooner ends the
+# wait sooner; this only bounds one that hangs.
+UNLOAD_WAIT_SECONDS = 120.0
+# Once the worker is gone, how long a server it left behind gets to exit on a polite
+# signal before it is killed.
+ORPHAN_SERVER_GRACE_SECONDS = 10.0
+
+
+def _session_members(sid: int) -> list[psutil.Process]:
+    """The processes in session ``sid`` (POSIX)."""
+    members = []
+    for proc in psutil.process_iter():
+        try:
+            if os.getsid(proc.pid) == sid:  # pyright: ignore[reportAttributeAccessIssue]  # POSIX-only; callers check
+                members.append(proc)
+        except (ProcessLookupError, PermissionError, psutil.Error):
+            continue
+    return members
+
+
+def stop_orphaned_server(pid: int, create_time: float, own_session: bool) -> list[int]:
+    """
+    Stop an engine server whose worker is gone, with everything it started.
+
+    ``create_time`` is what ``process_identity`` returned when the server started: a process
+    now holding that PID with another start time is not ours and is left alone. ``own_session`` says the
+    server was started with ``start_new_session``, so it leads a session numbered by its
+    PID. The session, not the process group, is what reaches a Strata engine whose
+    ``serve/server.py`` has already exited: server.py puts the engine in a process group of
+    its own (measured: engine PGID 1971055, server PGID and both SIDs 1971050), and once
+    server.py is gone the engine is out of its process tree too, but it keeps the session.
+
+    Returns the PIDs that were still running and were stopped.
+    """
+    try:
+        leader: psutil.Process | None = psutil.Process(pid)
+        if (identity := process_identity(pid)) is None or abs(identity - create_time) > 0.01:
+            leader = None  # the PID was reused
+    except psutil.Error:
+        leader = None
+
+    targets: list[psutil.Process] = []
+    if own_session and os.name != "nt":
+        members = _session_members(pid)
+        # Leader gone and something else now leads a session with this number: the kernel
+        # only hands out a session's number again once the session has ended, so none of
+        # these are ours.
+        if leader is None and any(m.pid == pid for m in members):
+            return []
+        targets = members
+    elif leader is not None:
+        try:
+            targets = [leader, *leader.children(recursive=True)]
+        except psutil.Error:
+            targets = [leader]
+    if not targets:
+        return []
+
+    stopped = [p.pid for p in targets]
+    logger.warning(
+        "[Process] stopping engine server %s left behind by its worker: pids %s", pid, stopped
+    )
+    for proc in targets:
+        try:
+            proc.terminate()
+        except psutil.Error:
+            pass
+    _, alive = psutil.wait_procs(targets, timeout=ORPHAN_SERVER_GRACE_SECONDS)
+    if alive:
+        logger.warning("[Process] still running after SIGTERM, killing: %s", [p.pid for p in alive])
+        for proc in alive:
+            try:
+                proc.kill()
+            except psutil.Error:
+                pass
+        psutil.wait_procs(alive, timeout=5)
+    return stopped
 
 
 def _cleanup_memory() -> None:
@@ -106,12 +192,36 @@ def _clear_main_process_cuda_cache() -> None:
         logger.debug(f"Could not clean GPU cache: {e}")
 
 
+_PARENT_CHECK_INTERVAL_S = 2.0
+_ORPHAN_UNLOAD_TIMEOUT_S = 20.0
+
+
+def _parent_is_alive(parent_pid: int, parent_identity: float | None) -> bool:
+    """
+    Return False once the process that spawned the worker is gone (PID reuse aware).
+
+    ``parent_identity`` is what ``process_identity`` returned for the parent at worker start.
+    """
+    try:
+        parent = psutil.Process(parent_pid)
+        if parent_identity is not None:
+            current = process_identity(parent_pid)
+            if current is None or abs(current - parent_identity) > 1.0:
+                return False
+        return parent.is_running() and parent.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return True
+
+
 def _model_worker_process(
     request_queue: Queue,
     status_queue: Queue,
     data_queue: Queue,
     stop_event: EventClass,
     stop_generation_flag: EventClass,
+    parent_pid: int | None = None,
 ) -> None:
     """
     Model worker process - handles model loading and inference requests.
@@ -127,6 +237,38 @@ def _model_worker_process(
         data_queue: inference results, stream chunks, errors {"type": "result|stream_chunk|error", ...}
     """
     engine = None
+
+    # Orphan guard: on Windows the backend can be hard-killed without running its
+    # lifespan cleanup, which leaves this worker and its engine server running.
+    # A watchdog thread unloads the engine and exits once the parent is gone.
+    # The backend passes its own pid: with a venv launcher shim in between,
+    # os.getppid() would name the shim, which lives as long as this worker.
+    if parent_pid is None:
+        parent_pid = os.getppid()
+    parent_create_time = process_identity(parent_pid)
+
+    def _parent_watchdog() -> None:
+        while True:
+            time.sleep(_PARENT_CHECK_INTERVAL_S)
+            if _parent_is_alive(parent_pid, parent_create_time):
+                continue
+            logger.warning("[Worker] Parent process is gone; unloading engine and exiting")
+            current = engine
+            if current:
+
+                def _unload(eng: Any = current) -> None:  # noqa: ANN401
+                    try:
+                        stop_generation_flag.set()
+                        eng.unload()
+                    except Exception:
+                        logger.exception("[Worker] Engine unload failed during orphan shutdown")
+
+                unloader = threading.Thread(target=_unload, daemon=True)
+                unloader.start()
+                unloader.join(timeout=_ORPHAN_UNLOAD_TIMEOUT_S)
+            os._exit(0)
+
+    threading.Thread(target=_parent_watchdog, name="parent-watchdog", daemon=True).start()
 
     try:
         logger.info("[Worker] Model worker process started")
@@ -358,6 +500,12 @@ class ModelInferenceProcess:
         self.last_stop_time: float | None = None  # Timestamp of the last stop_generation
         # Tracks whether an unload command was already sent to the worker, to avoid log noise
         self._unload_sent: bool = False
+        # How many "unloaded" reports the worker has sent: an unload waits for this to move.
+        self._unloaded_reports: int = 0
+        # Servers the worker's engine started, as (pid, create_time, own_session), reported
+        # with "server_started". A server outlives a worker that is killed, so whatever is
+        # still running here once the worker is gone is stopped from this process.
+        self._engine_servers: list[tuple[int, float, bool]] = []
         # Device map statistics
         self.device_map_summary: str | None = None  # e.g. "cuda:0:30, cpu:10"
         self.total_modules: int | None = None  # Total module count
@@ -414,6 +562,11 @@ class ModelInferenceProcess:
     def _is_request_active(self, request_id: str) -> bool:
         with self._request_queues_lock:
             return request_id in self._request_queues
+
+    def has_active_requests(self) -> bool:
+        """Whether a generation through the worker is still waiting for its results."""
+        with self._request_queues_lock:
+            return bool(self._request_queues)
 
     def _start_dispatcher(self) -> None:
         """Start the single reader thread that demuxes ``data_queue``."""
@@ -523,6 +676,60 @@ class ModelInferenceProcess:
 
         setattr(self, attr_name, None)
 
+    def _send_unload_and_wait(self) -> None:
+        """
+        Send the worker "unload" once, then wait until its engine reports "unloaded".
+
+        Returns early when the worker dies, and gives up after UNLOAD_WAIT_SECONDS; the
+        caller stops the worker either way, and _reap_engine_servers deals with a server
+        the engine did not get to stop.
+        """
+        if self._unload_sent:
+            logger.debug("Unload command already sent earlier; skipping duplicate send")
+            return
+        if self.request_queue is None:
+            return
+        before = self._unloaded_reports
+        try:
+            self.request_queue.put({"command": "unload"}, timeout=1)
+        except Exception as e:
+            logger.warning(f"Failed to send unload command: {e}")
+            return
+        self._unload_sent = True
+
+        started = time.monotonic()
+        while time.monotonic() - started < UNLOAD_WAIT_SECONDS:
+            self.update_status()
+            if self._unloaded_reports > before:
+                logger.info(f"Engine unloaded after {time.monotonic() - started:.1f}s")
+                return
+            if not self.process or not self.process.is_alive():
+                return
+            time.sleep(0.2)
+        logger.warning(
+            f"The engine did not report unloaded within {UNLOAD_WAIT_SECONDS:.0f}s; "
+            "stopping the worker anyway"
+        )
+
+    def _record_server(self, response: dict[str, Any]) -> None:
+        """Remember a server the engine reported starting, for _reap_engine_servers."""
+        self._engine_servers.append(
+            (
+                int(response["pid"]),
+                float(response["create_time"]),
+                bool(response.get("own_session", False)),
+            )
+        )
+
+    def _reap_engine_servers(self) -> None:
+        """Stop the servers the worker's engine started and left running, then forget them."""
+        servers, self._engine_servers = self._engine_servers, []
+        for pid, create_time, own_session in servers:
+            try:
+                stop_orphaned_server(pid, create_time, own_session)
+            except Exception as e:
+                logger.warning(f"Could not stop the engine server {pid}: {e}")
+
     def start_process(self) -> None:
         """Start the worker process."""
         if self.process and self.process.is_alive():
@@ -551,6 +758,7 @@ class ModelInferenceProcess:
                 self.data_queue,
                 self.stop_event,
                 self.stop_generation_flag,
+                os.getpid(),
             ),
             daemon=True,
         )
@@ -574,14 +782,8 @@ class ModelInferenceProcess:
 
         # If the process is still alive, try a graceful shutdown
         if self.process.is_alive():
-            # 1. Send the unload command
-            if not self._unload_sent:  # Send only once
-                try:
-                    if self.request_queue:
-                        self.request_queue.put({"command": "unload"}, timeout=1)
-                        self._unload_sent = True
-                except Exception as e:
-                    logger.warning(f"Failed to send unload command: {e}")
+            # 1. Ask the engine to unload, and give it the time to (sent only once)
+            self._send_unload_and_wait()
 
             # 2. Set the stop event
             try:
@@ -617,6 +819,12 @@ class ModelInferenceProcess:
             else:
                 logger.info(f"Worker process {pid} stopped successfully")
 
+        # 7. Anything the worker's engine started and did not stop
+        if self.status_queue is not None:
+            with self._status_lock:
+                self._apply_pending_statuses()  # a "server_started" nobody has read yet
+        self._reap_engine_servers()
+
         # Reset state
         self.current_status = "idle"
         self.current_config = None
@@ -637,6 +845,9 @@ class ModelInferenceProcess:
         """Load the model (asynchronous)."""
         if not self.process or not self.process.is_alive():
             self.start_process()
+        # Servers recorded for the previous model are about to be replaced; forgetting
+        # them stops is_loaded from reading their exit as a crash of the new one.
+        self._reap_engine_servers()
 
         # start_process already created the IPC queue; defensive check to narrow the type
         if self.request_queue is None:
@@ -695,16 +906,7 @@ class ModelInferenceProcess:
         # A live worker process implies the IPC queue exists (see start_process).
         if self.request_queue is None:
             raise self._build_queue_unavailable_error("Unload")
-        if not self._unload_sent:
-            try:
-                self.request_queue.put({"command": "unload"}, timeout=1)
-                self._unload_sent = True
-                # Wait for the worker to finish cleanup (up to 2.5s)
-                time.sleep(2.5)
-            except Exception as e:
-                logger.warning(f"Failed to send unload command: {e}")
-        else:
-            logger.debug("Unload command already sent earlier; skipping duplicate send")
+        self._send_unload_and_wait()
 
         # Step 2: terminate the whole process to guarantee VRAM is fully released
         self.update_status()
@@ -1018,6 +1220,13 @@ class ModelInferenceProcess:
             self._drain_status_queue()
 
     def _drain_status_queue(self) -> None:
+        """Apply every pending status message, then notice a worker that died. Under _status_lock."""
+        if self.status_queue is None:
+            return
+        self._apply_pending_statuses()
+        self._check_worker_alive()
+
+    def _apply_pending_statuses(self) -> None:
         """Apply every pending status message, in order. Called under _status_lock."""
         if self.status_queue is None:
             return
@@ -1031,7 +1240,9 @@ class ModelInferenceProcess:
                 if status in ["loading", "ready", "idle", "unloaded", "error"]:
                     self.current_status = status
 
-                if status == "ready":
+                if status == "server_started":
+                    self._record_server(response)
+                elif status == "ready":
                     self.device = response.get("device")
                     self.loading_error = None
                     self.error_type = None
@@ -1058,6 +1269,7 @@ class ModelInferenceProcess:
                     self.is_oom_error = response.get("is_oom", False)
                     self.current_status = "error"
                 elif status == "unloaded":
+                    self._unloaded_reports += 1
                     self.current_config = None
                     self.device = None
                     self.loading_error = None
@@ -1080,7 +1292,8 @@ class ModelInferenceProcess:
             except Empty:
                 break
 
-        # Check whether the process died unexpectedly (e.g. an OOM crash)
+    def _check_worker_alive(self) -> None:
+        """Mark the model failed and clean up when the worker died unexpectedly (e.g. an OOM crash)."""
         if self.process and not self.process.is_alive():
             if self.current_status in ["loading", "ready"]:
                 # No error message yet (the process crashed before it could send one)
@@ -1128,10 +1341,15 @@ class ModelInferenceProcess:
         if self.status_queue:
             while not self.status_queue.empty():
                 try:
-                    self.status_queue.get_nowait()
+                    response = self.status_queue.get_nowait()
                 except Exception:
                     break
+                # The rest is moot with the worker gone; a server it started is not
+                if isinstance(response, dict) and response.get("status") == "server_started":
+                    self._record_server(response)
             self.status_queue = None
+        # A worker that crashed or was killed never stopped its engine's server
+        self._reap_engine_servers()
 
         if self.data_queue:
             while not self.data_queue.empty():
@@ -1233,7 +1451,34 @@ class ModelInferenceProcess:
     def is_loaded(self) -> bool:
         """Check whether the model is loaded."""
         self.update_status()
+        if self.current_status == "ready" and self._engine_server_died():
+            self.loading_error = "The engine server exited after the model was loaded"
+            self.error_type = "EngineServerExited"
+            self.current_status = "error"
+            logger.error(self.loading_error)
         return self.current_status == "ready"
+
+    def _engine_server_died(self) -> bool:
+        """
+        True when a server the engine reported starting is no longer running.
+
+        Without this a crashed llama-server left /health on model_loaded=true: every
+        chat failed to connect and a reload answered already_loaded.
+        """
+        for pid, create_time, _own_session in self._engine_servers:
+            try:
+                proc = psutil.Process(pid)
+                identity = process_identity(pid)
+                alive = identity is not None and abs(identity - create_time) < 1.0
+                alive = alive and proc.is_running()
+                alive = alive and proc.status() != psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                alive = False
+            except psutil.Error:
+                alive = True
+            if not alive:
+                return True
+        return False
 
     def get_tokenizer_proxy(self) -> "TokenizerProxy | None":
         """

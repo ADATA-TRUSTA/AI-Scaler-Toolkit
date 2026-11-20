@@ -17,6 +17,7 @@ in-process and still uses the worker + queue + dispatcher demux path.
 """
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -512,6 +513,12 @@ def build_chat_payload(
         else:
             extra_body["reasoning_effort"] = str(reasoning_effort)
 
+    # Strata reads per-request engine settings from strata_tune; llama-server (which
+    # also fronts an external Strata through llama_server_url) ignores unknown fields.
+    strata_amx = params.get("strata_amx")
+    if strata_amx is not None and engine in (InferenceEngine.STRATA, InferenceEngine.LLAMA_SERVER):
+        extra_body["strata_tune"] = {"amx": bool(strata_amx)}
+
     if extra_body:
         payload["extra_body"] = extra_body
 
@@ -864,6 +871,41 @@ def _refit_max_tokens(payload: dict[str, Any], exc: Exception) -> int | None:
     return room if room >= _CTX_REFIT_MIN else None
 
 
+async def _events_until_stopped(
+    stream: AsyncIterator[Any], stop_event: asyncio.Event | None
+) -> AsyncIterator[Any]:
+    """
+    Yield stream events, ending as soon as stop_event is set.
+
+    The consumer's own stop check only runs when an event arrives, and none does while
+    the server is still prefilling a long prompt. An unload or stop sent in that window
+    went unnoticed until the first token, or the unload wait ran out and killed the
+    worker mid-save. Waiting on the stop event alongside the next event fixes that.
+    """
+    if stop_event is None:
+        async for event in stream:
+            yield event
+        return
+    iterator = stream.__aiter__()
+    stop_wait = asyncio.ensure_future(stop_event.wait())
+    try:
+        while True:
+            next_event = asyncio.ensure_future(iterator.__anext__())
+            await asyncio.wait({next_event, stop_wait}, return_when=asyncio.FIRST_COMPLETED)
+            if not next_event.done():
+                next_event.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await next_event
+                return
+            try:
+                event = next_event.result()
+            except StopAsyncIteration:
+                return
+            yield event
+    finally:
+        stop_wait.cancel()
+
+
 class AsyncServerClient:
     """Thin async wrapper around an OpenAI-compatible managed server."""
 
@@ -1023,7 +1065,7 @@ class AsyncServerClient:
         )
 
         try:
-            async for event in stream:
+            async for event in _events_until_stopped(stream, stop_event):
                 if stop_event is not None and stop_event.is_set():
                     stopped = True
                     break
@@ -1206,6 +1248,8 @@ class AsyncServerClient:
                 # it just answered normally reports, and must not override this.
                 done_payload["tool_calls"] = fallback_tool_calls
                 done_payload["finish_reason"] = "tool_calls"
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
             if stopped:
                 done_payload["stopped"] = True
             logger.info(

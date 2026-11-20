@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-import os
 from copy import deepcopy
 from typing import Any
 
@@ -42,24 +41,21 @@ async def upload_file_to_data_url(upload: UploadFile) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def _read_file_to_data_url(file_path: str) -> str:
-    with open(file_path, "rb") as handle:
-        content = handle.read()
-
-    if not content:
-        raise HTTPException(status_code=400, detail=f"Image file is empty: {file_path}")
-
-    mime_type = guess_mime_type(file_path, None)
-    encoded = base64.b64encode(content).decode("utf-8")
-    return f"data:{mime_type};base64,{encoded}"
-
-
 def looks_like_base64_payload(value: str) -> bool:
     """Heuristically detect if a string is likely raw base64."""
     raw = value.strip()
     if len(raw) < 32 or len(raw) % 4 != 0:
         return False
     return all(ch in _BASE64_ALLOWED_CHARS for ch in raw)
+
+
+def _looks_like_local_path(value: str) -> bool:
+    """Detect absolute/relative filesystem paths, drive paths and UNC paths."""
+    if value.startswith(("/", "\\", "~", ".")):
+        return True
+    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
+        return True
+    return "\\" in value
 
 
 def normalize_image_input(value: Any) -> str | None:  # noqa: ANN401 - accepts arbitrary caller-supplied image value
@@ -81,17 +77,16 @@ def normalize_image_input(value: Any) -> str | None:  # noqa: ANN401 - accepts a
     if lowered.startswith(("http://", "https://")):
         return raw
 
-    if lowered.startswith("file://"):
-        file_path = raw[7:]
-        if not os.path.isfile(file_path):
-            raise HTTPException(status_code=400, detail=f"Image file not found: {file_path}")
-        return _read_file_to_data_url(file_path)
-
-    if os.path.isfile(raw):
-        return _read_file_to_data_url(raw)
-
+    # Never read host files on behalf of a request: remote inference keys can
+    # reach this code, so file://, local paths and UNC paths are rejected.
     if looks_like_base64_payload(raw):
         return f"data:image/png;base64,{raw}"
+
+    if lowered.startswith("file:") or _looks_like_local_path(raw):
+        raise HTTPException(
+            status_code=400,
+            detail="Local file image inputs are not supported; use a data: or http(s) URL",
+        )
 
     return raw
 

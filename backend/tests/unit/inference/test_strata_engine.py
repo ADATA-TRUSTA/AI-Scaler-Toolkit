@@ -8,6 +8,7 @@ from multiprocessing import Event, Queue
 from pathlib import Path
 
 import httpx2
+import psutil
 import pytest
 from fastapi.testclient import TestClient
 
@@ -19,6 +20,7 @@ from service.inference.engines import strata_engine
 from service.inference.engines.strata_engine import StrataEngine, build_run_config
 from service.model_manager import ModelSleepingError, SleepModeUnavailable
 from service.platform_support import engine_support
+from service.utils.process_identity import process_identity
 
 pytestmark = pytest.mark.inference
 
@@ -119,12 +121,17 @@ def test_installable_needs_an_nvidia_gpu_the_script_and_the_package(monkeypatch,
 @pytest.mark.parametrize(
     ("win", "cuda_name", "sycl_name"),
     [
+        (False, "strata-sleep-0.2.11-sleep.1-linux-x86_64.tar.gz",
+         "strata-0.2.11-sleep.1-linux-x86_64-sycl.tar.gz"),
+        (True, "strata-sleep-0.2.11-sleep.1-windows-x86_64.zip",
+         "strata-0.2.11-sleep.1-windows-x86_64-sycl.zip"),
+        # before 0.2.11-sleep.1 the Intel archive still had -sleep in its name
         (False, "strata-sleep-0.2.7-sleep.2-linux-x86_64.tar.gz",
          "strata-sleep-0.2.7-sleep.2-linux-x86_64-sycl.tar.gz"),
         (True, "strata-sleep-0.2.7-sleep.2-windows-x86_64.zip",
          "strata-sleep-0.2.7-sleep.2-windows-x86_64-sycl.zip"),
     ],
-    ids=["linux", "windows"],
+    ids=["linux", "windows", "linux-old-name", "windows-old-name"],
 )
 def test_each_backend_takes_its_own_package_and_leaves_the_other(
     monkeypatch, tmp_path, win, cuda_name, sycl_name
@@ -615,7 +622,7 @@ def _vendor_with_both_packages(tmp_path):
     (project / "vendor").mkdir(parents=True)
     platform, ext = ("windows-x86_64", "zip") if os.name == "nt" else ("linux-x86_64", "tar.gz")
     cuda = project / "vendor" / f"strata-sleep-0.2.7-sleep.3-{platform}.{ext}"
-    sycl = project / "vendor" / f"strata-sleep-0.2.7-sleep.3-{platform}-sycl.{ext}"
+    sycl = project / "vendor" / f"strata-0.2.11-sleep.1-{platform}-sycl.{ext}"
     cuda.write_text("")
     sycl.write_text("")
     return project, cuda, sycl
@@ -699,12 +706,22 @@ def _time_wait_port():
     return port
 
 
+class _StartedServer:
+    """What Popen hands back, as far as _start_server reads it: a PID that is running."""
+
+    pid = os.getpid()
+
+
 def test_start_refuses_a_port_in_use_but_not_one_in_time_wait(checkout, tmp_path, monkeypatch):
     engine = StrataEngine(Queue(), Queue(), Event(), Event())
     monkeypatch.setattr(strata_engine, "STRATA_RUNTIME_DIR", str(tmp_path / "runtime"))
     engine.runtime_dir.mkdir(parents=True, exist_ok=True)
     popened: list = []
-    monkeypatch.setattr(strata_engine.subprocess, "Popen", lambda cmd, **kw: popened.append(cmd))
+    monkeypatch.setattr(
+        strata_engine.subprocess,
+        "Popen",
+        lambda cmd, **kw: popened.append(cmd) or _StartedServer(),
+    )
 
     # what an unload followed by a reload leaves behind: a plain bind() fails on it
     monkeypatch.setattr(strata_engine, "STRATA_PORT", _time_wait_port())
@@ -727,7 +744,11 @@ def test_start_sets_the_load_defaults_unless_the_environment_has_them(
     engine.runtime_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(strata_engine, "STRATA_PORT", _time_wait_port())
     envs: list = []
-    monkeypatch.setattr(strata_engine.subprocess, "Popen", lambda cmd, **kw: envs.append(kw["env"]))
+    monkeypatch.setattr(
+        strata_engine.subprocess,
+        "Popen",
+        lambda cmd, **kw: envs.append(kw["env"]) or _StartedServer(),
+    )
     monkeypatch.delenv("STRATA_PLE_AUTO_RAM", raising=False)
     monkeypatch.setenv("STRATA_NO_ARENA_THP", "0")
 
@@ -738,6 +759,37 @@ def test_start_sets_the_load_defaults_unless_the_environment_has_them(
     assert env["STRATA_NO_ARENA_THP"] == "0"  # set by the caller, so kept
     # Windows only: its commit limit leaves no room for the sleep backup otherwise
     assert env.get("STRATA_PLE_AUTO_RAM") == ("0" if os.name == "nt" else None)
+
+
+def test_load_env_defaults_add_the_doorbell_check_only_for_a_windows_intel_engine():
+    check = {"STRATA_DOORBELL_CHECK": "1"}
+    assert check.items() <= strata_engine._load_env_defaults(True, "sycl").items()
+    assert "STRATA_DOORBELL_CHECK" not in strata_engine._load_env_defaults(True, "cuda")
+    assert "STRATA_DOORBELL_CHECK" not in strata_engine._load_env_defaults(False, "sycl")
+    # the Windows commit-limit default stays on both Windows backends
+    assert strata_engine._load_env_defaults(True, "sycl")["STRATA_PLE_AUTO_RAM"] == "0"
+    assert strata_engine._load_env_defaults(True, "cuda")["STRATA_PLE_AUTO_RAM"] == "0"
+    assert "STRATA_PLE_AUTO_RAM" not in strata_engine._load_env_defaults(False, "cuda")
+
+
+def test_start_reports_the_server_so_the_api_can_stop_it_if_the_worker_dies(
+    checkout, tmp_path, monkeypatch
+):
+    status = Queue()
+    engine = StrataEngine(status, Queue(), Event(), Event())
+    engine.runtime_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(strata_engine, "STRATA_PORT", _time_wait_port())
+    monkeypatch.setattr(strata_engine.subprocess, "Popen", lambda cmd, **kw: _StartedServer())
+
+    engine._start_server(tmp_path / "run.json")
+    engine._log_handle.close()
+
+    report = status.get(timeout=5)
+    assert report["status"] == "server_started"
+    assert report["pid"] == os.getpid()
+    # the start time is what tells this server from a later process given the same PID
+    assert report["create_time"] == process_identity(os.getpid())
+    assert report["own_session"] is True
 
 
 def test_unload_saves_the_conversation_unless_asleep(checkout, monkeypatch):

@@ -121,6 +121,10 @@ class InferenceSharedFields(BaseModel):
     n_gpu_layers: int | None = Field(
         default=None, description="[llama_server] GPU layer count; -1 means all"
     )
+    n_cpu_moe: int | None = Field(
+        default=None,
+        description="[llama_server] MoE expert layers kept on the CPU (-ncmoe); 0 = off",
+    )
     n_ctx: int | None = Field(default=None, description="[llama_server] Context length")
     n_batch: int | None = Field(default=None, description="[llama_server] Batch size")
     llama_server_extra_args: list[str] | None = Field(
@@ -1129,6 +1133,12 @@ class OpenAIChatCompletionRequest(BaseModel):
             "OpenAI-compatible reasoning level; 'none'/'minimal' turn thinking off, "
             "any other level turns it on, unless enable_thinking is given"
         ),
+    )
+    # Strata only: this request's AMX CPU share (the engine's strata_tune.amx). None = the
+    # engine's start-up setting; other engines never see it.
+    strata_amx: bool | None = Field(
+        default=None,
+        description="Strata: turn the AMX CPU prefill share on or off for this request",
     )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,

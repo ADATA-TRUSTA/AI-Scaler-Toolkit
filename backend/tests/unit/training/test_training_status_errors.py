@@ -97,3 +97,68 @@ def test_completed_run_is_not_turned_into_an_error():
     assert status.status == "completed"
     assert status.error is None
     assert mgr.get_error_details() is None
+
+
+class _ExitingProcess(_FakeProcess):
+    """A worker that reported its result and needs a few more polls to actually exit."""
+
+    def __init__(self, polls_until_exit: int):
+        super().__init__(alive=True)
+        self.polls_left = polls_until_exit
+
+    def join(self, timeout=None):
+        self.polls_left -= 1
+        if self.polls_left <= 0:
+            self.alive = False
+
+
+class _Reached(Exception):
+    pass
+
+
+@pytest.mark.parametrize("finished", ["completed", "error"])
+def test_next_run_waits_for_the_previous_worker_to_exit(finished, monkeypatch):
+    """
+    Found live: the next job was started the moment /training/status said completed.
+    The worker was still exiting, so _ensure_process reused it, the start command went
+    into its dying queue and the new run failed as "Worker process terminated
+    unexpectedly". The manager must let a finished run's worker exit first.
+    """
+    mgr = _manager(alive=True, reports=[])
+    exiting = _ExitingProcess(polls_until_exit=3)
+    mgr.process = exiting
+    mgr.current_status = finished
+    seen = {}
+
+    def ensure_process():
+        seen["alive"] = exiting.is_alive()
+        raise _Reached
+
+    monkeypatch.setattr(mgr, "_ensure_process", ensure_process)
+    with pytest.raises(_Reached):
+        mgr.start_training(object())  # type: ignore[arg-type]
+    assert seen["alive"] is False
+
+
+def test_a_worker_that_never_exits_is_killed_before_the_next_run():
+    mgr = _manager(alive=True, reports=[])
+    stuck = _FakeProcess(alive=True)
+    stuck.join = lambda timeout=None: None  # type: ignore[method-assign]
+    mgr.process = stuck
+    mgr.current_status = "completed"
+
+    mgr._wait_for_finished_worker(timeout=0.05)
+
+    assert stuck.terminated and not stuck.alive
+
+
+def test_a_worker_of_a_queued_start_is_not_touched():
+    """Only a finished run's worker is waited for; a start that is still queued keeps its worker."""
+    mgr = _manager(alive=True, reports=[])
+    live = _FakeProcess(alive=True)
+    mgr.process = live
+    mgr.current_status = "starting"
+
+    mgr._wait_for_finished_worker(timeout=0.05)
+
+    assert live.alive and not live.terminated

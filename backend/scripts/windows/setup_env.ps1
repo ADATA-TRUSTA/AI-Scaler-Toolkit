@@ -1201,7 +1201,7 @@ if ($LlamaMode -eq "skip") {
             Write-Host "  The VC++ runtime is a separate Microsoft download, not part of Windows."
             Write-Host "  An installed build carries it and needs nothing; this is a source checkout,"
             Write-Host "  so it comes from Visual Studio or Build Tools with the C++ workload:"
-            Write-Host "    winget install Microsoft.VisualStudio.2022.BuildTools"
+            Write-Host "    winget install Microsoft.VisualStudio.2022.BuildTools --override `"--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended`""
             Write-Host "  Or point TRUSTA_VCRUNTIME_DIR at a directory holding the CRT DLLs, which"
             Write-Host "  setup_env will place next to the binary instead."
             Write-Host ""

@@ -24,15 +24,15 @@ This document covers both **Linux** and **Windows** platforms, with steps split 
 ```text
 backend/
 ├─ scripts/
-│  ├─ linux/
-│  │  ├─ run_service.sh
-│  │  ├─ setup_env.sh
-│  │  └─ stop_service.sh
-│  ├─ windows/
-│  │  ├─ run_service.bat
-│  │  └─ setup_env.ps1
-│  ├─ docker/                   # placeholder; container assets are internal-only
+│  ├─ linux/                    # setup_env.sh, run_service.sh, stop_service.sh, install_strata.sh, env_file.sh
+│  ├─ windows/                  # setup_env.ps1, run_service.bat, install_strata.ps1, env_file.ps1
+│  ├─ llama_backend.py          # llama.cpp backend installer
+│  ├─ patch_deepspeed_aio.py
+│  ├─ upgrade_regression.py
+│  ├─ xpu_smoke.py
 │  └─ gguf_recommend_report.py
+├─ deploy/
+│  └─ container/                # Dockerfile, deploy.sh (podman/docker), nginx configs
 ├─ dataset/
 ├─ docs/
 │  ├─ inference_manual.html     # Inference service manual (.zh-TW.html = 繁體中文)
@@ -897,8 +897,16 @@ so omitting the extra downgrades `torch` to the CPU build and uninstalls
 
 ### Q4. Want to deploy with Docker / Podman?
 
-Container assets are maintained internally and are not part of this repository.
-Ask the backend team for the `deploy/docker/` bundle.
+Yes. `deploy/container/` builds the backend image and runs it with podman or docker (CUDA or
+Intel XPU, Linux hosts). It covers the backend only; the frontend is served by an optional nginx
+container from a build you point it at.
+
+```bash
+deploy/container/deploy.sh up      # UI at http://localhost:8000/frontend/
+```
+
+See [`deploy/container/README.md`](deploy/container/README.md) for host requirements, the
+standalone and proxy modes, and multi-GPU instances.
 
 ### Q5. What to do about offload / buffer / swapper errors when fine-tuning with DeepSpeed?
 
@@ -986,4 +994,4 @@ uv sync --extra cuda      # must match the extra used at setup; --extra xpu for 
 
 ---
 
-If you need to add Docker, Podman, frontend integration, or API example docs, consider splitting them into separate documents going forward.
+If you need to add frontend integration or API example docs, consider splitting them into separate documents going forward.

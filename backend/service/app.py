@@ -81,7 +81,7 @@ from .inference.kv_disk_tier import DiskTierNotConfigured
 from .inference.memory_estimator import memory_estimator
 from .inference.model_family import is_qwen35_family, read_model_arch, read_model_context_length
 from .model_deletion import delete_model_files, resolve_model_files_path
-from .model_manager import SleepModeUnavailable, model_manager
+from .model_manager import UNLOADING_MESSAGE, SleepModeUnavailable, model_manager
 from .model_registry import MODEL_STATUS_DELETING, model_registry
 from .platform_support import (
     current_platform,
@@ -220,6 +220,12 @@ _TOOL_CALL_THINKING_MIN_TOKENS = 2048
 # the vocabulary keeps growing across clients (hermes alone adds "ultra" past
 # OpenAI's "max"), so naming the "on" levels would silently drop any new one.
 _REASONING_EFFORT_OFF = frozenset({"none", "minimal"})
+
+
+def _strata_amx_kwargs(request: Any) -> dict[str, Any]:  # noqa: ANN401 - any chat request model
+    """{"strata_amx": bool} when the request names the Strata AMX switch, else nothing."""
+    value = getattr(request, "strata_amx", None)
+    return {} if value is None else {"strata_amx": bool(value)}
 
 
 def _enable_thinking_from_reasoning_effort(reasoning_effort: str | None) -> bool | None:
@@ -499,6 +505,13 @@ def _session_history_to_prompt_messages(
             prompt_messages.append({"role": role, "content": text})
 
     return system_messages, prompt_messages
+
+
+def _drop_rag_for_remote(request: OpenAIChatCompletionRequest, host: str | None) -> None:
+    """Switch RAG off for a request that came from another machine."""
+    if getattr(request, "use_rag", False) and not is_local(host):
+        logger.info("Ignoring use_rag from a remote client")
+        request.use_rag = False
 
 
 def _resolve_rag_context_text(request: OpenAIChatCompletionRequest) -> str | None:
@@ -1273,6 +1286,11 @@ async def load_model(
     try:
         logger.info(f"Loading model request: {config.model_name}")
 
+        # Before is_loaded(): a model on its way out can still read as loaded, which
+        # answered already_loaded for a model that was about to disappear.
+        if model_manager.is_unloading():
+            raise HTTPException(status_code=409, detail=UNLOADING_MESSAGE)
+
         # A model is already fully loaded: respond according to the rules below
         if model_manager.is_loaded():
             current = model_manager.config
@@ -1382,10 +1400,17 @@ async def wake_model() -> dict[str, Any]:
 
 @app.post("/inference/unload_model")
 async def unload_model() -> dict[str, Any]:
-    """Unload the model."""
+    """Unload the model, ending any generation still running on it first."""
     try:
-        # Waits on the worker process (sleeps up to ~5.5s); guarded by the manager's own
-        # lock, so a worker thread keeps concurrent callers serialised.
+        # A generation still running holds the engine up: Strata saves the conversation
+        # only once it ends (an unload during a 2,500-token answer waited 37 s for it), and
+        # a transformers worker busy generating does not read the unload command at all.
+        # Stopped here, on the event loop, because the async requests' stop events are
+        # asyncio.Events, which a worker thread cannot set safely.
+        if model_manager.abort_generations():
+            logger.info("Unload: ended the generations still running first")
+        # Waits for the engine to unload (up to UNLOAD_WAIT_SECONDS); guarded by the
+        # manager's own lock, so a worker thread keeps concurrent callers serialised.
         return await asyncio.to_thread(model_manager.unload_model)
 
     except Exception as e:
@@ -2188,6 +2213,12 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
+    # The /rag/* routes are local-only on purpose, and use_rag is a way round that:
+    # it puts retrieved snippets and document ids into the reply. A remote key gets
+    # plain inference, so the flag is switched off rather than the request refused.
+    client = http_request.client
+    _drop_rag_for_remote(request, client.host if client else None)
+
     backend_request_id = _normalize_request_id(request.request_id, prefix="openai")
     if model_manager.is_sleeping() and not model_manager.auto_wake_enabled():
         # Checked here, before any of the three generation paths below, so every one
@@ -2774,6 +2805,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                 "enable_thinking": generation_options["enable_thinking"],
                 "reasoning_effort": _forwarded_reasoning_effort(request.reasoning_effort),
                 "request_id": backend_request_id,
+                **_strata_amx_kwargs(request),
             }
             try:
                 try:
@@ -2885,6 +2917,7 @@ async def openai_chat_completions(http_request: Request) -> JSONResponse | Strea
                 "enable_thinking": generation_options["enable_thinking"],
                 "reasoning_effort": _forwarded_reasoning_effort(request.reasoning_effort),
                 "request_id": backend_request_id,
+                **_strata_amx_kwargs(request),
             }
 
             try:
@@ -3821,6 +3854,11 @@ def run() -> None:
         log_config=get_uvicorn_log_config(),
         access_log=UVICORN_ACCESS_LOG,
         use_colors=UVICORN_USE_COLORS,
+        # The remote-access guard decides by the TCP peer, never a header (remote_access.py).
+        # uvicorn's default proxy_headers swaps the peer for X-Forwarded-For whenever it comes
+        # from 127.0.0.1, so a container whose own nginx forwards the web UI's /api/ saw the
+        # host proxy's bridge address and refused its own UI as "another computer".
+        proxy_headers=False,
     )
 
 

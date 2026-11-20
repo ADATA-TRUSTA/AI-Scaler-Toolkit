@@ -842,3 +842,15 @@ def test_gguf_estimate_verify_passes_the_probe_only_what_it_takes(monkeypatch, t
     assert response.json()["verification"] == {"source": "fit-params"}
     assert seen["n_ctx"] == 4096
     assert "n_gpu" not in seen and "tensor_split" not in seen
+
+
+def test_inference_status_keeps_n_cpu_moe(monkeypatch):
+    # ModelStatus drops any key it does not declare, so the manager reporting
+    # n_cpu_moe was not enough: the page reload still showed 0 (F-0080).
+    monkeypatch.setattr(
+        app_module.model_manager,
+        "get_status",
+        lambda: {"loaded": True, "is_loading": False, "engine": "llama_server", "n_cpu_moe": 15},
+    )
+
+    assert client.get("/inference/status").json()["n_cpu_moe"] == 15

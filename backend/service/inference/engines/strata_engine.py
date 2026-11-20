@@ -20,6 +20,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from collections import deque
 from multiprocessing import Queue
@@ -46,6 +47,7 @@ from ...settings import (
     STRATA_VISION_BINARY,
     configure_logging,
 )
+from ...utils.process_identity import process_identity
 from ..strata_models import STRATA_GGUF_MODELS, strata_model_choice
 from .base_engine import BaseEngine
 
@@ -65,6 +67,12 @@ _LOAD_ENV_DEFAULTS = {"STRATA_UNBUFFERED_LOAD": "1", "STRATA_NO_ARENA_THP": "1"}
 # ("backup needs 4596 MiB, only 512 MiB available"). With the table left where the run config
 # puts it, sleep and wake worked. Like the two above, the environment wins.
 _WINDOWS_LOAD_ENV_DEFAULTS = {"STRATA_PLE_AUTO_RAM": "0"}
+# The Intel engine's CPU expert pool can read a layer's routing before the GPU has finished
+# publishing it. Since strata-sleep 0.2.11-sleep.2 (patches 0014, 0015) that cannot crash the
+# engine any more, but on Windows (no sysfs driver name for the long spin bound) the CPU can
+# still compute from a stale payload: on an Arc B390 the replies drift unless the engine
+# checks the doorbell. Same rule as the others: the environment wins.
+_WINDOWS_INTEL_LOAD_ENV_DEFAULTS = {"STRATA_DOORBELL_CHECK": "1"}
 _LOG_TAIL_LINES = 40
 # Where Linux lists the graphics devices; a module constant so a test can point it elsewhere.
 _DRM_DEVICES = Path("/sys/class/drm")
@@ -135,10 +143,11 @@ def _intel_gpu_windows() -> bool:
     same registry key (its patch 0009, intel_gpus_windows); this reads only what the question
     needs, through winreg, so it costs no subprocess on a path the service calls often.
     """
-    try:
-        import winreg
-    except ImportError:
+    # The platform check, not the ImportError, is what lets pyright on Linux type-check winreg.
+    if sys.platform != "win32":
         return False
+    import winreg
+
     key_path = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as cls:
@@ -184,8 +193,10 @@ def strata_package() -> Path | None:
     The strata-sleep package in vendor/ for this host's GPU, or None.
 
     The CUDA archives are named strata-sleep-<version>-<platform>.<ext>; another backend's
-    carries its name last (strata-sleep-<version>-linux-x86_64-sycl.tar.gz), so the two
-    never match each other's glob and a payload may hold both.
+    carries its name last (strata-<version>-linux-x86_64-sycl.tar.gz: no -sleep, it has no
+    deep sleep; before 0.2.11-sleep.1 it was strata-sleep-<version>-...-sycl, which the
+    strata-* pattern still finds), so the two never match each other's glob and a payload
+    may hold both.
     """
     backend = gpu_backend()
     if backend is None:
@@ -195,7 +206,7 @@ def strata_package() -> Path | None:
     pattern = (
         f"strata-sleep-*-{platform}.{ext}"
         if backend == "cuda"
-        else f"strata-sleep-*-{platform}-{backend}.{ext}"
+        else f"strata-*-{platform}-{backend}.{ext}"
     )
     found = sorted((PROJECT_ROOT / "vendor").glob(pattern))
     return found[-1] if found else None
@@ -626,6 +637,16 @@ def _safe_name(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("._") or "model"
 
 
+def _load_env_defaults(windows: bool, backend: str) -> dict[str, str]:
+    """What the server's environment gets when the caller did not set it (see the constants)."""
+    defaults = dict(_LOAD_ENV_DEFAULTS)
+    if windows:
+        defaults.update(_WINDOWS_LOAD_ENV_DEFAULTS)
+        if backend == "sycl":
+            defaults.update(_WINDOWS_INTEL_LOAD_ENV_DEFAULTS)
+    return defaults
+
+
 class StrataEngine(BaseEngine):
     """Starts Strata's server for the model and stops it again (worker side)."""
 
@@ -712,7 +733,7 @@ class StrataEngine(BaseEngine):
             str(self.slot_dir),
         ]
         env = _with_strata_settings(os.environ.copy())
-        defaults = {**_LOAD_ENV_DEFAULTS, **(_WINDOWS_LOAD_ENV_DEFAULTS if os.name == "nt" else {})}
+        defaults = _load_env_defaults(os.name == "nt", engine_backend())
         for key, value in defaults.items():
             env.setdefault(key, value)
         logger.info("[Strata] starting the server: %s", " ".join(cmd))
@@ -731,6 +752,20 @@ class StrataEngine(BaseEngine):
             stdout=self._log_handle,
             stderr=subprocess.STDOUT,
             **kwargs,
+        )
+        # Its own session also means it outlives this worker when the worker is killed. The
+        # API process stops whatever is left once the worker is gone (F-0086), and needs
+        # the PID and start time to know it is still this server.
+        create_time = process_identity(self.server_process.pid)
+        if create_time is None:
+            return  # already gone: nothing to leave behind
+        self.status_queue.put(
+            {
+                "status": "server_started",
+                "pid": self.server_process.pid,
+                "create_time": create_time,
+                "own_session": True,
+            }
         )
 
     def _wait_ready(self, timeout_sec: float) -> dict[str, Any]:

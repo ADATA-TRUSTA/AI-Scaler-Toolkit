@@ -178,6 +178,51 @@ def test_stop_generation_stop_all_succeeds_without_worker(mm, monkeypatch):
     mm._unregister_async_stop("s2")
 
 
+# ------------------------------ before an unload ------------------------------
+def test_abort_generations_ends_every_server_generation(mm, monkeypatch):
+    worker_calls: list = []
+    monkeypatch.setattr(
+        mm.inference_process,
+        "stop_generation",
+        lambda request_id=None: worker_calls.append(request_id) or {"status": "success"},
+    )
+    a = mm._register_async_stop("a")
+    b = mm._register_async_stop("b")
+
+    assert mm.abort_generations() is True
+    assert a.is_set() and b.is_set()
+    # nothing of the worker's own was running, so it is not told: a stop there makes the
+    # next unload wait out 3 s for a generation thread that does not exist
+    assert worker_calls == []
+    mm._unregister_async_stop("a")
+    mm._unregister_async_stop("b")
+
+
+def test_abort_generations_stops_a_worker_generation(mm, monkeypatch):
+    worker_calls: list = []
+    monkeypatch.setattr(
+        mm.inference_process,
+        "stop_generation",
+        lambda request_id=None: worker_calls.append(request_id) or {"status": "success"},
+    )
+    mm.inference_process._register_request("t1")  # a transformers generation in flight
+
+    assert mm.abort_generations() is True
+    assert worker_calls == [None]
+    mm.inference_process._unregister_request("t1")
+
+
+def test_abort_generations_with_nothing_running_does_nothing(mm, monkeypatch):
+    worker_calls: list = []
+    monkeypatch.setattr(
+        mm.inference_process,
+        "stop_generation",
+        lambda request_id=None: worker_calls.append(request_id) or {"status": "success"},
+    )
+    assert mm.abort_generations() is False
+    assert worker_calls == []
+
+
 # ------------------------------ delegation ------------------------------
 def test_as_messages_normalisation(mm):
     assert ModelManager._as_messages("hi", None) == [{"role": "user", "content": "hi"}]
@@ -297,3 +342,27 @@ def test_agenerate_stream_unregisters_on_error(mm, monkeypatch):
     with pytest.raises(RuntimeError, match="mid-stream boom"):
         asyncio.run(_run())
     assert "err-1" not in mm._async_stop_events  # cleaned up by finally
+
+
+def _status_with(mm, cfg, **process_status):
+    mm.config = cfg
+    mm.inference_process = SimpleNamespace(get_status=lambda: process_status)
+    return mm.get_status()
+
+
+def test_status_reports_n_cpu_moe_of_the_loaded_config(mm):
+    cfg = InferenceConfig(model_name="m", engine="llama_server", n_cpu_moe=15)
+
+    assert _status_with(mm, cfg, loaded=True)["n_cpu_moe"] == 15
+
+
+def test_status_reports_n_cpu_moe_of_the_pending_config_while_loading(mm):
+    mm.pending_config = InferenceConfig(model_name="m", engine="llama_server", n_cpu_moe=7)
+
+    status = _status_with(mm, InferenceConfig(model_name="m"), is_loading=True)
+
+    assert status["n_cpu_moe"] == 7
+
+
+def test_status_n_cpu_moe_is_none_when_nothing_was_loaded(mm):
+    assert _status_with(mm, None)["n_cpu_moe"] is None

@@ -13,6 +13,7 @@ import pytest
 
 from service.config_models import InferenceConfig
 from service.inference.engines.llama_server_engine import LlamaServerEngine
+from service.utils.process_identity import process_identity
 
 pytestmark = pytest.mark.inference
 
@@ -491,3 +492,44 @@ def test_managed_server_is_kept_to_this_service(monkeypatch):
     assert cmd[cmd.index("--api-key") + 1] == settings.LLAMA_SERVER_API_KEY
     assert cmd[cmd.index("--cors-origins") + 1] == local_service_origins()[0]
     assert "*" not in cmd[cmd.index("--cors-origins") + 1]
+
+
+def test_start_reports_the_server_so_the_api_can_stop_it_if_the_worker_dies(monkeypatch):
+    """force_cleanup_gpu terminates the worker without unload(); the server must be reapable."""
+
+    class _Proc:
+        pid = os.getpid()
+        stdout = None
+        stderr = None
+
+        def poll(self):
+            return None
+
+    mod = "service.inference.engines.llama_server_engine"
+    monkeypatch.setattr(f"{mod}.subprocess.Popen", lambda cmd, **kw: _Proc())
+    monkeypatch.setattr(f"{mod}.os.path.exists", lambda _p: True)
+    monkeypatch.setattr(f"{mod}.os.path.isfile", lambda _p: True)
+    monkeypatch.setattr(f"{mod}.os.access", lambda _p, _m: True)
+    monkeypatch.setattr(f"{mod}.os.path.isdir", lambda _p: True)
+
+    status = Queue()
+    engine = LlamaServerEngine(status, Queue(), Event(), Event())
+    # not importing torch here keeps the test off the machine's CUDA/XPU install
+    monkeypatch.setattr(engine, "_torch_lib_dir", lambda: None)
+    engine.config = InferenceConfig(
+        model_name="demo-model",
+        model_path="/tmp/model.gguf",
+        engine="llama_server",
+        llama_server_binary="/tmp/llama-server",
+        llama_server_host="127.0.0.1",
+        llama_server_port=8080,
+    )
+    engine._start_managed_server()
+
+    report = status.get(timeout=5)
+    assert report["status"] == "server_started"
+    assert report["pid"] == os.getpid()
+    # the start time tells this server from a later process given the same PID
+    assert report["create_time"] == process_identity(os.getpid())
+    # started in the worker's own session, so only its process tree is stopped
+    assert report["own_session"] is False

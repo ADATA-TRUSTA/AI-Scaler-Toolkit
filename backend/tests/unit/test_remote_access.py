@@ -544,3 +544,17 @@ def test_a_page_from_another_site_is_still_refused_on_this_machine(monkeypatch):
         local.post("/inference/unload_model", headers={"Origin": "http://evil.example"}).status_code
         == 403
     )
+
+
+def test_uvicorn_keeps_the_tcp_peer(monkeypatch):
+    """run() must not let X-Forwarded-For replace the peer the guard decides by."""
+    import sys
+    import types
+
+    import service.app as app_module
+
+    seen = {}
+    fake = types.SimpleNamespace(run=lambda *a, **kw: seen.update(kw))
+    monkeypatch.setitem(sys.modules, "uvicorn", fake)
+    app_module.run()
+    assert seen["proxy_headers"] is False

@@ -1324,7 +1324,10 @@ def _training_worker_process(
                         model, processing_class, dataset, training_args, eval_dataset=eval_dataset
                     )
                     log_mem("after_trainer_prepare")
-                    _log_zero3_partition_state(trainer)
+                    # Without DeepSpeed there is nothing to partition, and the probe's
+                    # "engine did not wrap this model" warning would only mislead.
+                    if training_config.use_deepspeed:
+                        _log_zero3_partition_state(trainer)
 
                     # --- training with progress callbacks ---------------------------------
 
@@ -1819,6 +1822,34 @@ class TrainingProcessManager:
         self.last_error = None
         self.last_traceback = None
 
+    def _wait_for_finished_worker(self, timeout: float = 60.0) -> None:
+        """
+        Let the worker of a finished run exit before the next run reuses the manager.
+
+        A worker reports ``completed`` or ``error`` and then spends a while exiting
+        (releasing the GPU, closing queues). ``_ensure_process`` takes a worker that is
+        still alive for a usable one, so a start sent in that window went into the dying
+        worker's queue and the run came back as "Worker process terminated unexpectedly"
+        (seen live: starting the next job the moment ``/training/status`` said completed).
+        The queue is drained while waiting because a child cannot exit with unread data in it.
+        """
+        proc = self.process
+        if proc is None or self.current_status not in {"completed", "error"}:
+            return
+        deadline = time.monotonic() + timeout
+        while proc.is_alive() and time.monotonic() < deadline:
+            self._drain_status()
+            proc.join(timeout=0.5)
+        if proc.is_alive():
+            logger.warning(
+                "[TrainingManager] Previous worker did not exit in %.0fs; killing it", timeout
+            )
+            proc.terminate()
+            proc.join(timeout=5)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=1)
+
     def start_training(self, config: TrainingConfig) -> dict[str, Any]:
         """
         Start a new training job in the worker process.
@@ -1840,6 +1871,7 @@ class TrainingProcessManager:
         self.phase_detail = None
         logger.info("Cleared previous training status before starting new training")
 
+        self._wait_for_finished_worker()
         self._ensure_process()
         assert self.request_q is not None  # noqa: S101 - type-narrowing guard after _ensure_process
         self.current_config = config
