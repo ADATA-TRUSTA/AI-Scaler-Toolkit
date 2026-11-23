@@ -140,7 +140,16 @@ _CTRL_C_HELPER = "; ".join([
 ])
 
 
-GRACEFUL_STOP_SECONDS = 20.0
+# How long stop() lets the backend shut down before it insists. The backend waits up to
+# 120 s for an engine to report unloaded before it stops its workers (and, after that,
+# the Strata server it leaves behind), so a shorter limit here cuts it off: the
+# conversation Strata would have saved is lost and the server stays. 10 s of margin.
+STOP_SECONDS = 130.0
+GRACEFUL_STOP_SECONDS = STOP_SECONDS
+
+# How long to wait for POST /inference/unload_model. It aborts a running generation
+# first, so it usually answers in seconds, but a big model's unload has taken longer.
+UNLOAD_REQUEST_SECONDS = 125.0
 
 
 def request_graceful_exit(pid: int) -> bool:
@@ -270,6 +279,23 @@ def health(port: int, timeout: float = 2.0) -> dict | None:
             return json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
         return None
+
+
+def unload_model(port: int, timeout: float = UNLOAD_REQUEST_SECONDS) -> bool:
+    """Ask the backend to unload its model, and wait for it to say so.
+
+    Best effort: True when the backend answered success, False for anything else (no
+    answer, an error status, nothing loaded). A stop goes on either way; this only
+    makes it quick when a model is loaded, by having the backend save and release it
+    while it is still serving, instead of racing a SIGTERM against its engine.
+    """
+    request = urllib.request.Request(
+        f"{config.service_url(port)}/inference/unload_model", data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout):
+            return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
 
 
 def probe(port: int) -> PortStatus:
@@ -661,7 +687,7 @@ class ServiceManager:
         self._watch_stop.set()
         self._watch_thread = None
 
-    def stop(self, timeout: float = 20.0) -> None:
+    def stop(self, timeout: float = STOP_SECONDS) -> None:
         """Stop the service, whether or not this process is the one that started it.
 
         Terminating by process handle covers only the service we spawned. Adoption is
@@ -675,18 +701,30 @@ class ServiceManager:
         while it shuts down, so a status probe in that window finds something listening
         that does not answer /health and calls it a foreign program -- which is what
         the tray displayed straight after a clean stop.
+
+        ``timeout`` is the whole budget: the unload below and the wait after it share it.
+        It is longer than the backend's own 120 s wait for an engine, so that a service
+        which does not answer is the only one that is killed, not one still saving.
         """
         self.unwatch()
+        deadline = time.monotonic() + timeout
+        # Unload the model first, while the service still answers. The backend then
+        # saves a Strata conversation and releases the engine in the normal way, and the
+        # SIGTERM that follows finds nothing left to wait for. A service that does not
+        # answer as ours is not asked (a program that is not ours gets nothing).
+        if self.status() == "ours":
+            unload_model(self.port, min(UNLOAD_REQUEST_SECONDS, timeout))
+        remaining = max(5.0, deadline - time.monotonic())
         if self._process is not None and self._process.poll() is None:
             # Let the backend shut down on its own first (Windows: Ctrl+Break), so its
             # engines and workers are released; only then insist.
             if config.IS_WINDOWS and request_graceful_exit(self._process.pid):
                 with contextlib.suppress(subprocess.TimeoutExpired):
-                    self._process.wait(timeout=min(timeout, GRACEFUL_STOP_SECONDS))
+                    self._process.wait(timeout=min(remaining, GRACEFUL_STOP_SECONDS))
             if self._process.poll() is None:
                 self._process.terminate()
                 try:
-                    self._process.wait(timeout=timeout)
+                    self._process.wait(timeout=remaining)
                 except subprocess.TimeoutExpired:
                     self._process.kill()
         self._process = None
