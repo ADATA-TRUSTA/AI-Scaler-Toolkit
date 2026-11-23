@@ -23,6 +23,8 @@ ERROR_GPU_FAULT = "gpu_fault"
 ERROR_SHARED_LIBRARY_MISSING = "shared_library_missing"
 # A compiler vLLM or torch.compile needs at startup is not on the machine.
 ERROR_TOOLCHAIN_MISSING = "toolchain_missing"
+# A kernel vLLM builds on first use (FlashInfer's JIT) failed while compiling.
+ERROR_JIT_BUILD = "jit_build"
 ERROR_TEMPLATE = "chat_template"
 ERROR_QUANTIZATION = "quantization"
 ERROR_UNKNOWN = "unknown"
@@ -61,6 +63,17 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             # Seen on an Intel iGPU, whose memory is the system's and was already
             # in use; the remedy is that setting, not a bigger card.
             "is less than desired gpu memory utilization",
+        ),
+    ),
+    (
+        # Before OOM: a build that ran the machine out of RAM does not say "out of
+        # memory" -- the kernel kills nvcc/cicc and ninja only reports that a command
+        # failed -- and a build whose nvcc does print it is still not a GPU problem.
+        # Both strings are FlashInfer's own (jit/cpp_ext.py run_ninja, and ninja).
+        ERROR_JIT_BUILD,
+        (
+            "ninja build failed",
+            "ninja: build stopped",
         ),
     ),
     (
@@ -329,6 +342,10 @@ def _build_summary(category: str, important_tail: list[str], tail: list[str]) ->
         ERROR_GPU_FAULT: "GPU fault (hardware or driver), not a build mismatch",
         ERROR_SHARED_LIBRARY_MISSING: "missing CUDA shared library runtime",
         ERROR_TOOLCHAIN_MISSING: "a GPU compiler vLLM needs is missing (Intel: install intel-ocloc)",
+        ERROR_JIT_BUILD: (
+            "a kernel build vLLM runs on first use failed, usually for lack of RAM "
+            "(lower MAX_JOBS, or raise VLLM_JIT_GIB_PER_JOB)"
+        ),
         ERROR_TEMPLATE: "chat template parse error",
         ERROR_QUANTIZATION: "quantization configuration error",
         ERROR_UNKNOWN: "vLLM startup/runtime failure",

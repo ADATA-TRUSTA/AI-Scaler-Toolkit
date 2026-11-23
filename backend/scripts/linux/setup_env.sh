@@ -20,7 +20,7 @@
 #   TRUSTA_SKIP_SYNC=1 ./setup_env.sh           # leave the Python environment as it is; only
 #                                               # the toolkit wiring, the DeepSpeed patch and llama
 #   TRUSTA_XPU_CHECK_TIMEOUT=600 ./setup_env.sh # raise the XPU check kill timeout (seconds)
-#   TRUSTA_SETUP_STRATA=1 ./setup_env.sh        # also install Strata (engine="strata", NVIDIA only)
+#   TRUSTA_SETUP_STRATA=1 ./setup_env.sh        # also install Strata (engine="strata", NVIDIA or Intel)
 #                                               # through install_strata.sh: TRUSTA_STRATA_PACKAGE /
 #                                               # _DIR / _SETUP_ARGS pick the package and model
 set -euo pipefail
@@ -1226,6 +1226,23 @@ if "$PROJECT_ROOT/.venv/bin/python" -c "import deepspeed" >/dev/null 2>&1; then
     fi
 fi
 
+# vLLM compiles its FlashInfer kernels the first time a model needs them -- minutes, and for MoE
+# models several GiB of RAM per compiler process. FlashInfer publishes them prebuilt per GPU
+# family; install the one for this machine's GPU (scripts/install_flashinfer_jit_cache.py).
+# After every sync for the same reason as the patch above: `uv sync` removes what the lock does
+# not list. Never fatal -- the engine falls back to compiling, with a MAX_JOBS cap.
+FLASHINFER_JIT_STATUS="not applicable"
+if [[ "$SETUP_VLLM" == "yes" && "$ACCEL" == "cuda" ]]; then
+    # Exit 0: installed and verified; 3: nothing applies here; anything else: compiles on first use.
+    jit_rc=0
+    "$(venv_python)" "$PROJECT_ROOT/scripts/install_flashinfer_jit_cache.py" || jit_rc=$?
+    case "$jit_rc" in
+    0) FLASHINFER_JIT_STATUS="prebuilt kernels installed" ;;
+    3) FLASHINFER_JIT_STATUS="not applicable" ;;
+    *) FLASHINFER_JIT_STATUS="not installed (kernels compile on first use)" ;;
+    esac
+fi
+
 if [[ "$LLAMA_MODE" == "skip" ]]; then
     echo "[setup_env] skipping llama (TRUSTA_INSTALL_LLAMA=0)"
     LLAMA_STATUS="skipped"
@@ -1347,10 +1364,21 @@ fi
 # depends on it.
 case "${TRUSTA_SETUP_STRATA:-0}" in
     1|true|TRUE|yes|YES|on|ON)
-        # Deep sleep, which the backend always starts Strata with, is built on CUDA's virtual
-        # memory API; there is no build of it for another accelerator.
-        [[ "$ACCEL" == "cuda" ]] ||
-            die "TRUSTA_SETUP_STRATA=1 needs an NVIDIA GPU (detected: $ACCEL); Strata's deep sleep is CUDA-only"
+        # Strata has a package for NVIDIA (CUDA, with deep sleep) and one for Intel (SYCL, no
+        # deep sleep: the backend uses plain sleep/unload there). Nothing else has one.
+        [[ "$ACCEL" == "cuda" || "$ACCEL" == "xpu" ]] ||
+            die "TRUSTA_SETUP_STRATA=1 needs an NVIDIA or Intel GPU (detected: $ACCEL); Strata has no build for another accelerator"
+        # install_strata.sh's own search matches only the CUDA archive (strata-sleep-*), so on an
+        # Intel machine it would find nothing, or take the CUDA package vendor/ ships beside the
+        # Intel one. Name the Intel package here, as the backend's first-load install does. A
+        # package already named in the environment is someone's choice and is left alone.
+        if [[ "$ACCEL" == "xpu" && -z "${TRUSTA_STRATA_PACKAGE:-}" ]]; then
+            sycl_package="$(ls -1 "$PROJECT_ROOT"/vendor/strata-*-linux-x86_64-sycl.tar.gz 2>/dev/null |
+                sort -V | tail -n 1 || true)"
+            [[ -n "$sycl_package" ]] ||
+                die "no Intel strata package (strata-*-linux-x86_64-sycl.tar.gz) in $PROJECT_ROOT/vendor; set TRUSTA_STRATA_PACKAGE to its .tar.gz"
+            export TRUSTA_STRATA_PACKAGE="$sycl_package"
+        fi
         "$SCRIPT_DIR/install_strata.sh" || die "Strata was not installed (see above)"
         STRATA_STATUS="installed (strata-sleep $(cat "${TRUSTA_STRATA_DIR:-$(dirname -- "$PROJECT_ROOT")/strata}/VERSION" 2>/dev/null || echo '?'))"
         ;;
@@ -1372,6 +1400,7 @@ echo "  llama check : $LLAMA_VERIFY"
 echo "  Service Dir : $SERVICE_DIR"
 echo "  vLLM Setup  : ${TRUSTA_SETUP_VLLM:-auto} (installed: $SETUP_VLLM)"
 echo "  DeepSpeed   : $DEEPSPEED_AIO_STATUS"
+echo "  FlashInfer  : $FLASHINFER_JIT_STATUS"
 echo "  llama       : $LLAMA_STATUS"
 echo "  llama tools : $LLAMA_TOOLS_STATUS"
 echo "  Strata      : $STRATA_STATUS"

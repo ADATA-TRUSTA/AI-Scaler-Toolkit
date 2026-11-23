@@ -12,7 +12,7 @@
 #   .\setup_env.ps1 -LlamaBackend cpu     # CPU-only build (no GPU, or the GPU build will not install)
 #   .\setup_env.ps1 -AllowLlamaFallback   # unattended: accept a degraded llama instead of stopping
 #   .\setup_env.ps1 -SkipXpuCheck  # skip the post-sync XPU smoke check
-#   $env:TRUSTA_SETUP_STRATA = "1"; .\setup_env.ps1  # also install Strata (engine="strata", NVIDIA only)
+#   $env:TRUSTA_SETUP_STRATA = "1"; .\setup_env.ps1  # also install Strata (engine="strata", NVIDIA or Intel)
 #                                  # through install_strata.ps1: TRUSTA_STRATA_PACKAGE /
 #                                  # _DIR / _SETUP_ARGS pick the package and model
 param(
@@ -1240,9 +1240,21 @@ if ($LlamaMode -eq "skip") {
 $strataSwitch = if ($env:TRUSTA_SETUP_STRATA) { $env:TRUSTA_SETUP_STRATA.Trim() } else { "" }
 switch -Regex ($strataSwitch) {
     '^(?i)(1|true|yes|on)$' {
-        # Deep sleep, which the backend always starts Strata with, is built on CUDA's virtual
-        # memory API; there is no build of it for another accelerator.
-        if ($Accel -ne "cuda") { Die "TRUSTA_SETUP_STRATA=1 needs an NVIDIA GPU (detected: $Accel); Strata's deep sleep is CUDA-only" }
+        # Strata has a package for NVIDIA (CUDA, with deep sleep) and one for Intel (SYCL, no
+        # deep sleep: the backend uses plain sleep/unload there). Nothing else has one.
+        if ($Accel -ne "cuda" -and $Accel -ne "xpu") { Die "TRUSTA_SETUP_STRATA=1 needs an NVIDIA or Intel GPU (detected: $Accel); Strata has no build for another accelerator" }
+        # install_strata.ps1's own search matches only the CUDA archive (strata-sleep-*), so on an
+        # Intel machine it would find nothing, or take the CUDA package vendor/ ships beside the
+        # Intel one. Name the Intel package here, as the backend's first-load install does. A
+        # package already named in the environment is someone's choice and is left alone.
+        if ($Accel -eq "xpu" -and -not $env:TRUSTA_STRATA_PACKAGE) {
+            # Newest by version: a name sort puts 0.2.7 after 0.2.11.
+            $sycl = Get-ChildItem -Path (Join-Path $ProjectRoot "vendor") -Filter "strata-*-windows-x86_64-sycl.zip" -File -ErrorAction SilentlyContinue |
+                Sort-Object { [regex]::Replace($_.Name, '\d+', { param($m) $m.Value.PadLeft(6, '0') }) } |
+                Select-Object -Last 1 -ExpandProperty FullName
+            if (-not $sycl) { Die "no Intel strata package (strata-*-windows-x86_64-sycl.zip) in vendor\; set TRUSTA_STRATA_PACKAGE to its .zip" }
+            $env:TRUSTA_STRATA_PACKAGE = $sycl
+        }
         # In this process rather than a new powershell: a child would not inherit the execution
         # policy the launcher started this one with.
         try { & (Join-Path $ScriptDir "install_strata.ps1") } catch { Die "Strata was not installed: $($_.Exception.Message)" }

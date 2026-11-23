@@ -18,6 +18,7 @@ from service.inference.engines.vllm_error_classifier import (
     ERROR_MODEL_NOT_FOUND,
     ERROR_CUDA_MISMATCH,
     ERROR_GPU_FAULT,
+    ERROR_JIT_BUILD,
     ERROR_SHARED_LIBRARY_MISSING,
     ERROR_TEMPLATE,
     ERROR_TOOLCHAIN_MISSING,
@@ -338,6 +339,23 @@ def test_config_wins_over_oom_when_a_line_could_match_both():
 # had already passed while two of these still classified as `unknown`, which is
 # the argument for keeping the real ones.
 # --------------------------------------------------------------------------
+
+
+def test_a_failed_flashinfer_build_is_not_a_gpu_oom():
+    """
+    FlashInfer's run_ninja raises "Ninja build failed." (jit/cpp_ext.py, 0.7.0.post1).
+
+    When the machine runs out of RAM the kernel kills nvcc/cicc and ninja only reports
+    that a command failed; the line a GPU-memory rule would key on never appears. If
+    nvcc did print "out of memory", the answer is still "lower MAX_JOBS", not a
+    smaller model.
+    """
+    report = classify_stderr(["RuntimeError: Ninja build failed. Ninja output:"])
+    assert report.category == ERROR_JIT_BUILD
+    assert "MAX_JOBS" in report.summary
+
+    both = classify_stderr(["Ninja build failed.", "nvcc: out of memory"])
+    assert both.category == ERROR_JIT_BUILD
 
 
 def test_a_quantization_layout_this_build_cannot_serve():

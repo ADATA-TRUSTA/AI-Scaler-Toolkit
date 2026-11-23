@@ -29,6 +29,7 @@ from ...settings import (
     VLLM_CLIENT_HOST,
     VLLM_ENABLE_LOG_REQUESTS,
     VLLM_HEALTH_TIMEOUT,
+    VLLM_JIT_GIB_PER_JOB,
     VLLM_LOGGING_LEVEL,
     VLLM_OPENAI_API_KEY,
     VLLM_PORT,
@@ -38,6 +39,7 @@ from ...settings import (
     VLLM_SERVER_PROJECT_DIR,
     VLLM_STARTUP_SWEEP,
     VLLM_SWEEP_PORTS,
+    VLLM_WARMUP_TIMEOUT,
     configure_logging,
 )
 from ..model_family import read_chat_template
@@ -84,6 +86,66 @@ _IGPU_MIN_KV_BYTES = 512 * 1024**2
 # size fixed it gates nothing else -- weights larger than it load fine -- so it is kept at
 # the floor, which the driver's pooled pages cannot push above what it reports as free.
 _IGPU_CHECK_UTILIZATION = 0.05
+
+# Left to the system and the service itself when sizing FlashInfer's build jobs.
+_JIT_BASE_RESERVE_BYTES = 4 * _GIB
+# FlashInfer logs this when it starts compiling a kernel that is not cached
+# (jit/core.py: "Building JIT module <name>; this can take several minutes on first use").
+_JIT_BUILD_MARKER = "building jit module"
+
+
+def _cgroup_headroom_bytes() -> int | None:
+    """
+    Room left under the tightest numeric cgroup v2 memory limit this process sits beneath.
+
+    Walks from the process's own cgroup up to the root, because a limit set by systemd
+    (``MemoryMax=`` on a unit or scope) lives on a directory such as
+    ``/sys/fs/cgroup/user.slice/<scope>``, not at ``/sys/fs/cgroup``. In a container the
+    cgroup namespace makes the process's own cgroup the root, which is the only case a
+    flat read of ``/sys/fs/cgroup/memory.max`` covers. None when nothing is limited.
+    """
+    root = "/sys/fs/cgroup"
+    try:
+        lines = Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines()
+        own = next(line[3:] for line in lines if line.startswith("0::"))
+        parts = [part for part in own.split("/") if part and part != ".."]
+    except (OSError, StopIteration):
+        parts = []
+    headroom: int | None = None
+    for depth in range(len(parts), -1, -1):
+        directory = "/".join([root, *parts[:depth]])
+        try:
+            limit = Path(f"{directory}/memory.max").read_text(encoding="ascii").strip()
+            used = int(Path(f"{directory}/memory.current").read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            continue
+        # "max" means no limit here; only a numeric one can lower the answer.
+        if limit.isdigit():
+            room = max(0, int(limit) - used)
+            headroom = room if headroom is None else min(headroom, room)
+    return headroom
+
+
+def _available_ram_bytes() -> int:
+    """RAM still usable here: the host's available memory, capped by any cgroup v2 limit."""
+    available = psutil.virtual_memory().available
+    headroom = _cgroup_headroom_bytes()
+    return available if headroom is None else min(available, headroom)
+
+
+def _jit_max_jobs(reserve_gib: float) -> int | None:
+    """
+    How many parallel FlashInfer build jobs the free RAM can carry, or None for no cap.
+
+    ``reserve_gib`` is memory the load itself will take once it gets going (offloaded
+    weights and KV cache), which is not yet allocated when the environment is built.
+    Never below 1: a single job is slow, not impossible, and 0 would mean no build at all.
+    """
+    if VLLM_JIT_GIB_PER_JOB <= 0:
+        return None
+    budget = _available_ram_bytes() - _JIT_BASE_RESERVE_BYTES - int(reserve_gib * _GIB)
+    per_job = max(1, int(VLLM_JIT_GIB_PER_JOB * _GIB))
+    return max(1, min(os.cpu_count() or 1, int(budget // per_job)))
 
 
 def _intel_igpu_only() -> bool:
@@ -345,6 +407,9 @@ class VllmRuntimeContext:
     # something different depending on whether the server was silent or still
     # compiling, and the error message should say which.
     last_server_output_at: float = 0.0
+    # When FlashInfer first reported compiling a kernel this load; 0 if it has not. A
+    # timeout while this is set is a build that needed longer, not a wedged server.
+    jit_build_started_at: float = 0.0
 
 
 # vLLM's KV/EC offload regions are tmpfs files under /dev/shm, sized by the
@@ -476,6 +541,29 @@ class VllmEngine(BaseEngine):
         head = txt.lstrip()[:32].upper()
         return head.startswith(("INFO", "DEBUG"))
 
+    def _note_jit_build(self, line: str) -> None:
+        """
+        Say once per load that vLLM is compiling a kernel, so a long wait is not read as a hang.
+
+        Without it the load shows nothing for minutes, a user reloads, and the reload
+        kills the half-finished build. The first build line is the one reported; later
+        modules in the same load do not repeat it.
+        """
+        if self.runtime.jit_build_started_at:
+            return
+        self.runtime.jit_build_started_at = time.time()
+        message = (
+            "vLLM is compiling a GPU kernel it has not built on this machine before. This "
+            "happens once and can take several minutes (longer on a machine with little RAM); "
+            "do not restart the load."
+        )
+        logger.warning("[Worker] %s First line: %s", message, line)
+        # Only while loading: a build during serving must not flip a ready engine back.
+        if self.runtime.in_startup:
+            self.status_queue.put(
+                {"status": "loading", "stage": "vllm_jit_build", "message": message}
+            )
+
     def _pump_server_logs(self, stream: "IO[str] | None", is_stderr: bool = False) -> None:
         """Forward vLLM subprocess output to this service's logger with structured fields."""
         if stream is None:
@@ -490,6 +578,11 @@ class VllmEngine(BaseEngine):
                 # Any output at all is evidence the server is still working --
                 # a long BF16 compile looks identical to a hang without it.
                 self.runtime.last_server_output_at = time.time()
+
+                # Before the drop filter: this is an INFO line, and the point is to
+                # surface it whether or not INFO is being forwarded.
+                if _JIT_BUILD_MARKER in txt.lower():
+                    self._note_jit_build(txt)
 
                 if self._should_drop_server_log(txt):
                     continue
@@ -1493,6 +1586,25 @@ class VllmEngine(BaseEngine):
         # restart names the same prompt differently: nothing written before it is
         # found again, and the directory keeps growing. An operator's own value wins.
         env.setdefault("PYTHONHASHSEED", "0")
+        # FlashInfer builds its kernels with ninja, which starts nproc+2 nvcc jobs unless
+        # MAX_JOBS says otherwise. One job reaches 10.3 GiB, so on a many-core machine with
+        # modest RAM the first MoE load ran out of memory three times in a row. An
+        # operator's own MAX_JOBS wins.
+        if not env.get("MAX_JOBS"):
+            reserve_gib = sum(
+                float(getattr(config, name, None) or 0.0)
+                for name in ("vllm_cpu_offload_gb", "vllm_kv_offloading_size")
+            )
+            jobs = _jit_max_jobs(reserve_gib)
+            if jobs is not None:
+                env["MAX_JOBS"] = str(jobs)
+                logger.info(
+                    "[Worker] MAX_JOBS=%d for kernel builds (cap: %.0f GiB per job, "
+                    "%.0f GiB reserved for offload); set MAX_JOBS to override",
+                    jobs,
+                    VLLM_JIT_GIB_PER_JOB,
+                    reserve_gib,
+                )
         # Under WSL2 vLLM turns pinned host memory off, and the engine core then fails
         # at startup with "UVA is not available" -- every load, on a WSL2 distro this
         # backend otherwise supports as Linux. vLLM's own switch turns it back on; an
@@ -1957,12 +2069,62 @@ class VllmEngine(BaseEngine):
             )
         else:
             details_parts.append("last_output=never (the server produced no output at all)")
+        if self.runtime.jit_build_started_at:
+            details_parts.append(
+                f"jit_build=started {time.time() - self.runtime.jit_build_started_at:.0f}s ago "
+                "(first-use kernel compile: raise VLLM_HEALTH_TIMEOUT, or lower MAX_JOBS "
+                "if the machine ran out of RAM)"
+            )
         details_parts.append(f"stderr_excerpt={report.to_text()}")
         details = "; " + "; ".join(details_parts)
         raise RuntimeError(
             f"vLLM OpenAI-compatible server startup timeout: "
             f"{self.runtime.health_timeout_s:.0f}s, endpoint={url}{details}"
         )
+
+    def _warm_up_server(self) -> None:
+        """
+        Send one tiny completion so first-use kernel builds finish inside the load.
+
+        The health check passes before FlashInfer has built its sampling kernels; that
+        happens on the first request. A client with a short timeout then gives up on a
+        request that was only waiting for the build (a 60 s curl did, on a model that
+        answered from the second request on). Done here, the build runs under
+        VLLM_WARMUP_TIMEOUT and the first real request finds it cached.
+
+        The request samples (temperature and top_p set) because a greedy one may not
+        take the sampler path a chat does. A failed warm-up is not a failed load:
+        the server is up, and the worst case is the old behaviour.
+        """
+        client = self.runtime.client
+        model = self.runtime.served_model_name
+        if VLLM_WARMUP_TIMEOUT <= 0 or client is None or not model:
+            return
+        self.status_queue.put({"status": "loading", "stage": "vllm_warmup"})
+        # Keep forwarding vLLM's INFO while this runs: it carries the build lines.
+        self.runtime.in_startup = True
+        started = time.time()
+        try:
+            # No retries: a timed-out build would otherwise be sent twice more.
+            client.with_options(timeout=VLLM_WARMUP_TIMEOUT, max_retries=0).completions.create(
+                model=model,
+                prompt="Hello",
+                max_tokens=2,
+                temperature=0.7,
+                top_p=0.9,
+            )
+            logger.info("[Worker] vLLM warm-up request finished in %.1fs", time.time() - started)
+        except (APIError, OSError, ValueError) as e:
+            # A server that died during the build is a load failure, and says why.
+            self._check_server_alive_or_raise()
+            logger.warning(
+                "[Worker] vLLM warm-up request failed after %.1fs (%s); the load continues, "
+                "and the first real request may have to wait for kernel builds",
+                time.time() - started,
+                e,
+            )
+        finally:
+            self.runtime.in_startup = False
 
     def load_model(self, config: InferenceConfig) -> None:
         """Validate environment, launch the vLLM server, and await readiness."""
@@ -1984,6 +2146,7 @@ class VllmEngine(BaseEngine):
 
             self.status_queue.put({"status": "loading", "stage": "vllm_server_connect"})
             self.runtime.served_model_name = self._resolve_served_model_name(config)
+            self._warm_up_server()
 
             self.status_queue.put(
                 {

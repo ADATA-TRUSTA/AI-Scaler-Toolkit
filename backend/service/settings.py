@@ -469,6 +469,28 @@ VLLM_HEALTH_TIMEOUT: float = float(
     os.getenv("VLLM_HEALTH_TIMEOUT", str(_DEFAULT_VLLM_HEALTH_TIMEOUT))
 )
 
+# Seconds the first, tiny completion sent right after the health check may take.
+# Env var: VLLM_WARMUP_TIMEOUT (0 turns the warm-up off)
+# FlashInfer compiles its sampling kernels on the first request, not at startup, and a
+# client with a short timeout gave up on that request while the build was still running
+# (a 60 s curl, on a model that served fine from the second request on). Sending the
+# request ourselves puts the build inside the load, under this budget.
+_DEFAULT_VLLM_WARMUP_TIMEOUT: float = 1800.0
+VLLM_WARMUP_TIMEOUT: float = float(
+    os.getenv("VLLM_WARMUP_TIMEOUT", str(_DEFAULT_VLLM_WARMUP_TIMEOUT))
+)
+
+# GiB of RAM budgeted per parallel FlashInfer/nvcc build job, used to cap MAX_JOBS.
+# Env var: VLLM_JIT_GIB_PER_JOB (0 leaves MAX_JOBS alone)
+# 11, the worst case and not the average: one cicc compiling FlashInfer's
+# moe_gemm_kernels_*.cu measured 10.3 GiB, against about 3.5 GiB for the CUTLASS grouped
+# GEMM files. Without a cap ninja starts nproc+2 jobs; 22 of them took a 62 GB machine
+# to OOM three loads in a row.
+_DEFAULT_VLLM_JIT_GIB_PER_JOB: float = 11.0
+VLLM_JIT_GIB_PER_JOB: float = float(
+    os.getenv("VLLM_JIT_GIB_PER_JOB", str(_DEFAULT_VLLM_JIT_GIB_PER_JOB))
+)
+
 # Seconds between checks of the disk KV tier against vllm_kv_offloading_disk_max_gb.
 # A scan is cheap (65 GB / 3228 block files measured at 0.02 s); the interval bounds
 # how far past the cap the tier can grow between checks under heavy prefill.
@@ -578,8 +600,11 @@ STRATA_RUNTIME_DIR: str = _get_env_path("STRATA_RUNTIME_DIR", _DEFAULT_STRATA_RU
 # desktop launcher points it somewhere that outlives the install. Empty = Strata's default.
 STRATA_DATA_DIR: str = os.getenv("STRATA_DATA_DIR", "")
 # Env var: STRATA_INSTALL_DIR -- where a first Strata load installs Strata from the package in
-# vendor/ when STRATA_HOME is empty. Empty = install_strata's default, strata/ beside this
-# project. The desktop launcher sets it to its data directory, out of the program directory.
+# vendor/ when STRATA_HOME is empty, and where a later load updates it in place when the package
+# is newer than the install (only an install made there, with its interpreter and engine inside
+# it; a hand-made install or an engine pinned elsewhere is left alone). Empty = install_strata's
+# default, strata/ beside this project. The desktop launcher sets it to its data directory, out
+# of the program directory.
 STRATA_INSTALL_DIR: str = os.getenv("STRATA_INSTALL_DIR", "")
 
 # ==================== Redis Configuration ====================

@@ -119,8 +119,31 @@ Write-Host "$script:LogTag strata-sleep $version unpacked into $strataDir"
 $python = Join-Path $strataDir ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
     # --seed: Strata's setup installs its packages with pip, which a bare uv venv lacks.
-    uv venv -q --seed -p 3.12 (Join-Path $strataDir ".venv")
-    if ($LASTEXITCODE -ne 0) { Die "could not make Strata's venv" }
+    $venvDir = Join-Path $strataDir ".venv"
+    uv venv -q --seed -p 3.12 $venvDir
+    if ($LASTEXITCODE -ne 0) {
+        # uv names its managed Python by a junction (cpython-3.12-...-none) that points at the real
+        # directory (cpython-3.12.<patch>-...-none). Windows refuses to follow a junction made by
+        # an unelevated process from an elevated one (os error 448, "untrusted mount point"), so
+        # uv cannot read the Python it installed itself. The real directory has no such problem:
+        # try that one before giving up. The pattern needs a dot after 3.12, so it never matches
+        # the junction, and a link is skipped in case a name ever does.
+        $uvPythonRoot = if ($env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR } else { Join-Path $env:APPDATA "uv\python" }
+        $realPython = Get-ChildItem -LiteralPath $uvPythonRoot -Directory -Filter "cpython-3.12.*-windows-x86_64-none" -ErrorAction SilentlyContinue |
+            Where-Object { -not $_.LinkType } | Sort-Object Name | Select-Object -Last 1 |
+            ForEach-Object { Join-Path $_.FullName "python.exe" }
+        if (-not $realPython -or -not (Test-Path -LiteralPath $realPython)) {
+            Die "could not make Strata's venv: uv could not use its managed Python 3.12 and none was found under $uvPythonRoot to try instead"
+        }
+        Write-Host "$script:LogTag uv could not use its managed Python 3.12 through its link; retrying with $realPython"
+        # A failed run can leave a half-made .venv, which uv would not overwrite.
+        if (Test-Path -LiteralPath $venvDir) { Remove-Item -LiteralPath $venvDir -Recurse -Force }
+        # Python's own venv, not `uv venv -p <real path>`: uv still records the junction as the
+        # venv's base even then, so the venv's python.exe would fail the same way when it starts
+        # (uv: "trampoline failed to spawn Python child process"). It seeds pip as --seed does.
+        & $realPython -m venv $venvDir
+        if ($LASTEXITCODE -ne 0) { Die "could not make Strata's venv" }
+    }
 }
 
 # What the package says about itself: the backend it was built for, and whether it sleeps.

@@ -208,8 +208,101 @@ def strata_package() -> Path | None:
         if backend == "cuda"
         else f"strata-*-{platform}-{backend}.{ext}"
     )
-    found = sorted((PROJECT_ROOT / "vendor").glob(pattern))
-    return found[-1] if found else None
+    found = list((PROJECT_ROOT / "vendor").glob(pattern))
+    # The newest version, not the last name: strata-sleep-0.2.7-... sorts after
+    # strata-sleep-0.2.11-..., and an upgrade used to leave the older package beside the new one.
+    return max(found, key=_package_sort_key) if found else None
+
+
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-sleep\.(\d+))?")
+# strata-sleep-<version>-<platform>.<ext> (CUDA) and strata-<version>-<platform>-sycl.<ext>
+# (Intel; before 0.2.11-sleep.1 it was strata-sleep-<version>-...-sycl).
+_PACKAGE_VERSION_RE = re.compile(r"^strata(?:-sleep)?-(\d+\.\d+\.\d+(?:-sleep\.\d+)?)-")
+
+
+def _version_key(text: str) -> tuple[int, int, int, int] | None:
+    """(major, minor, patch, sleep) of '0.2.11-sleep.2', compared as numbers, or None."""
+    match = _VERSION_RE.match(text.strip())
+    if match is None:
+        return None
+    major, minor, patch, sleep = match.groups()
+    return int(major), int(minor), int(patch), int(sleep or 0)
+
+
+def strata_package_version(package: Path | None = None) -> str | None:
+    """The version in the name of the package vendor/ carries for this host, or None."""
+    package = package if package is not None else strata_package()
+    if package is None:
+        return None
+    match = _PACKAGE_VERSION_RE.match(package.name)
+    return match.group(1) if match else None
+
+
+def _package_sort_key(package: Path) -> tuple[tuple[int, int, int, int], str]:
+    version = strata_package_version(package)
+    return (_version_key(version) if version else None) or (0, 0, 0, 0), package.name
+
+
+def strata_installed_version() -> str | None:
+    """The first line of VERSION in STRATA_HOME, or None when there is none to read."""
+    if not STRATA_HOME.strip():
+        return None
+    try:
+        text = (Path(STRATA_HOME).expanduser() / "VERSION").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    return (lines[0].strip() or None) if lines else None
+
+
+def _install_dir() -> Path:
+    """Where install_strata.* puts Strata when this backend asks it to."""
+    if STRATA_INSTALL_DIR.strip():
+        return Path(STRATA_INSTALL_DIR).expanduser()
+    return PROJECT_ROOT.parent / "strata"
+
+
+def _resolved(path: str | Path) -> str:
+    # Lexical, not realpath: a venv's python is a link to the interpreter uv manages
+    # (~/.local/share/uv/python/... on Linux), which realpath would put outside the install.
+    return os.path.normcase(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _is_inside(path: str, root: Path) -> bool:
+    inner, outer = _resolved(path), _resolved(root)
+    return inner == outer or inner.startswith(outer + os.sep)
+
+
+def strata_update_needed() -> str | None:
+    """
+    Why the installed Strata should be replaced by the package vendor/ carries, or None.
+
+    An upgrade replaces the backend and the package beside it but not a Strata that an
+    earlier build already installed: STRATA_HOME names a working install, so a load only ran
+    that install's own setup and the engine fixes the new build ships never reached the
+    machine. install_strata.* copies over an earlier install (its venv and run configs stay),
+    so the update is that script run again.
+
+    Only an install this backend made is touched: STRATA_HOME is the directory it installs
+    into and the interpreter and engine lie inside it. A hand-made install, or an engine
+    pinned somewhere else, is the user's own and is left alone, as is one that is newer, the
+    same or whose version cannot be read.
+    """
+    if not strata_installable():
+        return None
+    install = _install_dir()
+    if not STRATA_HOME.strip() or _resolved(STRATA_HOME) != _resolved(install):
+        return None
+    for pinned in (STRATA_PYTHON, STRATA_ENGINE_BINARY):
+        if not pinned.strip() or not _is_inside(pinned, install):
+            return None
+    installed, shipped = strata_installed_version(), strata_package_version()
+    if not installed or not shipped:
+        return None
+    have, want = _version_key(installed), _version_key(shipped)
+    if have is None or want is None or have >= want:
+        return None
+    return f"the installed Strata {installed} is older than the {shipped} this build ships"
 
 
 def engine_build_info() -> dict[str, Any]:
@@ -469,7 +562,10 @@ def prepare_model(gguf_path: str) -> Path:
         if STRATA_DATA_DIR.strip()
         else []
     )
-    if strata_setup_problem() is None:
+    update = strata_update_needed()
+    if update:
+        logger.info("[Strata] %s: updating it in place from the package in vendor/", update)
+    if strata_setup_problem() is None and update is None:
         _run_setup_step(
             [
                 strata_python(),
@@ -853,10 +949,14 @@ class StrataEngine(BaseEngine):
                 raise RuntimeError(problem)
             source_path = Path(config.strata_config_path).expanduser()
         elif config.model_path:
-            found = None if problem else find_run_config(config.model_path)
+            # An older install of this backend is brought up to date even when its run config
+            # for the model exists: that config only starts the engine the install has.
+            stale = None if problem else strata_update_needed()
+            found = None if problem or stale else find_run_config(config.model_path)
             if found is None:
-                # The first load of this model (or of Strata at all): install and prepare it
-                # here, so a GGUF from the model downloads is all a user has to provide.
+                # The first load of this model (or of Strata at all), or one that finds an
+                # older install: install and prepare it here, so a GGUF from the model
+                # downloads is all a user has to provide.
                 self.status_queue.put({"status": "loading", "stage": "strata_setup"})
                 found = prepare_model(config.model_path)
             source_path = found

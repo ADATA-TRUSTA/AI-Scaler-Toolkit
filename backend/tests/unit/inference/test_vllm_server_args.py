@@ -2,6 +2,7 @@
 
 import json
 import os
+import queue
 from multiprocessing import Event, Queue
 from pathlib import Path
 from types import SimpleNamespace
@@ -468,6 +469,195 @@ def test_build_server_env_keeps_an_operator_hash_seed(monkeypatch):
     monkeypatch.setenv("PYTHONHASHSEED", "1234")
     env = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
     assert env["PYTHONHASHSEED"] == "1234"
+
+
+_GIB = 1024**3
+
+
+def _ram(monkeypatch, *, gib, cpus):
+    monkeypatch.setattr(vllm_engine, "_available_ram_bytes", lambda: int(gib * _GIB))
+    monkeypatch.setattr(vllm_engine.os, "cpu_count", lambda: cpus)
+
+
+def test_build_server_env_caps_max_jobs_by_free_ram(monkeypatch):
+    """22 jobs on a 62 GB machine was three OOMs in a row; RAM, not cores, sets the cap."""
+    monkeypatch.delenv("MAX_JOBS", raising=False)
+    monkeypatch.setattr(vllm_engine, "VLLM_JIT_GIB_PER_JOB", 11.0)
+    _ram(monkeypatch, gib=60, cpus=20)
+    env = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
+    # (60 - 4 reserved) // 11 = 5
+    assert env["MAX_JOBS"] == "5"
+
+
+def test_build_server_env_reserves_the_offload_budget(monkeypatch):
+    """Offloaded experts and KV cache take RAM after the environment is built."""
+    monkeypatch.delenv("MAX_JOBS", raising=False)
+    monkeypatch.setattr(vllm_engine, "VLLM_JIT_GIB_PER_JOB", 11.0)
+    _ram(monkeypatch, gib=60, cpus=20)
+    config = InferenceConfig(
+        engine="vllm", model_name="demo", vllm_cpu_offload_gb=16.0, vllm_kv_offloading_size=10.0
+    )
+    env = _engine()._build_server_env(config)
+    # (60 - 4 - 16 - 10) // 11 = 2
+    assert env["MAX_JOBS"] == "2"
+
+
+def test_build_server_env_never_caps_below_one_job_or_above_the_cores(monkeypatch):
+    monkeypatch.delenv("MAX_JOBS", raising=False)
+    monkeypatch.setattr(vllm_engine, "VLLM_JIT_GIB_PER_JOB", 11.0)
+    _ram(monkeypatch, gib=2, cpus=20)
+    low = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
+    assert low["MAX_JOBS"] == "1"
+    _ram(monkeypatch, gib=512, cpus=8)
+    high = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
+    assert high["MAX_JOBS"] == "8"
+
+
+def test_build_server_env_keeps_an_operator_max_jobs(monkeypatch):
+    monkeypatch.setenv("MAX_JOBS", "7")
+    _ram(monkeypatch, gib=8, cpus=20)
+    env = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
+    assert env["MAX_JOBS"] == "7"
+
+
+def test_build_server_env_leaves_max_jobs_unset_when_the_cap_is_off(monkeypatch):
+    monkeypatch.delenv("MAX_JOBS", raising=False)
+    monkeypatch.setattr(vllm_engine, "VLLM_JIT_GIB_PER_JOB", 0.0)
+    env = _engine()._build_server_env(InferenceConfig(engine="vllm", model_name="demo"))
+    assert "MAX_JOBS" not in env
+
+
+def test_available_ram_is_lowered_by_a_cgroup_limit(monkeypatch, tmp_path):
+    """In a memory-limited container the host's MemAvailable is not the budget."""
+    monkeypatch.setattr(
+        vllm_engine.psutil, "virtual_memory", lambda: SimpleNamespace(available=100 * _GIB)
+    )
+    (tmp_path / "memory.max").write_text(str(20 * _GIB))
+    (tmp_path / "memory.current").write_text(str(5 * _GIB))
+    real_path = vllm_engine.Path
+    monkeypatch.setattr(
+        vllm_engine,
+        "Path",
+        lambda p: real_path(str(p).replace("/sys/fs/cgroup", str(tmp_path))),
+    )
+    assert vllm_engine._available_ram_bytes() == 15 * _GIB
+    (tmp_path / "memory.max").write_text("max")
+    assert vllm_engine._available_ram_bytes() == 100 * _GIB
+
+
+def test_available_ram_honours_a_limit_on_the_scope_the_service_runs_in(monkeypatch, tmp_path):
+    """systemd's MemoryMax= sits on the unit's cgroup, not on /sys/fs/cgroup itself."""
+    monkeypatch.setattr(
+        vllm_engine.psutil, "virtual_memory", lambda: SimpleNamespace(available=100 * _GIB)
+    )
+    scope = tmp_path / "sys" / "user.slice" / "job.scope"
+    scope.mkdir(parents=True)
+    (scope / "memory.max").write_text(str(42 * _GIB))
+    (scope / "memory.current").write_text(str(2 * _GIB))
+    (scope.parent / "memory.max").write_text(str(30 * _GIB))  # a tighter limit above it wins
+    (scope.parent / "memory.current").write_text(str(5 * _GIB))
+    (tmp_path / "sys" / "memory.max").write_text("max")  # the root has no limit
+    (tmp_path / "proc_cgroup").write_text("0::/user.slice/job.scope" + chr(10))
+    real_path = vllm_engine.Path
+    mapping = {"/sys/fs/cgroup": str(tmp_path / "sys"), "/proc/self/cgroup": str(tmp_path / "proc_cgroup")}
+
+    def fake_path(p: str):
+        for prefix, target in mapping.items():
+            if str(p).startswith(prefix):
+                return real_path(str(p).replace(prefix, target, 1))
+        return real_path(p)
+
+    monkeypatch.setattr(vllm_engine, "Path", fake_path)
+    assert vllm_engine._available_ram_bytes() == 25 * _GIB
+    (scope.parent / "memory.max").write_text("max")
+    assert vllm_engine._available_ram_bytes() == 40 * _GIB
+
+
+def test_jit_build_line_is_reported_once_and_only_while_loading():
+    engine = _engine()
+    line = "INFO Building JIT module fused_moe_120; this can take several minutes on first use"
+    engine._note_jit_build(line)
+    first = engine.runtime.jit_build_started_at
+    engine._note_jit_build(line)
+    assert engine.runtime.jit_build_started_at == first
+    # A multiprocessing.Queue delivers through a feeder thread, so empty() right after
+    # put() is not evidence of anything; read with a timeout instead.
+    assert engine.status_queue.get(timeout=5)["stage"] == "vllm_jit_build"
+    with pytest.raises(queue.Empty):
+        engine.status_queue.get(timeout=0.5)
+
+    serving = _engine()
+    serving.runtime.in_startup = False
+    serving._note_jit_build(line)
+    assert serving.runtime.jit_build_started_at > 0
+    with pytest.raises(queue.Empty):
+        serving.status_queue.get(timeout=0.5)
+
+
+class _FakeCompletions:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return object()
+
+
+class _FakeClient:
+    def __init__(self, outcome=None):
+        self.completions = _FakeCompletions(outcome)
+        self.options = None
+
+    def with_options(self, **options):
+        self.options = options
+        return self
+
+
+def _warm(engine, client):
+    engine.runtime.client = client
+    engine.runtime.served_model_name = "demo"
+    engine.runtime.in_startup = False
+    engine._warm_up_server()
+
+
+def test_warm_up_sends_one_sampling_request_without_retries(monkeypatch):
+    monkeypatch.setattr(vllm_engine, "VLLM_WARMUP_TIMEOUT", 900.0)
+    engine, client = _engine(), _FakeClient()
+    _warm(engine, client)
+    assert client.options == {"timeout": 900.0, "max_retries": 0}
+    (call,) = client.completions.calls
+    assert call["model"] == "demo" and call["max_tokens"] == 2
+    assert call["temperature"] > 0 and call["top_p"] < 1
+    # The build lines are INFO; startup forwarding is back off once the warm-up ends.
+    assert engine.runtime.in_startup is False
+
+
+def test_warm_up_can_be_turned_off(monkeypatch):
+    monkeypatch.setattr(vllm_engine, "VLLM_WARMUP_TIMEOUT", 0.0)
+    engine, client = _engine(), _FakeClient()
+    _warm(engine, client)
+    assert client.completions.calls == []
+
+
+def test_a_failed_warm_up_does_not_fail_the_load(monkeypatch):
+    """A server that is up and answers a health check still serves; warn and go on."""
+    monkeypatch.setattr(vllm_engine, "VLLM_WARMUP_TIMEOUT", 900.0)
+    engine = _engine()
+    engine.runtime.server_process = SimpleNamespace(poll=lambda: None)
+    _warm(engine, _FakeClient(vllm_engine.APIError("bad", request=None, body=None)))
+    assert engine.runtime.in_startup is False
+
+
+def test_a_server_that_died_during_warm_up_is_a_load_failure(monkeypatch):
+    monkeypatch.setattr(vllm_engine, "VLLM_WARMUP_TIMEOUT", 900.0)
+    engine = _engine()
+    engine.runtime.server_process = SimpleNamespace(poll=lambda: -9, returncode=-9)
+    monkeypatch.setattr(engine, "_drain_stderr_pump", lambda timeout: None)
+    with pytest.raises(RuntimeError, match="exited during startup"):
+        _warm(engine, _FakeClient(vllm_engine.APIError("gone", request=None, body=None)))
 
 
 def test_vllm_native_kv_offloading_emits_the_flag():
