@@ -217,6 +217,41 @@ def test_an_engine_without_deep_sleep_is_not_asked_to_sleep(tmp_path, monkeypatc
     assert "--sleep-mode" not in run["args"]
 
 
+def test_the_api_process_learns_the_engine_an_install_recorded_after_it_started(
+    tmp_path, monkeypatch
+):
+    """F-0096: the first load installs Strata in a worker and records it in .env; the API
+    process, which decides whether a sleep is allowed, started before and read nothing."""
+    engine = tmp_path / "strata" / "engine" / "strata"
+    engine.parent.mkdir(parents=True)
+    engine.write_bytes(b"")
+    (engine.parent / "BUILD.json").write_text(json.dumps({"backend": "cuda", "sleep_mode": True}))
+    project = tmp_path / "backend"
+    project.mkdir()
+    monkeypatch.setattr(strata_engine, "PROJECT_ROOT", project)
+    for key in ("STRATA_HOME", "STRATA_PYTHON", "STRATA_ENGINE_BINARY"):
+        monkeypatch.setattr(strata_engine, key, "")  # what this process read at startup
+        monkeypatch.delenv(key, raising=False)  # adopting sets these; the test must not leak them
+
+    # nothing installed yet: still no engine, and asking does not invent one
+    assert strata_engine.engine_build_info() == {}
+    assert strata_engine.engine_sleeps() is False
+
+    # the install records its paths in .env, in another process
+    (project / ".env").write_text(
+        f"STRATA_HOME={tmp_path / 'strata'}\n"
+        f"STRATA_PYTHON={tmp_path / 'strata' / 'py'}\n"
+        f"STRATA_ENGINE_BINARY={engine}\n"
+    )
+    assert strata_engine.engine_sleeps() is True
+    assert strata_engine.engine_backend() == "cuda"
+    assert strata_engine.STRATA_ENGINE_BINARY == str(engine)
+
+    # an engine that cannot sleep is still reported as one that cannot
+    (engine.parent / "BUILD.json").write_text(json.dumps({"backend": "sycl", "sleep_mode": False}))
+    assert strata_engine.engine_sleeps() is False
+
+
 def test_an_intel_engine_folder_takes_its_gpu_reader(tmp_path, monkeypatch):
     engine = tmp_path / "engine" / "strata"
     engine.parent.mkdir()

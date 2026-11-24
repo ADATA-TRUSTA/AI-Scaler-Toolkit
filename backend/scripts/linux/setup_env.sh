@@ -1215,8 +1215,11 @@ fi
 # it (see scripts/patch_deepspeed_aio.py). This has to run after every install,
 # because `uv sync` replaces site-packages wholesale.
 DEEPSPEED_AIO_STATUS="not applicable"
-if "$PROJECT_ROOT/.venv/bin/python" -c "import deepspeed" >/dev/null 2>&1; then
-    if "$PROJECT_ROOT/.venv/bin/python" "$PROJECT_ROOT/scripts/patch_deepspeed_aio.py"; then
+# The environment the sync built, which is not ./.venv when UV_PROJECT_ENVIRONMENT names one: the
+# launcher keeps it in the per-user data directory. Looking in ./.venv there found no deepspeed and
+# reported "not applicable", so every one-click install went without the patch.
+if "$(venv_python)" -c "import deepspeed" >/dev/null 2>&1; then
+    if "$(venv_python)" "$PROJECT_ROOT/scripts/patch_deepspeed_aio.py"; then
         DEEPSPEED_AIO_STATUS="fd close patched"
     else
         # Not fatal: training still runs, it just leaks descriptors on NVMe

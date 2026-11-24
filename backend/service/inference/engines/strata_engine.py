@@ -311,7 +311,15 @@ def engine_build_info() -> dict[str, Any]:
 
     scripts/build-*.sh in strata-sleep write it, and strata_sleep.py copies it into the
     package. A hand-made install may have none, so every reader of it has a fallback.
+
+    The load runs in a worker process, and the install a first load makes is recorded in .env
+    after the API process started, so this process may still hold the empty value it read at
+    startup. Asking engine_sleeps() then said "no deep sleep" for an engine that has it, until
+    the service was restarted (F-0096). So an empty value is looked up in .env first, which is
+    where install_strata records it.
     """
+    if not STRATA_ENGINE_BINARY.strip():
+        _adopt_recorded_install()
     if not STRATA_ENGINE_BINARY.strip():
         return {}
     path = Path(STRATA_ENGINE_BINARY).expanduser().parent / "BUILD.json"
