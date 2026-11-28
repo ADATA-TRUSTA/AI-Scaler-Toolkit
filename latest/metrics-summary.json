@@ -1,16 +1,11 @@
 {
-  "generated_at": "2026-11-27T08:20:07.049Z",
+  "generated_at": "2026-11-28T07:41:01.374Z",
   "repository": "ADATA-TRUSTA/AI-Scaler-Toolkit",
   "traffic": {
     "views": {
-      "count": 141,
-      "uniques": 36,
+      "count": 128,
+      "uniques": 31,
       "views": [
-        {
-          "timestamp": "2026-11-13T00:00:00Z",
-          "count": 19,
-          "uniques": 6
-        },
         {
           "timestamp": "2026-11-14T00:00:00Z",
           "count": 0,
@@ -75,6 +70,11 @@
           "timestamp": "2026-11-26T00:00:00Z",
           "count": 15,
           "uniques": 5
+        },
+        {
+          "timestamp": "2026-11-27T00:00:00Z",
+          "count": 6,
+          "uniques": 2
         }
       ]
     },
@@ -82,11 +82,6 @@
       "count": 188,
       "uniques": 101,
       "clones": [
-        {
-          "timestamp": "2026-11-13T00:00:00Z",
-          "count": 4,
-          "uniques": 4
-        },
         {
           "timestamp": "2026-11-14T00:00:00Z",
           "count": 6,
@@ -151,6 +146,11 @@
           "timestamp": "2026-11-26T00:00:00Z",
           "count": 18,
           "uniques": 12
+        },
+        {
+          "timestamp": "2026-11-27T00:00:00Z",
+          "count": 4,
+          "uniques": 4
         }
       ]
     }
